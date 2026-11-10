@@ -1,3 +1,6 @@
+// This file contains helpers shared by Goa's code generators. The helpers
+// receive names and types chosen while a generated file is planned and return
+// the Go source inserted into that file.
 package codegen
 
 import (
@@ -8,6 +11,7 @@ import (
 	"unicode"
 
 	"goa.design/goa/v3/expr"
+	"goa.design/goa/v3/internal/codegenname"
 )
 
 type (
@@ -28,18 +32,21 @@ type (
 		FieldPointer bool
 		// FieldType is the type of the field in the struct.
 		FieldType expr.DataType
+		// FieldTypeRef is the field's final Go type name in the generated file.
+		// Callers set it when converting an argument to a named primitive type.
+		FieldTypeRef string
 	}
 )
 
 // TemplateFuncs lists common template helper functions.
-func TemplateFuncs() map[string]interface{} {
-	return map[string]interface{}{
+func TemplateFuncs() map[string]any {
+	return map[string]any{
 		"commandLine": CommandLine,
 		"comment":     Comment,
 	}
 }
 
-// CommandLine return the command used to run this process.
+// CommandLine returns the command used to run this process.
 func CommandLine() string {
 	cmdl := "goa"
 	for _, arg := range os.Args {
@@ -54,7 +61,11 @@ func CommandLine() string {
 // Comment produces line comments by concatenating the given strings and
 // producing 80 characters long lines starting with "//".
 func Comment(elems ...string) string {
-	var lines []string
+	lineCount := 0
+	for _, e := range elems {
+		lineCount += strings.Count(e, "\n") + 1
+	}
+	lines := make([]string, 0, lineCount)
 	for _, e := range elems {
 		lines = append(lines, strings.Split(e, "\n")...)
 	}
@@ -71,9 +82,9 @@ func Comment(elems ...string) string {
 // end-of-line marker is NL.
 func Indent(s, prefix string) string {
 	var (
-		res []byte
 		b   = []byte(s)
 		p   = []byte(prefix)
+		res = make([]byte, 0, len(b)+len(b)/4*len(p)) // preallocate with estimated size
 		bol = true
 	)
 	for _, c := range b {
@@ -98,82 +109,21 @@ var toLower = map[string]string{"OAuth": "oauth"}
 // If acronym is true and a part of the string is a common acronym
 // then it keeps the part capitalized (firstUpper = true)
 // (e.g. APIVersion) or lowercase (firstUpper = false) (e.g. apiVersion).
-func CamelCase(name string, firstUpper bool, acronym bool) string {
+func CamelCase(name string, firstUpper, acronym bool) string {
 	if name == "" {
 		return ""
 	}
 
-	runes := []rune(name)
-	// remove trailing invalid identifiers (makes code below simpler)
-	runes = removeTrailingInvalid(runes)
-
-	// all characters are invalid
-	if len(runes) == 0 {
-		return ""
+	// Use cache to avoid recomputing the same transformation
+	key := cacheKey{
+		input:      name,
+		firstUpper: firstUpper,
+		acronym:    acronym,
+		operation:  "camel",
 	}
-
-	w, i := 0, 0 // index of start of word, scan
-	for i+1 <= len(runes) {
-		eow := false // whether we hit the end of a word
-
-		// remove leading invalid identifiers
-		runes = removeInvalidAtIndex(i, runes)
-
-		if i+1 == len(runes) {
-			eow = true
-		} else if !validIdentifier(runes[i]) {
-			// get rid of it
-			runes = append(runes[:i], runes[i+1:]...)
-		} else if runes[i+1] == '_' {
-			// underscore; shift the remainder forward over any run of underscores
-			eow = true
-			n := 1
-			for i+n+1 < len(runes) && runes[i+n+1] == '_' {
-				n++
-			}
-			copy(runes[i+1:], runes[i+n+1:])
-			runes = runes[:len(runes)-n]
-		} else if isLower(runes[i]) && !isLower(runes[i+1]) {
-			// lower->non-lower
-			eow = true
-		}
-		i++
-		if !eow {
-			continue
-		}
-
-		// [w,i] is a word.
-		word := string(runes[w:i])
-		// is it one of our initialisms?
-		if u := strings.ToUpper(word); commonInitialisms[u] {
-			switch {
-			case firstUpper && acronym:
-				// u is already in upper case. Nothing to do here.
-			case firstUpper && !acronym:
-				u = strings.Title(strings.ToLower(u))
-			case w > 0 && !acronym:
-				u = strings.Title(strings.ToLower(u))
-			case w == 0:
-				u = strings.ToLower(u)
-			}
-
-			// All the common initialisms are ASCII,
-			// so we can replace the bytes exactly.
-			copy(runes[w:], []rune(u))
-		} else if w > 0 && strings.ToLower(word) == word {
-			// already all lowercase, and not the first word, so uppercase the first character.
-			runes[w] = unicode.ToUpper(runes[w])
-		} else if w == 0 && strings.ToLower(word) == word && firstUpper {
-			runes[w] = unicode.ToUpper(runes[w])
-		}
-		if w == 0 && !firstUpper {
-			runes[w] = unicode.ToLower(runes[w])
-		}
-		//advance to next word
-		w = i
-	}
-
-	return string(runes)
+	return globalStringCache.getCached(key, func() string {
+		return codegenname.CamelCase(name, firstUpper, acronym)
+	})
 }
 
 // SnakeCase produces the snake_case version of the given CamelCase string.
@@ -183,11 +133,16 @@ func CamelCase(name string, firstUpper bool, acronym bool) string {
 func SnakeCase(name string) string {
 	// Special handling for single "words" starting with multiple upper case letters
 	for u, l := range toLower {
-		name = strings.Replace(name, u, l, -1)
+		name = strings.ReplaceAll(name, u, l)
 	}
 
-	// Special handling for dashes to convert them into underscores
-	name = strings.Replace(name, "-", "_", -1)
+	// Remove leading and trailing blank spaces and replace any blank spaces in
+	// between with a single underscore
+	name = strings.Join(strings.Fields(name), "_")
+
+	// Special handling for dashes and slashes to convert them into underscores
+	name = strings.ReplaceAll(name, "-", "_")
+	name = strings.ReplaceAll(name, "/", "_")
 
 	var b bytes.Buffer
 	ln := len(name)
@@ -196,7 +151,7 @@ func SnakeCase(name string) string {
 	}
 	n := rune(name[0])
 	b.WriteRune(unicode.ToLower(n))
-	lastLower, isLower, lastUnder, isUnder := false, true, false, false
+	var lastLower, isLower, lastUnder, isUnder bool
 	for i := 1; i < ln; i++ {
 		r := rune(name[i])
 		isLower = unicode.IsLower(r) && unicode.IsLetter(r) || unicode.IsDigit(r)
@@ -225,7 +180,7 @@ func KebabCase(name string) string {
 	if name[ln-1] == '_' {
 		name = name[:ln-1]
 	}
-	return strings.Replace(name, "_", "-", -1)
+	return strings.ReplaceAll(name, "_", "-")
 }
 
 // WrapText produces lines with text capped at maxChars
@@ -270,7 +225,7 @@ func InitStructFields(args []*InitArgData, targetVar, sourcePkg, targetPkg strin
 		switch {
 		case arg.FieldName == "" && arg.FieldType == nil:
 		// do nothing
-		case expr.Equal(arg.Type, arg.FieldType):
+		case expr.Equal(unalias(arg.Type), arg.FieldType):
 			// arg type and struct field type are the same. No need to call transform
 			// to initialize the field
 			deref := ""
@@ -280,17 +235,25 @@ func InitStructFields(args []*InitArgData, targetVar, sourcePkg, targetPkg strin
 			code += fmt.Sprintf("%s.%s = %s%s\n", targetVar, arg.FieldName, deref, arg.Name)
 		case expr.IsPrimitive(arg.FieldType):
 			// aliased primitive type
-			t := scope.GoFullTypeRef(&expr.AttributeExpr{Type: arg.FieldType}, targetPkg)
+			if arg.FieldTypeRef == "" {
+				return "", helpers, fmt.Errorf("initialize field %q: missing final field type reference", arg.FieldName)
+			}
+			t := arg.FieldTypeRef
 			cast := fmt.Sprintf("%s(%s)", t, arg.Name)
 			if arg.Pointer {
+				code += "if " + arg.Name + " != nil {\n"
 				cast = fmt.Sprintf("%s(*%s)", t, arg.Name)
 			}
-			if arg.FieldPointer {
+			switch {
+			case arg.FieldPointer:
 				code += fmt.Sprintf("tmp%s := %s\n%s.%s = &tmp%s\n", arg.Name, cast, targetVar, arg.FieldName, arg.Name)
-			} else if arg.FieldName != "" {
+			case arg.FieldName != "":
 				code += fmt.Sprintf("%s.%s = %s\n", targetVar, arg.FieldName, cast)
-			} else {
+			default:
 				code += fmt.Sprintf("%s := %s\n", targetVar, cast)
+			}
+			if arg.Pointer {
+				code += "}\n"
 			}
 		default:
 			srcctx := NewAttributeContext(arg.Pointer, false, true, sourcePkg, scope)
@@ -308,6 +271,18 @@ func InitStructFields(args []*InitArgData, targetVar, sourcePkg, targetPkg strin
 	return code, helpers, nil
 }
 
+// Get the underlying primitive type of a aliased type or return the type itself
+// if not aliased.
+func unalias(dt expr.DataType) expr.DataType {
+	if ut, ok := dt.(expr.UserType); ok {
+		if _, ok := ut.Attribute().Type.(expr.Primitive); ok {
+			return ut.Attribute().Type
+		}
+		return unalias(ut.Attribute().Type)
+	}
+	return dt
+}
+
 func runeSpacePosRev(r []rune) int {
 	for i := len(r) - 1; i > 0; i-- {
 		if unicode.IsSpace(r[i]) {
@@ -318,84 +293,10 @@ func runeSpacePosRev(r []rune) int {
 }
 
 func runeSpacePos(r []rune) int {
-	for i := 0; i < len(r); i++ {
+	for i := range r {
 		if unicode.IsSpace(r[i]) {
 			return i
 		}
 	}
 	return len(r)
 }
-
-// isLower returns true if the character is considered a lower case character
-// when transforming word into CamelCase.
-func isLower(r rune) bool {
-	return unicode.IsDigit(r) || unicode.IsLower(r)
-}
-
-// validIdentifier returns true if the rune is a letter or number
-func validIdentifier(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r)
-}
-
-// removeTrailingInvalid removes trailing invalid identifiers from runes.
-func removeTrailingInvalid(runes []rune) []rune {
-	valid := len(runes) - 1
-	for ; valid >= 0 && !validIdentifier(runes[valid]); valid-- {
-	}
-
-	return runes[0 : valid+1]
-}
-
-// removeInvalidAtIndex removes consecutive invalid identifiers from runes starting at index i.
-func removeInvalidAtIndex(i int, runes []rune) []rune {
-	valid := i
-	for ; valid < len(runes) && !validIdentifier(runes[valid]); valid++ {
-	}
-
-	return append(runes[:i], runes[valid:]...)
-}
-
-var (
-	// common words who need to keep their
-	commonInitialisms = map[string]bool{
-		"API":   true,
-		"ASCII": true,
-		"CPU":   true,
-		"CSS":   true,
-		"DNS":   true,
-		"EOF":   true,
-		"GUID":  true,
-		"HTML":  true,
-		"HTTP":  true,
-		"HTTPS": true,
-		"ID":    true,
-		"IP":    true,
-		"JMES":  true,
-		"JSON":  true,
-		"JWT":   true,
-		"LHS":   true,
-		"OK":    true,
-		"QPS":   true,
-		"RAM":   true,
-		"RHS":   true,
-		"RPC":   true,
-		"SLA":   true,
-		"SMTP":  true,
-		"SQL":   true,
-		"SSH":   true,
-		"TCP":   true,
-		"TLS":   true,
-		"TTL":   true,
-		"UDP":   true,
-		"UI":    true,
-		"UID":   true,
-		"UUID":  true,
-		"URI":   true,
-		"URL":   true,
-		"UTF8":  true,
-		"VM":    true,
-		"XML":   true,
-		"XSRF":  true,
-		"XSS":   true,
-	}
-)

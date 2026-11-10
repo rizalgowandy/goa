@@ -1,10 +1,12 @@
+// This file combines schema fields for generator callers. Minimum and maximum
+// counts keep the same widening rule as the existing string and array bounds.
 package openapi
 
 import "reflect"
 
 // mergeItems is an internal datatype used to merge two schemas.
 type mergeItems []struct {
-	a, b   interface{}
+	a, b   any
 	needed bool
 }
 
@@ -26,9 +28,9 @@ func (s *Schema) Merge(other *Schema) {
 		}
 	}
 
-	for n, d := range other.Definitions {
-		if _, ok := s.Definitions[n]; !ok {
-			s.Definitions[n] = d
+	for n, d := range other.Defs {
+		if _, ok := s.Defs[n]; !ok {
+			s.Defs[n] = d
 		}
 	}
 
@@ -47,6 +49,7 @@ func (s *Schema) createMergeItems(other *Schema) mergeItems {
 		{&s.Type, other.Type, s.Type == ""},
 		{&s.Ref, other.Ref, s.Ref == ""},
 		{&s.Items, other.Items, s.Items == nil},
+		{&s.AnyOf, other.AnyOf, s.AnyOf == nil},
 		{&s.DefaultValue, other.DefaultValue, s.DefaultValue == nil},
 		{&s.Title, other.Title, s.Title == ""},
 		{&s.Media, other.Media, s.Media == nil},
@@ -62,5 +65,7 @@ func (s *Schema) createMergeItems(other *Schema) mergeItems {
 		{&s.MaxLength, other.MaxLength, maxInt(s.MaxLength, other.MaxLength)},
 		{&s.MinItems, other.MinItems, minInt(s.MinItems, other.MinItems)},
 		{&s.MaxItems, other.MaxItems, maxInt(s.MaxItems, other.MaxItems)},
+		{&s.MinProperties, other.MinProperties, minInt(s.MinProperties, other.MinProperties)},
+		{&s.MaxProperties, other.MaxProperties, maxInt(s.MaxProperties, other.MaxProperties)},
 	}
 }

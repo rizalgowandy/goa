@@ -9,7 +9,7 @@ import (
 func TestFixedSampler(t *testing.T) {
 	// 0 %
 	subject := NewFixedSampler(0)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if subject.Sample() {
 			t.Errorf("%d: Sample() returned true for 0%%", i)
 		}
@@ -17,17 +17,26 @@ func TestFixedSampler(t *testing.T) {
 
 	// 100 %
 	subject = NewFixedSampler(100)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if !subject.Sample() {
 			t.Errorf("%d: Sample() returned false for 100%%", i)
 		}
 	}
 
 	// 50 %
-	rand.Seed(123) // set seed for reproducibility.
+
+	// set seed for reproducibility.
+	rnd := rand.New(rand.NewSource(123))
+	intn = func(n int) int {
+		return rnd.Intn(n)
+	}
+	defer func() {
+		intn = rand.Intn
+	}()
+
 	trueCount := 0
 	subject = NewFixedSampler(33)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if subject.Sample() {
 			trueCount++
 		}
@@ -39,7 +48,7 @@ func TestFixedSampler(t *testing.T) {
 	// 66 %
 	trueCount = 0
 	subject = NewFixedSampler(66)
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if subject.Sample() {
 			trueCount++
 		}
@@ -52,15 +61,23 @@ func TestFixedSampler(t *testing.T) {
 func TestAdaptiveSampler(t *testing.T) {
 	// initial sampling
 	subject := NewAdaptiveSampler(1, 100)
-	for i := 0; i < 99; i++ {
+	for i := range 99 {
 		if !subject.Sample() {
 			t.Errorf("%d: Sample() returned false before reaching sample size", i)
 		}
 	}
 
+	// set seed for reproducibility.
+	rnd := rand.New(rand.NewSource(123))
+	intn = func(n int) int {
+		return rnd.Intn(n)
+	}
+	defer func() {
+		intn = rand.Intn
+	}()
+
 	// change start time to 1s ago for a more predictable result.
 	trueCount := 0
-	rand.Seed(123) // set seed for reproducibility.
 	now := time.Now()
 	subject.(*adaptiveSampler).start = now.Add(-time.Second)
 	for i := 99; i < 199; i++ {

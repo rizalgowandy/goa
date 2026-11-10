@@ -1,0 +1,35 @@
+package codegen
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"goa.design/goa/v3/codegen"
+	"goa.design/goa/v3/grpc/codegen/testdata"
+)
+
+func TestIdempotentRPCCodegen(t *testing.T) {
+	root := RunGRPCDSL(t, testdata.IdempotentRPCsDSL)
+	services := CreateGRPCServices(root)
+
+	protoFiles := protoFiles(services)
+	require.Len(t, protoFiles, 1)
+	protoCode := sectionCode(t, protoFiles[0].SectionTemplates[1:]...)
+	assert.Equal(t, 2, strings.Count(protoCode, "option idempotency_level = IDEMPOTENT;"))
+	protoPath := codegen.CreateTempFile(t, protoCode)
+	assert.NoError(t, protoc(defaultProtocCmd, protoPath))
+
+	clientFiles := clientFiles(services)
+	require.Len(t, clientFiles, 2)
+	clientCode := codegen.SectionsCode(t, clientFiles[0].Section("client-endpoint-init"))
+	assert.Contains(t, clientCode, `goa.RetryEndpoint(rpc, "busy")(ctx, request)`)
+	assert.Equal(t, 1, strings.Count(clientCode, "goa.RetryEndpoint("))
+	contextErrorIndex := strings.Index(clientCode, "goagrpc.ContextError(ctx, err)")
+	transportErrorIndex := strings.Index(clientCode, "goagrpc.NewTransportError(err)")
+	require.NotEqual(t, -1, contextErrorIndex)
+	require.NotEqual(t, -1, transportErrorIndex)
+	assert.Less(t, contextErrorIndex, transportErrorIndex)
+}

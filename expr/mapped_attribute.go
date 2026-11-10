@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"maps"
 	"strings"
 )
 
@@ -48,23 +49,78 @@ func NewMappedAttributeExpr(att *AttributeExpr) *MappedAttributeExpr {
 			validation = val.Dup()
 		}
 	}
+	attr := DupAtt(att)
+	attr.Validation = validation
 	ma := &MappedAttributeExpr{
-		AttributeExpr: &AttributeExpr{
-			Type:         Dup(att.Type),
-			References:   att.References,
-			Bases:        att.Bases,
-			Description:  att.Description,
-			Docs:         att.Docs,
-			Meta:         att.Meta,
-			DefaultValue: att.DefaultValue,
-			UserExamples: att.UserExamples,
-			Validation:   validation,
-		},
-		nameMap:    nameMap,
-		reverseMap: reverseMap,
+		AttributeExpr: attr,
+		nameMap:       nameMap,
+		reverseMap:    reverseMap,
 	}
 	ma.Remap()
 	return ma
+}
+
+// NewShallowMappedAttributeExpr creates a mapped attribute expression that
+// copies only the top-level object attribute and its immediate field slice
+// without deep-copying nested attributes or metadata. If multiple immediate
+// fields reference distinct copies of the same UserType origin, later fields
+// reuse the first seen UserType so default lookups match DupAtt semantics.
+func NewShallowMappedAttributeExpr(att *AttributeExpr) *MappedAttributeExpr {
+	if att == nil {
+		return NewEmptyMappedAttributeExpr()
+	}
+	srcObj := AsObject(att.Type)
+	if srcObj == nil {
+		panic("cannot create a mapped attribute with a non object attribute") // bug
+	}
+	var (
+		nameMap    = make(map[string]string)
+		reverseMap = make(map[string]string)
+		seenUTs    map[UserType]UserType
+		mappedObj  = make(Object, 0, len(*srcObj))
+	)
+	for _, nat := range *srcObj {
+		elems := strings.Split(nat.Name, ":")
+		fieldName := elems[0]
+		if len(elems) > 1 {
+			nameMap[fieldName] = elems[1]
+			reverseMap[elems[1]] = fieldName
+		}
+		fieldAttr := nat.Attribute
+		if fieldAttr != nil {
+			if ut, ok := fieldAttr.Type.(UserType); ok {
+				if seenUTs == nil {
+					seenUTs = make(map[UserType]UserType, len(*srcObj))
+				}
+				origin := ut.Origin()
+				if first, exists := seenUTs[origin]; exists {
+					if first != ut {
+						copied := *fieldAttr
+						copied.Type = first
+						fieldAttr = &copied
+					}
+				} else {
+					seenUTs[origin] = ut
+				}
+			}
+		}
+		mappedObj.Set(fieldName, fieldAttr)
+	}
+	shallow := *att
+	if att.Validation != nil {
+		shallow.Validation = att.Validation.Dup()
+	} else if ut, ok := att.Type.(UserType); ok {
+		if val := ut.Attribute().Validation; val != nil {
+			shallow.Validation = val.Dup()
+		}
+	}
+	shallow.UserExamples = shallow.ExtractUserExamples()
+	shallow.Type = &mappedObj
+	return &MappedAttributeExpr{
+		AttributeExpr: &shallow,
+		nameMap:       nameMap,
+		reverseMap:    reverseMap,
+	}
 }
 
 // Remap recomputes the name mappings from the inner attribute. Use this if
@@ -85,7 +141,7 @@ func (ma *MappedAttributeExpr) Remap() {
 	}
 
 	// Conserve examples defined on user type
-	ma.AttributeExpr.UserExamples = ma.ExtractUserExamples()
+	ma.UserExamples = ma.ExtractUserExamples()
 
 	ma.Type = n
 }
@@ -94,12 +150,8 @@ func (ma *MappedAttributeExpr) Remap() {
 func DupMappedAtt(ma *MappedAttributeExpr) *MappedAttributeExpr {
 	nameMap := make(map[string]string, len(ma.nameMap))
 	reverseMap := make(map[string]string, len(ma.reverseMap))
-	for k, v := range ma.nameMap {
-		nameMap[k] = v
-	}
-	for k, v := range ma.reverseMap {
-		reverseMap[k] = v
-	}
+	maps.Copy(nameMap, ma.nameMap)
+	maps.Copy(reverseMap, ma.reverseMap)
 	return &MappedAttributeExpr{
 		AttributeExpr: DupAtt(ma.AttributeExpr),
 		nameMap:       nameMap,

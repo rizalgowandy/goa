@@ -39,31 +39,30 @@ var resultTypeCount int
 //
 // Example:
 //
-//    var BottleMT = ResultType("application/vnd.goa.example.bottle", "BottleResult", func() {
-//        Description("A bottle of wine")
+//	var BottleMT = ResultType("application/vnd.goa.example.bottle", "BottleResult", func() {
+//	    Description("A bottle of wine")
 //
-//        Attributes(func() {
-//            Attribute("id", Int, "ID of bottle")
-//            Attribute("href", String, "API href of bottle")
-//            Attribute("account", Account, "Owner account")
-//            Attribute("origin", Origin, "Details on wine origin")
-//            Required("id", "href")
-//        })
+//	    Attributes(func() {
+//	        Attribute("id", Int, "ID of bottle")
+//	        Attribute("href", String, "API href of bottle")
+//	        Attribute("account", Account, "Owner account")
+//	        Attribute("origin", Origin, "Details on wine origin")
+//	        Required("id", "href")
+//	    })
 //
-//        View("default", func() {        // Explicitly define default view
-//            Attribute("id")
-//            Attribute("href")
-//        })
+//	    View("default", func() {        // Explicitly define default view
+//	        Attribute("id")
+//	        Attribute("href")
+//	    })
 //
-//        View("extended", func() {       // Define "extended" view
-//            Attribute("id")
-//            Attribute("href")
-//            Attribute("account")
-//            Attribute("origin")
-//        })
-//     })
-//
-func ResultType(identifier string, args ...interface{}) *expr.ResultTypeExpr {
+//	    View("extended", func() {       // Define "extended" view
+//	        Attribute("id")
+//	        Attribute("href")
+//	        Attribute("account")
+//	        Attribute("origin")
+//	    })
+//	 })
+func ResultType(identifier string, args ...any) *expr.ResultTypeExpr {
 	if _, ok := eval.Current().(eval.TopExpr); !ok {
 		eval.IncompatibleDSL()
 		return nil
@@ -99,26 +98,28 @@ func ResultType(identifier string, args ...interface{}) *expr.ResultTypeExpr {
 					eval.InvalidArgError("function", args[1])
 				}
 				if len(args) > 2 {
-					eval.ReportError("too many arguments")
+					eval.TooManyArgError()
+					return nil
 				}
 			}
 		}
 	}
 	canonicalID := expr.CanonicalIdentifier(identifier)
 	// Validate that result type identifier doesn't clash
-	for _, rt := range expr.Root.ResultTypes {
-		if re := rt.(*expr.ResultTypeExpr); re.Identifier == canonicalID {
+	for _, rt := range *expr.GeneratedResultTypes {
+		if rt.Identifier == canonicalID {
 			eval.ReportError(
 				"result type %#v with canonical identifier %#v is defined twice",
 				identifier, canonicalID)
 			return nil
 		}
 	}
-	// Now save the type in the API result types map
-	mt := expr.NewResultTypeExpr(typeName, identifier, fn)
-	expr.Root.ResultTypes = append(expr.Root.ResultTypes, mt)
+	// Add the type to the generated types root for later evaluation.
+	rt := expr.NewResultTypeExpr(typeName, identifier, fn)
+	rt.Meta = expr.MetaExpr{"openapi:typename": []string{typeName}}
+	expr.Root.ResultTypes = append(expr.Root.ResultTypes, rt)
 
-	return mt
+	return rt
 }
 
 // TypeName makes it possible to set the Go struct name for a type or result
@@ -127,13 +128,19 @@ func ResultType(identifier string, args ...interface{}) *expr.ResultTypeExpr {
 // This function makes it possible to override that and provide a custom name.
 // name must be a valid Go identifier.
 //
-// TypeName must appear in a Type or ResultType expression.
+// TypeName must appear in a Type, ResultType, or OneOf expression. In a OneOf
+// expression it changes the generated Go union name without changing the
+// attribute name used by transports.
 func TypeName(name string) {
 	switch e := eval.Current().(type) {
 	case expr.UserType:
 		e.Rename(name)
 	case *expr.AttributeExpr:
-		e.AddMeta("struct:type:name", name)
+		if union, ok := e.Type.(*expr.Union); ok {
+			union.TypeName = name
+		} else {
+			e.AddMeta("struct:type:name", name)
+		}
 	default:
 		eval.IncompatibleDSL()
 	}
@@ -165,80 +172,84 @@ func TypeName(name string) {
 //
 // Examples:
 //
-//    // MyResultType defines 2 views.
-//    var MyResultType = ResultType("application/vnd.goa.my", func() {
-//        Attributes(func() {
-//            Attribute("id", String)
-//            Attribute("name", String)
-//            Attribute("origin", OriginResult)
-//        })
+//	// MyResultType defines 2 views.
+//	var MyResultType = ResultType("application/vnd.goa.my", func() {
+//	    Attributes(func() {
+//	        Attribute("id", String)
+//	        Attribute("name", String)
+//	        Attribute("origin", OriginResult)
+//	    })
 //
-//        View("default", func() {
-//            // "id" and "name" must be result type attributes
-//            Attribute("id")
-//            Attribute("name")
-//        })
+//	    View("default", func() {
+//	        // "id" and "name" must be result type attributes
+//	        Attribute("id")
+//	        Attribute("name")
+//	    })
 //
-//        View("extended", func() {
-//            Attribute("id")
-//            Attribute("name")
-//            Attribute("origin", func() {
-//                // Use view "extended" to render attribute "origin"
-//                View("extended")
-//            })
-//        })
-//    })
+//	    View("extended", func() {
+//	        Attribute("id")
+//	        Attribute("name")
+//	        Attribute("origin", func() {
+//	            // Use view "extended" to render attribute "origin"
+//	            View("extended")
+//	        })
+//	    })
+//	})
 //
-//    // MyMethod uses the extended view of MyResultType to marshal the
-//    // response.
-//    var _ = Service("MyService", func() {
-//        Method("MyMethod", func() {
-//            Result(MyResultType, func() { View("extended") })
-//            GRPC(func() {})
-//        })
-//    })
-//
+//	// MyMethod uses the extended view of MyResultType to marshal the
+//	// response.
+//	var _ = Service("MyService", func() {
+//	    Method("MyMethod", func() {
+//	        Result(MyResultType, func() { View("extended") })
+//	        GRPC(func() {})
+//	    })
+//	})
 func View(name string, adsl ...func()) {
-	switch e := eval.Current().(type) {
-	case *expr.ResultTypeExpr:
-		mt := e
-		if mt.View(name) != nil {
-			eval.ReportError("multiple expressions for view %#v in result type %#v", name, mt.TypeName)
-			return
+	if adsl == nil {
+		switch e := eval.Current().(type) {
+		case *expr.ResultTypeExpr:
+			e.AddMeta(expr.ViewMetaKey, name)
+		case *expr.AttributeExpr:
+			e.AddMeta(expr.ViewMetaKey, name)
+		default:
+			eval.IncompatibleDSL()
 		}
-		at := &expr.AttributeExpr{}
-		ok := false
-		if len(adsl) > 0 {
-			ok = eval.Execute(adsl[0], at)
-		} else if a, ok := mt.Type.(*expr.Array); ok {
-			// inherit view from collection element if present
-			elem := a.ElemType
-			if elem != nil {
-				if pa, ok2 := elem.Type.(*expr.ResultTypeExpr); ok2 {
-					if v := pa.View(name); v != nil {
-						at = v.AttributeExpr
-						ok = true
-					} else {
-						eval.ReportError("unknown view %#v", name)
-						return
-					}
+		return
+	}
+	rt, ok := eval.Current().(*expr.ResultTypeExpr)
+	if !ok {
+		eval.IncompatibleDSL()
+		return
+	}
+	if rt.View(name) != nil {
+		eval.ReportError("view %q is defined multiple times in result type %q", name, rt.TypeName)
+		return
+	}
+	at := &expr.AttributeExpr{}
+	ok = false
+	if len(adsl) > 0 {
+		ok = eval.Execute(adsl[0], at)
+	} else if a, ok := rt.Type.(*expr.Array); ok {
+		// inherit view from collection element if present
+		if elem := a.ElemType; elem != nil {
+			if pa, ok2 := elem.Type.(*expr.ResultTypeExpr); ok2 {
+				if v := pa.View(name); v != nil {
+					at = v.AttributeExpr
+					rt = pa
+				} else {
+					eval.ReportError("unknown view %#v", name)
+					return
 				}
 			}
 		}
-		if ok {
-			view, err := buildView(name, mt, at)
-			if err != nil {
-				eval.ReportError(err.Error())
-				return
-			}
-			mt.Views = append(mt.Views, view)
+	}
+	if ok {
+		view, err := buildView(name, rt, at)
+		if err != nil {
+			eval.ReportError(err.Error())
+			return
 		}
-
-	case *expr.AttributeExpr:
-		e.AddMeta("view", name)
-
-	default:
-		eval.IncompatibleDSL()
+		rt.Views = append(rt.Views, view)
 	}
 }
 
@@ -258,44 +269,43 @@ func View(name string, adsl ...func()) {
 //
 // Example:
 //
-//     var DivisionResult = ResultType("application/vnd.goa.divresult", func() {
-//         Attributes(func() {
-//             Attribute("value", Float64)
-//             Attribute("remainder", Int)
-//         })
-//         View("default", func() {
-//             Attribute("value")
-//             Attribute("remainder")
-//         })
-//         View("tiny", func() {
-//             Attribute("value")
-//         })
-//     })
+//	var DivisionResult = ResultType("application/vnd.goa.divresult", func() {
+//	    Attributes(func() {
+//	        Attribute("value", Float64)
+//	        Attribute("remainder", Int)
+//	    })
+//	    View("default", func() {
+//	        Attribute("value")
+//	        Attribute("remainder")
+//	    })
+//	    View("tiny", func() {
+//	        Attribute("value")
+//	    })
+//	})
 //
-//     var MultiResults = CollectionOf(DivisionResult)
+//	var MultiResults = CollectionOf(DivisionResult)
 //
-//     var TinyMultiResults = CollectionOf(DivisionResult, func() {
-//         View("tiny")  // use "tiny" view to render the collection elements
-//     })
+//	var TinyMultiResults = CollectionOf(DivisionResult, func() {
+//	    View("tiny")  // use "tiny" view to render the collection elements
+//	})
 //
-//     var MultiResultsExample = CollectionOf(DivisionResult, func() {
-//         Attributes(func() {
-//             Example("DivisionResult Collection Examples", func() {
-//                 Value([]Val{
-//                     {
-//                         "value":    4.167,
-//                         "reminder": 0,
-//                     },
-//                     {
-//                         "value":    3.0,
-//                         "reminder": 0,
-//                     },
-//                 })
-//             })
-//         })
-//     })
-//
-func CollectionOf(v interface{}, adsl ...func()) *expr.ResultTypeExpr {
+//	var MultiResultsExample = CollectionOf(DivisionResult, func() {
+//	    Attributes(func() {
+//	        Example("DivisionResult Collection Examples", func() {
+//	            Value([]Val{
+//	                {
+//	                    "value":     4.167,
+//	                    "remainder": 0,
+//	                },
+//	                {
+//	                    "value":     3.0,
+//	                    "remainder": 0,
+//	                },
+//	            })
+//	        })
+//	    })
+//	})
+func CollectionOf(v any, adsl ...func()) *expr.ResultTypeExpr {
 	var m *expr.ResultTypeExpr
 	var ok bool
 	m, ok = v.(*expr.ResultTypeExpr)
@@ -344,11 +354,11 @@ func CollectionOf(v interface{}, adsl ...func()) *expr.ResultTypeExpr {
 	}
 	id = mime.FormatMediaType(rtype, params)
 	canonical := expr.CanonicalIdentifier(id)
-	if mt := expr.Root.GeneratedResultType(canonical); mt != nil {
+	if mt := expr.GeneratedResultType(canonical); mt != nil {
 		// Already have a type for this collection, reuse it.
 		return mt
 	}
-	mt := expr.NewResultTypeExpr("", id, func() {
+	rt := expr.NewResultTypeExpr("", id, func() {
 		rt, ok := eval.Current().(*expr.ResultTypeExpr)
 		if !ok {
 			eval.IncompatibleDSL()
@@ -367,16 +377,13 @@ func CollectionOf(v interface{}, adsl ...func()) *expr.ResultTypeExpr {
 			// at all) then inherit the views from the collection
 			// element.
 			rt.Views = make([]*expr.ViewExpr, len(m.Views))
-			for i, v := range m.Views {
-				v := v
-				rt.Views[i] = v
-			}
+			copy(rt.Views, m.Views)
 		}
 	})
 	// do not execute the DSL right away, will be done last to make sure
 	// the element DSL has run first.
-	*expr.Root.GeneratedTypes = append(*expr.Root.GeneratedTypes, mt)
-	return mt
+	expr.GeneratedResultTypes.Append(rt)
+	return rt
 }
 
 // Reference sets a type or result type reference. The value itself can be a
@@ -415,7 +422,6 @@ func CollectionOf(v interface{}, adsl ...func()) *expr.ResultTypeExpr {
 //			Attribute("vintage")
 //		})
 //	})
-//
 func Reference(t expr.DataType) {
 	if !expr.IsObject(t) {
 		eval.ReportError("argument of Reference must be an object, got %s", t.Name())
@@ -439,20 +445,19 @@ func Reference(t expr.DataType) {
 //
 // Example:
 //
-//    var CreateBottlePayload = Type("CreateBottlePayload", func() {
-//       Attribute("name", String, func() {
-//          MinLength(3)
-//       })
-//       Attribute("vintage", Int32, func() {
-//          Minimum(1970)
-//       })
-//    })
+//	var CreateBottlePayload = Type("CreateBottlePayload", func() {
+//	   Attribute("name", String, func() {
+//	      MinLength(3)
+//	   })
+//	   Attribute("vintage", Int32, func() {
+//	      Minimum(1970)
+//	   })
+//	})
 //
-//    var UpdateBottlePayload = Type("UpatePayload", func() {
-//        Attribute("id", String, "ID of bottle to update")
-//        Extend(CreateBottlePayload) // Adds attributes "name" and "vintage"
-//    })
-//
+//	var UpdateBottlePayload = Type("UpdatePayload", func() {
+//	    Attribute("id", String, "ID of bottle to update")
+//	    Extend(CreateBottlePayload) // Adds attributes "name" and "vintage"
+//	})
 func Extend(t expr.DataType) {
 	if !expr.IsObject(t) {
 		eval.ReportError("argument of Extend must be an object, got %s", t.Name())
@@ -499,7 +504,7 @@ func mediaTypeToResultType(identifier string) (string, string, error) {
 	lastPart = strings.TrimPrefix(lastPart, "vnd.")
 	elems := strings.Split(lastPart, ".")
 	for i, e := range elems {
-		elems[i] = strings.Title(e)
+		elems[i] = expr.Title(e)
 	}
 	typeName := strings.Join(elems, "")
 	if typeName == "" {
@@ -524,9 +529,9 @@ func buildView(name string, mt *expr.ResultTypeExpr, at *expr.AttributeExpr) (*e
 		n := nat.Name
 		cat := nat.Attribute
 		if existing := mt.Find(n); existing != nil {
-			dup := expr.DupAtt(existing)
-			if _, ok := cat.Meta["view"]; ok {
-				dup.AddMeta("view", cat.Meta["view"]...)
+			dup := expr.DupAttForDSL(existing)
+			if v, ok := cat.Meta.Last(expr.ViewMetaKey); ok {
+				dup.AddMeta("view", v)
 			}
 			o.Set(n, dup)
 		} else if n != "links" {

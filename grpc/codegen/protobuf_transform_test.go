@@ -1,10 +1,17 @@
+// This file verifies generated transformations between service values and
+// protobuf messages.
 package codegen
 
 import (
 	"testing"
 
+	"goa.design/goa/v3/codegen/testutil"
+
+	"github.com/stretchr/testify/require"
+
 	"goa.design/goa/v3/codegen"
 	ctestdata "goa.design/goa/v3/codegen/testdata"
+	d "goa.design/goa/v3/dsl"
 	"goa.design/goa/v3/expr"
 )
 
@@ -41,89 +48,120 @@ func TestProtoBufTransform(t *testing.T) {
 		resultType = root.UserType("ResultType")
 		rtCol      = root.UserType("ResultTypeCollection")
 
+		simpleOneOf    = root.UserType("SimpleOneOf")
+		embeddedOneOf  = root.UserType("EmbeddedOneOf")
+		recursiveOneOf = root.UserType("RecursiveOneOf")
+
+		pkgOverride = root.UserType("CompositePkgOverride")
+
 		// attribute contexts used in test cases
-		svcCtx = serviceTypeContext("", sd.Scope)
-		ptrCtx = pointerContext("", sd.Scope)
-		pbCtx  = protoBufTypeContext("", sd.Scope)
+		svcCtx = codegen.NewAttributeContext(false, false, true, "proto", sd.Scope)
+		ptrCtx = pointerContext("proto", sd.Scope)
 	)
 
+	// gRPC does not support any
+	obj := expr.AsObject(defaults)
+	for _, nat := range *obj {
+		if nat.Name == "any" {
+			nat.Attribute.Type = expr.String
+		}
+		if nat.Name == "required_any" {
+			nat.Attribute.Type = expr.String
+		}
+	}
 	tc := map[string][]struct {
 		Name    string
 		Source  expr.DataType
 		Target  expr.DataType
 		ToProto bool
 		Ctx     *codegen.AttributeContext
-		Code    string
 	}{
 		// test cases to transform service type to protocol buffer type
 		"to-protobuf-type": {
-			{"primitive-to-primitive", primitive, primitive, true, svcCtx, primitiveSvcToPrimitiveProtoCode},
-			{"simple-to-simple", simple, simple, true, svcCtx, simpleSvcToSimpleProtoCode},
-			{"simple-to-required", simple, required, true, svcCtx, simpleSvcToRequiredProtoCode},
-			{"required-to-simple", required, simple, true, svcCtx, requiredSvcToSimpleProtoCode},
-			{"simple-to-default", simple, defaultT, true, svcCtx, simpleSvcToDefaultProtoCode},
-			{"default-to-simple", defaultT, simple, true, svcCtx, defaultSvcToSimpleProtoCode},
-			{"required-ptr-to-simple", required, simple, true, ptrCtx, requiredPtrSvcToSimpleProtoCode},
-			{"simple-to-customtype", customtype, simple, true, svcCtx, customSvcToSimpleProtoCode},
-			{"customtype-to-customtype", customtype, customtype, true, svcCtx, customSvcToCustomProtoCode},
+			{"primitive-to-primitive", primitive, primitive, true, svcCtx},
+			{"simple-to-simple", simple, simple, true, svcCtx},
+			{"simple-to-required", simple, required, true, svcCtx},
+			{"required-to-simple", required, simple, true, svcCtx},
+			{"simple-to-default", simple, defaultT, true, svcCtx},
+			{"default-to-simple", defaultT, simple, true, svcCtx},
+			{"required-ptr-to-simple", required, simple, true, ptrCtx},
+			{"simple-to-customtype", customtype, simple, true, svcCtx},
+			{"customtype-to-customtype", customtype, customtype, true, svcCtx},
 
 			// maps
-			{"map-to-map", simpleMap, simpleMap, true, svcCtx, simpleMapSvcToSimpleMapProtoCode},
-			{"nested-map-to-nested-map", nestedMap, nestedMap, true, svcCtx, nestedMapSvcToNestedMapProtoCode},
-			{"array-map-to-array-map", arrayMap, arrayMap, true, svcCtx, arrayMapSvcToArrayMapProtoCode},
-			{"default-map-to-default-map", defaultMap, defaultMap, true, svcCtx, defaultMapSvcToDefaultMapProtoCode},
+			{"map-to-map", simpleMap, simpleMap, true, svcCtx},
+			{"nested-map-to-nested-map", nestedMap, nestedMap, true, svcCtx},
+			{"array-map-to-array-map", arrayMap, arrayMap, true, svcCtx},
+			{"default-map-to-default-map", defaultMap, defaultMap, true, svcCtx},
 
 			// arrays
-			{"array-to-array", simpleArray, simpleArray, true, svcCtx, simpleArraySvcToSimpleArrayProtoCode},
-			{"nested-array-to-nested-array", nestedArray, nestedArray, true, svcCtx, nestedArraySvcToNestedArrayProtoCode},
-			{"type-array-to-type-array", typeArray, typeArray, true, svcCtx, typeArraySvcToTypeArrayProtoCode},
-			{"map-array-to-map-array", mapArray, mapArray, true, svcCtx, mapArraySvcToMapArrayProtoCode},
-			{"default-array-to-default-array", defaultArray, defaultArray, true, svcCtx, defaultArraySvcToDefaultArrayProtoCode},
+			{"array-to-array", simpleArray, simpleArray, true, svcCtx},
+			{"nested-array-to-nested-array", nestedArray, nestedArray, true, svcCtx},
+			{"type-array-to-type-array", typeArray, typeArray, true, svcCtx},
+			{"map-array-to-map-array", mapArray, mapArray, true, svcCtx},
+			{"default-array-to-default-array", defaultArray, defaultArray, true, svcCtx},
 
-			{"recursive-to-recursive", recursive, recursive, true, svcCtx, recursiveSvcToRecursiveProtoCode},
-			{"composite-to-custom-field", composite, customField, true, svcCtx, compositeSvcToCustomFieldProtoCode},
-			{"custom-field-to-composite", customField, composite, true, svcCtx, customFieldSvcToCompositeProtoCode},
-			{"result-type-to-result-type", resultType, resultType, true, svcCtx, resultTypeSvcToResultTypeProtoCode},
-			{"result-type-collection-to-result-type-collection", rtCol, rtCol, true, svcCtx, rtColSvcToRTColProtoCode},
-			{"optional-to-optional", optional, optional, true, svcCtx, optionalSvcToOptionalProtoCode},
-			{"defaults-to-defaults", defaults, defaults, true, svcCtx, defaultsSvcToDefaultsProtoCode},
+			{"recursive-to-recursive", recursive, recursive, true, svcCtx},
+			{"composite-to-custom-field", composite, customField, true, svcCtx},
+			{"custom-field-to-composite", customField, composite, true, svcCtx},
+			{"result-type-to-result-type", resultType, resultType, true, svcCtx},
+			{"result-type-collection-to-result-type-collection", rtCol, rtCol, true, svcCtx},
+			{"optional-to-optional", optional, optional, true, svcCtx},
+			{"defaults-to-defaults", defaults, defaults, true, svcCtx},
+
+			// oneofs
+			{"oneof-to-oneof", simpleOneOf, simpleOneOf, true, svcCtx},
+			{"embedded-oneof-to-embedded-oneof", embeddedOneOf, embeddedOneOf, true, svcCtx},
+			{"recursive-oneof-to-recursive-oneof", recursiveOneOf, recursiveOneOf, true, svcCtx},
+
+			// package override
+			{"pkg-override-to-pkg-override", pkgOverride, pkgOverride, true, svcCtx},
 		},
 
 		// test cases to transform protocol buffer type to service type
 		"to-service-type": {
-			{"primitive-to-primitive", primitive, primitive, false, svcCtx, primitiveProtoToPrimitiveSvcCode},
-			{"simple-to-simple", simple, simple, false, svcCtx, simpleProtoToSimpleSvcCode},
-			{"simple-to-required", simple, required, false, svcCtx, simpleProtoToRequiredSvcCode},
-			{"required-to-simple", required, simple, false, svcCtx, requiredProtoToSimpleSvcCode},
-			{"simple-to-default", simple, defaultT, false, svcCtx, simpleProtoToDefaultSvcCode},
-			{"default-to-simple", defaultT, simple, false, svcCtx, defaultProtoToSimpleSvcCode},
-			{"simple-to-required-ptr", simple, required, false, ptrCtx, simpleProtoToRequiredPtrSvcCode},
-			{"simple-to-customtype", simple, customtype, false, svcCtx, simpleProtoToCustomSvcCode},
-			{"customtype-to-customtype", customtype, customtype, false, svcCtx, customProtoToCustomSvcCode},
+			{"primitive-to-primitive", primitive, primitive, false, svcCtx},
+			{"simple-to-simple", simple, simple, false, svcCtx},
+			{"simple-to-required", simple, required, false, svcCtx},
+			{"required-to-simple", required, simple, false, svcCtx},
+			{"simple-to-default", simple, defaultT, false, svcCtx},
+			{"default-to-simple", defaultT, simple, false, svcCtx},
+			{"simple-to-required-ptr", simple, required, false, ptrCtx},
+			{"simple-to-customtype", simple, customtype, false, svcCtx},
+			{"customtype-to-customtype", customtype, customtype, false, svcCtx},
 
 			// maps
-			{"map-to-map", simpleMap, simpleMap, false, svcCtx, simpleMapProtoToSimpleMapSvcCode},
-			{"nested-map-to-nested-map", nestedMap, nestedMap, false, svcCtx, nestedMapProtoToNestedMapSvcCode},
-			{"array-map-to-array-map", arrayMap, arrayMap, false, svcCtx, arrayMapProtoToArrayMapSvcCode},
-			{"default-map-to-default-map", defaultMap, defaultMap, false, svcCtx, defaultMapProtoToDefaultMapSvcCode},
+			{"map-to-map", simpleMap, simpleMap, false, svcCtx},
+			{"nested-map-to-nested-map", nestedMap, nestedMap, false, svcCtx},
+			{"array-map-to-array-map", arrayMap, arrayMap, false, svcCtx},
+			{"default-map-to-default-map", defaultMap, defaultMap, false, svcCtx},
 
 			// arrays
-			{"array-to-array", simpleArray, simpleArray, false, svcCtx, simpleArrayProtoToSimpleArraySvcCode},
-			{"nested-array-to-nested-array", nestedArray, nestedArray, false, svcCtx, nestedArrayProtoToNestedArraySvcCode},
-			{"type-array-to-type-array", typeArray, typeArray, false, svcCtx, typeArrayProtoToTypeArraySvcCode},
-			{"map-array-to-map-array", mapArray, mapArray, false, svcCtx, mapArrayProtoToMapArraySvcCode},
-			{"default-array-to-default-array", defaultArray, defaultArray, false, svcCtx, defaultArrayProtoToDefaultArraySvcCode},
+			{"array-to-array", simpleArray, simpleArray, false, svcCtx},
+			{"nested-array-to-nested-array", nestedArray, nestedArray, false, svcCtx},
+			{"type-array-to-type-array", typeArray, typeArray, false, svcCtx},
+			{"map-array-to-map-array", mapArray, mapArray, false, svcCtx},
+			{"default-array-to-default-array", defaultArray, defaultArray, false, svcCtx},
 
-			{"recursive-to-recursive", recursive, recursive, false, svcCtx, recursiveProtoToRecursiveSvcCode},
-			{"composite-to-custom-field", composite, customField, false, svcCtx, compositeProtoToCustomFieldSvcCode},
-			{"custom-field-to-composite", customField, composite, false, svcCtx, customFieldProtoToCompositeSvcCode},
-			{"result-type-to-result-type", resultType, resultType, false, svcCtx, resultTypeProtoToResultTypeSvcCode},
-			{"result-type-collection-to-result-type-collection", rtCol, rtCol, false, svcCtx, rtColProtoToRTColSvcCode},
-			{"optional-to-optional", optional, optional, false, svcCtx, optionalProtoToOptionalSvcCode},
-			{"defaults-to-defaults", defaults, defaults, false, svcCtx, defaultsProtoToDefaultsSvcCode},
+			{"recursive-to-recursive", recursive, recursive, false, svcCtx},
+			{"composite-to-custom-field", composite, customField, false, svcCtx},
+			{"custom-field-to-composite", customField, composite, false, svcCtx},
+			{"result-type-to-result-type", resultType, resultType, false, svcCtx},
+			{"result-type-collection-to-result-type-collection", rtCol, rtCol, false, svcCtx},
+			{"optional-to-optional", optional, optional, false, svcCtx},
+			{"defaults-to-defaults", defaults, defaults, false, svcCtx},
+
+			// oneofs
+			{"oneof-to-oneof", simpleOneOf, simpleOneOf, false, svcCtx},
+			{"embedded-oneof-to-embedded-oneof", embeddedOneOf, embeddedOneOf, false, svcCtx},
+			{"recursive-oneof-to-recursive-oneof", recursiveOneOf, recursiveOneOf, false, svcCtx},
+
+			// package override
+			{"pkg-override-to-pkg-override", pkgOverride, pkgOverride, false, svcCtx},
 		},
 	}
-	for name, cases := range tc {
+	for _, name := range []string{"to-protobuf-type", "to-service-type"} {
+		cases := tc[name]
 		t.Run(name, func(t *testing.T) {
 			for _, c := range cases {
 				t.Run(c.Name, func(t *testing.T) {
@@ -132,897 +170,169 @@ func TestProtoBufTransform(t *testing.T) {
 					srcCtx := c.Ctx
 					tgtCtx := c.Ctx
 					if c.ToProto {
-						target = makeProtoBufMessage(expr.DupAtt(target), target.Type.Name(), sd)
-						tgtCtx = pbCtx
+						target = makeProtoBufMessage(
+							expr.DupAtt(target),
+							target.Type.Name(),
+							testGRPCMessageExampleIdentity(name+"/"+c.Name+"/target"),
+						)
+						freezeProtoBufTransformMessages(t, sd, target)
+						tgtCtx = protoBufTypeContext("proto", sd)
 					} else {
-						source = makeProtoBufMessage(expr.DupAtt(source), source.Type.Name(), sd)
-						srcCtx = pbCtx
+						source = makeProtoBufMessage(
+							expr.DupAtt(source),
+							source.Type.Name(),
+							testGRPCMessageExampleIdentity(name+"/"+c.Name+"/source"),
+						)
+						freezeProtoBufTransformMessages(t, sd, source)
+						srcCtx = protoBufTypeContext("proto", sd)
 					}
-					code, _, err := protoBufTransform(source, target, "source", "target", srcCtx, tgtCtx, c.ToProto, true)
-					if err != nil {
-						t.Fatal(err)
-					}
+					code, _, err := protoBufTransform(source, target, srcCtx, tgtCtx, c.ToProto, true)
+					require.NoError(t, err)
 					code = codegen.FormatTestCode(t, "package foo\nfunc transform(){\n"+code+"}")
-					if code != c.Code {
-						t.Errorf("invalid code, got:\n%s\ngot vs. expected:\n%s", code, codegen.Diff(t, code, c.Code))
-					}
+					testutil.AssertGo(t, "testdata/golden/protobuf_type_encode_"+name+"_"+c.Name+".go.golden", code)
 				})
 			}
 		})
 	}
 }
 
+func TestProtoBufTransformAnyType(t *testing.T) {
+	var (
+		sd     = &ServiceData{Name: "Service", Scope: codegen.NewNameScope()}
+		svcCtx = codegen.NewAttributeContext(false, false, true, "", sd.Scope)
+	)
+	sd.protobuf = newProtobufPackageCatalog("")
+	sd.protobuf.plan = &protobufServicePlan{
+		catalog:  sd.protobuf,
+		fields:   make(map[*expr.AttributeExpr]protocNameKey),
+		wrappers: make(map[*expr.AttributeExpr]protocNameKey),
+		oneofs:   make(map[*expr.AttributeExpr]protocNameKey),
+	}
+	pbCtx := protoBufTypeContext("", sd)
+
+	cases := []struct {
+		Name    string
+		ToProto bool
+		NewVar  bool
+		Ctx     *codegen.AttributeContext
+	}{
+		{"any-to-proto-new-var", true, true, svcCtx},
+		{"proto-to-any-new-var", false, true, svcCtx},
+		{"any-to-proto-assign-var", true, false, svcCtx},
+		{"proto-to-any-assign-var", false, false, svcCtx},
+	}
+
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			source := &expr.AttributeExpr{Type: expr.Any}
+			target := &expr.AttributeExpr{Type: expr.Any}
+			srcCtx := c.Ctx
+			tgtCtx := c.Ctx
+			if c.ToProto {
+				tgtCtx = pbCtx
+			} else {
+				srcCtx = pbCtx
+			}
+			code, _, err := protoBufTransform(source, target, srcCtx, tgtCtx, c.ToProto, c.NewVar)
+			require.NoError(t, err)
+			t.Logf("Generated code: %s", code)
+
+			// Check if transformation contains Any type conversion logic
+			if c.ToProto {
+				require.Contains(t, code, "func() *structpb.Value", "To proto conversion should generate Value type conversion function")
+			} else {
+				require.Contains(t, code, "func() any", "From proto conversion should generate any type conversion function")
+			}
+
+			// Check the assignment operator used based on newVar parameter
+			if c.NewVar {
+				require.Contains(t, code, "target :=", "New variable should use := operator")
+			} else {
+				require.Contains(t, code, "target =", "Assignment should use = operator")
+				require.NotContains(t, code, "target :=", "Assignment should not use := operator")
+			}
+		})
+	}
+}
+
+// TestConvertPrimitiveFromProtoUsesFinalCustomTypeImportAlias verifies that a
+// protobuf conversion casts to the package name written by the import header.
+func TestConvertPrimitiveFromProtoUsesFinalCustomTypeImportAlias(t *testing.T) {
+	const (
+		packagePath = "generated.local/gen/grpc/values"
+		customPath  = "example.com/custom/wire"
+	)
+	generation, err := codegen.NewGeneration("generated.local/gen", nil)
+	require.NoError(t, err)
+	pkg, err := generation.ClaimPackage(packagePath)
+	require.NoError(t, err)
+	require.NoError(t, pkg.DeclareImport(codegen.NewImport("wire", customPath)))
+	require.NoError(t, pkg.RequireImport(codegen.NewImport("wire", "example.com/fixed/wire")))
+	require.NoError(t, generation.Freeze())
+	require.Equal(t, "wire2", pkg.ImportName(customPath))
+
+	target := &expr.AttributeExpr{
+		Type: expr.Int,
+		Meta: expr.MetaExpr{
+			"struct:field:type": {"wire.Value", customPath, "wire"},
+		},
+	}
+	targetContext := codegen.NewAttributeContext(false, false, true, "", pkg.Scope())
+	attrs := &codegen.TransformAttrs{TargetCtx: targetContext}
+
+	converted := convertPrimitiveFromProto(
+		&expr.AttributeExpr{Type: expr.Int},
+		target,
+		false,
+		false,
+		"source",
+		attrs,
+	)
+	require.Equal(t, "wire2.Value(source)", converted)
+}
+
+// TestProtoBufTransformNilableDefaults checks that absent protobuf bytes and
+// Any fields use their service defaults without treating present empty or null
+// values as absent.
+func TestProtoBufTransformNilableDefaults(t *testing.T) {
+	root := codegen.RunDSL(t, func() {
+		d.API("nilable-defaults", func() {})
+		d.Type("NilableDefaults", func() {
+			d.Field(1, "bytes", d.Bytes, func() {
+				d.Default([]byte("fallback"))
+			})
+			d.Field(2, "value", d.Any, func() {
+				d.Default("fallback")
+			})
+		})
+	})
+	defaults := root.UserType("NilableDefaults")
+	source := makeProtoBufMessage(
+		&expr.AttributeExpr{Type: defaults},
+		"NilableDefaults",
+		testGRPCMessageExampleIdentity("nilable-defaults/source"),
+	)
+	target := &expr.AttributeExpr{Type: defaults}
+	sd := &ServiceData{Name: "Service", Scope: codegen.NewNameScope()}
+	freezeProtoBufTransformMessages(t, sd, source)
+	sourceCtx := protoBufTypeContext("proto", sd)
+	targetCtx := codegen.NewAttributeContext(false, false, true, "service", sd.Scope)
+
+	generated, _, err := protoBufTransform(source, target, sourceCtx, targetCtx, false, true)
+	require.NoError(t, err)
+	generated = codegen.FormatTestCode(t, "package foo\nfunc transform(){\n"+generated+"}")
+	testutil.AssertGo(t, "testdata/golden/protobuf_type_encode_to-service-type_nilable-defaults.go.golden", generated)
+}
+
+// freezeProtoBufTransformMessages prepares the message names consumed by one
+// standalone transformation test outside full service analysis.
+func freezeProtoBufTransformMessages(t *testing.T, sd *ServiceData, attribute *expr.AttributeExpr) {
+	sd.protobuf = newProtobufPackageCatalog("proto")
+	require.NoError(t, sd.protobuf.collectMessage(attribute, protobufMessageSource{}))
+	planTestProtobufCatalog(t, sd)
+	sd.protobuf.freezeMessageNames()
+}
+
 func pointerContext(pkg string, scope *codegen.NameScope) *codegen.AttributeContext {
 	return codegen.NewAttributeContext(true, false, true, pkg, scope)
 }
-
-const (
-	primitiveSvcToPrimitiveProtoCode = `func transform() {
-	target := &Int{}
-	target.Field = int32(source)
-}
-`
-
-	simpleSvcToSimpleProtoCode = `func transform() {
-	target := &Simple{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-	}
-	if source.Integer != nil {
-		target.Integer = int32(*source.Integer)
-	}
-}
-`
-
-	simpleSvcToRequiredProtoCode = `func transform() {
-	target := &Required{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-	}
-	if source.Integer != nil {
-		target.Integer = int32(*source.Integer)
-	}
-}
-`
-	requiredSvcToSimpleProtoCode = `func transform() {
-	target := &Simple{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-		Integer:        int32(source.Integer),
-	}
-}
-`
-
-	simpleSvcToDefaultProtoCode = `func transform() {
-	target := &Default{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-	}
-	if source.Integer != nil {
-		target.Integer = int32(*source.Integer)
-	}
-	if source.Integer == nil {
-		target.Integer = 1
-	}
-}
-`
-
-	defaultSvcToSimpleProtoCode = `func transform() {
-	target := &Simple{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-		Integer:        int32(source.Integer),
-	}
-}
-`
-
-	requiredPtrSvcToSimpleProtoCode = `func transform() {
-	target := &Simple{}
-	if source.RequiredString != nil {
-		target.RequiredString = *source.RequiredString
-	}
-	if source.DefaultBool != nil {
-		target.DefaultBool = *source.DefaultBool
-	}
-	if source.Integer != nil {
-		target.Integer = int32(*source.Integer)
-	}
-	if source.DefaultBool == nil {
-		target.DefaultBool = true
-	}
-}
-`
-
-	customSvcToSimpleProtoCode = `func transform() {
-	target := &Simple{
-		RequiredString: string(source.RequiredString),
-		DefaultBool:    bool(source.DefaultBool),
-	}
-	if source.Integer != nil {
-		target.Integer = int32(*source.Integer)
-	}
-}
-`
-
-	simpleProtoToCustomSvcCode = `func transform() {
-	target := &CustomTypes{
-		RequiredString: tdtypes.CustomString(source.RequiredString),
-		DefaultBool:    tdtypes.CustomBool(source.DefaultBool),
-	}
-	if source.Integer != 0 {
-		integerptr := tdtypes.CustomInt(source.Integer)
-		target.Integer = &integerptr
-	}
-}
-`
-
-	customSvcToCustomProtoCode = `func transform() {
-	target := &CustomTypes{
-		RequiredString: string(source.RequiredString),
-		DefaultBool:    bool(source.DefaultBool),
-	}
-	if source.Integer != nil {
-		target.Integer = int32(*source.Integer)
-	}
-}
-`
-
-	customProtoToCustomSvcCode = simpleProtoToCustomSvcCode
-
-	simpleMapSvcToSimpleMapProtoCode = `func transform() {
-	target := &SimpleMap{}
-	if source.Simple != nil {
-		target.Simple = make(map[string]int32, len(source.Simple))
-		for key, val := range source.Simple {
-			tk := key
-			tv := int32(val)
-			target.Simple[tk] = tv
-		}
-	}
-}
-`
-
-	nestedMapSvcToNestedMapProtoCode = `func transform() {
-	target := &NestedMap{}
-	if source.NestedMap != nil {
-		target.NestedMap = make(map[float64]*MapOfSint32MapOfDoubleUint64, len(source.NestedMap))
-		for key, val := range source.NestedMap {
-			tk := key
-			tvc := &MapOfSint32MapOfDoubleUint64{}
-			tvc.Field = make(map[int32]*MapOfDoubleUint64, len(val))
-			for key, val := range val {
-				tk := int32(key)
-				tvb := &MapOfDoubleUint64{}
-				tvb.Field = make(map[float64]uint64, len(val))
-				for key, val := range val {
-					tk := key
-					tv := val
-					tvb.Field[tk] = tv
-				}
-				tvc.Field[tk] = tvb
-			}
-			target.NestedMap[tk] = tvc
-		}
-	}
-}
-`
-
-	arrayMapSvcToArrayMapProtoCode = `func transform() {
-	target := &ArrayMap{}
-	if source.ArrayMap != nil {
-		target.ArrayMap = make(map[uint32]*ArrayOfFloat, len(source.ArrayMap))
-		for key, val := range source.ArrayMap {
-			tk := key
-			tv := &ArrayOfFloat{}
-			tv.Field = make([]float32, len(val))
-			for i, val := range val {
-				tv.Field[i] = val
-			}
-			target.ArrayMap[tk] = tv
-		}
-	}
-}
-`
-
-	defaultMapSvcToDefaultMapProtoCode = `func transform() {
-	target := &DefaultMap{}
-	if source.Simple != nil {
-		target.Simple = make(map[string]int32, len(source.Simple))
-		for key, val := range source.Simple {
-			tk := key
-			tv := int32(val)
-			target.Simple[tk] = tv
-		}
-	}
-	if len(source.Simple) == 0 {
-		target.Simple = map[string]int{"foo": 1}
-	}
-}
-`
-
-	simpleArraySvcToSimpleArrayProtoCode = `func transform() {
-	target := &SimpleArray{}
-	if source.StringArray != nil {
-		target.StringArray = make([]string, len(source.StringArray))
-		for i, val := range source.StringArray {
-			target.StringArray[i] = val
-		}
-	}
-}
-`
-
-	nestedArraySvcToNestedArrayProtoCode = `func transform() {
-	target := &NestedArray{}
-	if source.NestedArray != nil {
-		target.NestedArray = make([]*ArrayOfArrayOfDouble, len(source.NestedArray))
-		for i, val := range source.NestedArray {
-			target.NestedArray[i] = &ArrayOfArrayOfDouble{}
-			target.NestedArray[i].Field = make([]*ArrayOfDouble, len(val))
-			for j, val := range val {
-				target.NestedArray[i].Field[j] = &ArrayOfDouble{}
-				target.NestedArray[i].Field[j].Field = make([]float64, len(val))
-				for k, val := range val {
-					target.NestedArray[i].Field[j].Field[k] = val
-				}
-			}
-		}
-	}
-}
-`
-
-	typeArraySvcToTypeArrayProtoCode = `func transform() {
-	target := &TypeArray{}
-	if source.TypeArray != nil {
-		target.TypeArray = make([]*SimpleArray, len(source.TypeArray))
-		for i, val := range source.TypeArray {
-			target.TypeArray[i] = &SimpleArray{}
-			if val.StringArray != nil {
-				target.TypeArray[i].StringArray = make([]string, len(val.StringArray))
-				for j, val := range val.StringArray {
-					target.TypeArray[i].StringArray[j] = val
-				}
-			}
-		}
-	}
-}
-`
-
-	mapArraySvcToMapArrayProtoCode = `func transform() {
-	target := &MapArray{}
-	if source.MapArray != nil {
-		target.MapArray = make([]*MapOfSint32String, len(source.MapArray))
-		for i, val := range source.MapArray {
-			target.MapArray[i] = &MapOfSint32String{}
-			target.MapArray[i].Field = make(map[int32]string, len(val))
-			for key, val := range val {
-				tk := int32(key)
-				tv := val
-				target.MapArray[i].Field[tk] = tv
-			}
-		}
-	}
-}
-`
-
-	defaultArraySvcToDefaultArrayProtoCode = `func transform() {
-	target := &DefaultArray{}
-	if source.StringArray != nil {
-		target.StringArray = make([]string, len(source.StringArray))
-		for i, val := range source.StringArray {
-			target.StringArray[i] = val
-		}
-	}
-	if len(source.StringArray) == 0 {
-		target.StringArray = []string{"foo", "bar"}
-	}
-}
-`
-
-	recursiveSvcToRecursiveProtoCode = `func transform() {
-	target := &Recursive{
-		RequiredString: source.RequiredString,
-	}
-	if source.Recursive != nil {
-		target.Recursive = svcRecursiveToRecursive(source.Recursive)
-	}
-}
-`
-
-	compositeSvcToCustomFieldProtoCode = `func transform() {
-	target := &CompositeWithCustomField{}
-	if source.RequiredString != nil {
-		target.MyString = *source.RequiredString
-	}
-	if source.DefaultInt != nil {
-		target.MyInt = int32(*source.DefaultInt)
-	}
-	if source.DefaultInt == nil {
-		target.MyInt = 100
-	}
-	if source.Type != nil {
-		target.MyType = svcSimpleToSimple(source.Type)
-	}
-	if source.Map != nil {
-		target.MyMap = make(map[int32]string, len(source.Map))
-		for key, val := range source.Map {
-			tk := int32(key)
-			tv := val
-			target.MyMap[tk] = tv
-		}
-	}
-	if source.Array != nil {
-		target.MyArray = make([]string, len(source.Array))
-		for i, val := range source.Array {
-			target.MyArray[i] = val
-		}
-	}
-}
-`
-
-	customFieldSvcToCompositeProtoCode = `func transform() {
-	target := &Composite{
-		RequiredString: source.MyString,
-		DefaultInt:     int32(source.MyInt),
-	}
-	if source.MyType != nil {
-		target.Type = svcSimpleToSimple(source.MyType)
-	}
-	if source.MyMap != nil {
-		target.Map_ = make(map[int32]string, len(source.MyMap))
-		for key, val := range source.MyMap {
-			tk := int32(key)
-			tv := val
-			target.Map_[tk] = tv
-		}
-	}
-	if source.MyArray != nil {
-		target.Array = make([]string, len(source.MyArray))
-		for i, val := range source.MyArray {
-			target.Array[i] = val
-		}
-	}
-}
-`
-
-	resultTypeSvcToResultTypeProtoCode = `func transform() {
-	target := &ResultType{}
-	if source.Int != nil {
-		target.Int = int32(*source.Int)
-	}
-	if source.Map != nil {
-		target.Map_ = make(map[int32]string, len(source.Map))
-		for key, val := range source.Map {
-			tk := int32(key)
-			tv := val
-			target.Map_[tk] = tv
-		}
-	}
-}
-`
-
-	rtColSvcToRTColProtoCode = `func transform() {
-	target := &ResultTypeCollection{}
-	if source.Collection != nil {
-		target.Collection = &ResultTypeCollection{}
-		target.Collection.Field = make([]*ResultType, len(source.Collection))
-		for i, val := range source.Collection {
-			target.Collection.Field[i] = &ResultType{}
-			if val.Int != nil {
-				target.Collection.Field[i].Int = int32(*val.Int)
-			}
-			if val.Map != nil {
-				target.Collection.Field[i].Map_ = make(map[int32]string, len(val.Map))
-				for key, val := range val.Map {
-					tk := int32(key)
-					tv := val
-					target.Collection.Field[i].Map_[tk] = tv
-				}
-			}
-		}
-	}
-}
-`
-
-	optionalSvcToOptionalProtoCode = `func transform() {
-	target := &Optional{
-		Bytes_: source.Bytes,
-		Any:    source.Any,
-	}
-	if source.Int != nil {
-		target.Int = int32(*source.Int)
-	}
-	if source.Uint != nil {
-		target.Uint = uint32(*source.Uint)
-	}
-	if source.Float != nil {
-		target.Float_ = *source.Float
-	}
-	if source.String != nil {
-		target.String_ = *source.String
-	}
-	if source.Array != nil {
-		target.Array = make([]string, len(source.Array))
-		for i, val := range source.Array {
-			target.Array[i] = val
-		}
-	}
-	if source.Map != nil {
-		target.Map_ = make(map[int32]string, len(source.Map))
-		for key, val := range source.Map {
-			tk := int32(key)
-			tv := val
-			target.Map_[tk] = tv
-		}
-	}
-	if source.UserType != nil {
-		target.UserType = svcOptionalToOptional(source.UserType)
-	}
-}
-`
-
-	defaultsSvcToDefaultsProtoCode = `func transform() {
-	target := &WithDefaults{
-		Int:            int32(source.Int),
-		RequiredInt:    int32(source.RequiredInt),
-		String_:        source.String,
-		RequiredString: source.RequiredString,
-		Bytes_:         source.Bytes,
-		RequiredBytes:  source.RequiredBytes,
-		Any:            source.Any,
-		RequiredAny:    source.RequiredAny,
-	}
-	if source.Array != nil {
-		target.Array = make([]string, len(source.Array))
-		for i, val := range source.Array {
-			target.Array[i] = val
-		}
-	}
-	if len(source.Array) == 0 {
-		target.Array = []string{"foo", "bar"}
-	}
-	if source.RequiredArray != nil {
-		target.RequiredArray = make([]string, len(source.RequiredArray))
-		for i, val := range source.RequiredArray {
-			target.RequiredArray[i] = val
-		}
-	}
-	if source.Map != nil {
-		target.Map_ = make(map[int32]string, len(source.Map))
-		for key, val := range source.Map {
-			tk := int32(key)
-			tv := val
-			target.Map_[tk] = tv
-		}
-	}
-	if len(source.Map) == 0 {
-		target.Map_ = map[int]string{1: "foo"}
-	}
-	if source.RequiredMap != nil {
-		target.RequiredMap = make(map[int32]string, len(source.RequiredMap))
-		for key, val := range source.RequiredMap {
-			tk := int32(key)
-			tv := val
-			target.RequiredMap[tk] = tv
-		}
-	}
-}
-`
-
-	primitiveProtoToPrimitiveSvcCode = `func transform() {
-	target := int(source.Field)
-}
-`
-
-	simpleProtoToSimpleSvcCode = `func transform() {
-	target := &Simple{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-	}
-	if source.Integer != 0 {
-		integerptr := int(source.Integer)
-		target.Integer = &integerptr
-	}
-}
-`
-
-	simpleProtoToRequiredSvcCode = `func transform() {
-	target := &Required{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-		Integer:        int(source.Integer),
-	}
-}
-`
-
-	requiredProtoToSimpleSvcCode = `func transform() {
-	target := &Simple{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-	}
-	integerptr := int(source.Integer)
-	target.Integer = &integerptr
-}
-`
-
-	simpleProtoToDefaultSvcCode = `func transform() {
-	target := &Default{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-		Integer:        int(source.Integer),
-	}
-	if source.Integer == 0 {
-		target.Integer = 1
-	}
-}
-`
-
-	defaultProtoToSimpleSvcCode = `func transform() {
-	target := &Simple{
-		RequiredString: source.RequiredString,
-		DefaultBool:    source.DefaultBool,
-	}
-	integerptr := int(source.Integer)
-	target.Integer = &integerptr
-}
-`
-
-	simpleProtoToRequiredPtrSvcCode = `func transform() {
-	target := &Required{
-		RequiredString: &source.RequiredString,
-		DefaultBool:    &source.DefaultBool,
-	}
-	if source.Integer != 0 {
-		integerptr := int(source.Integer)
-		target.Integer = &integerptr
-	}
-}
-`
-
-	simpleMapProtoToSimpleMapSvcCode = `func transform() {
-	target := &SimpleMap{}
-	if source.Simple != nil {
-		target.Simple = make(map[string]int, len(source.Simple))
-		for key, val := range source.Simple {
-			tk := key
-			tv := int(val)
-			target.Simple[tk] = tv
-		}
-	}
-}
-`
-
-	nestedMapProtoToNestedMapSvcCode = `func transform() {
-	target := &NestedMap{}
-	if source.NestedMap != nil {
-		target.NestedMap = make(map[float64]map[int]map[float64]uint64, len(source.NestedMap))
-		for key, val := range source.NestedMap {
-			tk := key
-			tvc := make(map[int]map[float64]uint64, len(val.Field))
-			for key, val := range val.Field {
-				tk := int(key)
-				tvb := make(map[float64]uint64, len(val.Field))
-				for key, val := range val.Field {
-					tk := key
-					tv := val
-					tvb[tk] = tv
-				}
-				tvc[tk] = tvb
-			}
-			target.NestedMap[tk] = tvc
-		}
-	}
-}
-`
-
-	arrayMapProtoToArrayMapSvcCode = `func transform() {
-	target := &ArrayMap{}
-	if source.ArrayMap != nil {
-		target.ArrayMap = make(map[uint32][]float32, len(source.ArrayMap))
-		for key, val := range source.ArrayMap {
-			tk := key
-			tv := make([]float32, len(val.Field))
-			for i, val := range val.Field {
-				tv[i] = val
-			}
-			target.ArrayMap[tk] = tv
-		}
-	}
-}
-`
-
-	defaultMapProtoToDefaultMapSvcCode = `func transform() {
-	target := &DefaultMap{}
-	if source.Simple != nil {
-		target.Simple = make(map[string]int, len(source.Simple))
-		for key, val := range source.Simple {
-			tk := key
-			tv := int(val)
-			target.Simple[tk] = tv
-		}
-	}
-	if len(source.Simple) == 0 {
-		target.Simple = map[string]int{"foo": 1}
-	}
-}
-`
-
-	simpleArrayProtoToSimpleArraySvcCode = `func transform() {
-	target := &SimpleArray{}
-	if source.StringArray != nil {
-		target.StringArray = make([]string, len(source.StringArray))
-		for i, val := range source.StringArray {
-			target.StringArray[i] = val
-		}
-	}
-}
-`
-
-	nestedArrayProtoToNestedArraySvcCode = `func transform() {
-	target := &NestedArray{}
-	if source.NestedArray != nil {
-		target.NestedArray = make([][][]float64, len(source.NestedArray))
-		for i, val := range source.NestedArray {
-			target.NestedArray[i] = make([][]float64, len(val.Field))
-			for j, val := range val.Field {
-				target.NestedArray[i][j] = make([]float64, len(val.Field))
-				for k, val := range val.Field {
-					target.NestedArray[i][j][k] = val
-				}
-			}
-		}
-	}
-}
-`
-
-	typeArrayProtoToTypeArraySvcCode = `func transform() {
-	target := &TypeArray{}
-	if source.TypeArray != nil {
-		target.TypeArray = make([]*SimpleArray, len(source.TypeArray))
-		for i, val := range source.TypeArray {
-			target.TypeArray[i] = &SimpleArray{}
-			if val.StringArray != nil {
-				target.TypeArray[i].StringArray = make([]string, len(val.StringArray))
-				for j, val := range val.StringArray {
-					target.TypeArray[i].StringArray[j] = val
-				}
-			}
-		}
-	}
-}
-`
-
-	mapArrayProtoToMapArraySvcCode = `func transform() {
-	target := &MapArray{}
-	if source.MapArray != nil {
-		target.MapArray = make([]map[int]string, len(source.MapArray))
-		for i, val := range source.MapArray {
-			target.MapArray[i] = make(map[int]string, len(val.Field))
-			for key, val := range val.Field {
-				tk := int(key)
-				tv := val
-				target.MapArray[i][tk] = tv
-			}
-		}
-	}
-}
-`
-
-	defaultArrayProtoToDefaultArraySvcCode = `func transform() {
-	target := &DefaultArray{}
-	if source.StringArray != nil {
-		target.StringArray = make([]string, len(source.StringArray))
-		for i, val := range source.StringArray {
-			target.StringArray[i] = val
-		}
-	}
-	if len(source.StringArray) == 0 {
-		target.StringArray = []string{"foo", "bar"}
-	}
-}
-`
-
-	recursiveProtoToRecursiveSvcCode = `func transform() {
-	target := &Recursive{
-		RequiredString: source.RequiredString,
-	}
-	if source.Recursive != nil {
-		target.Recursive = protobufRecursiveToRecursive(source.Recursive)
-	}
-}
-`
-
-	compositeProtoToCustomFieldSvcCode = `func transform() {
-	target := &CompositeWithCustomField{
-		MyString: source.RequiredString,
-		MyInt:    int(source.DefaultInt),
-	}
-	if source.DefaultInt == 0 {
-		target.MyInt = 100
-	}
-	if source.Type != nil {
-		target.MyType = protobufSimpleToSimple(source.Type)
-	}
-	if source.Map_ != nil {
-		target.MyMap = make(map[int]string, len(source.Map_))
-		for key, val := range source.Map_ {
-			tk := int(key)
-			tv := val
-			target.MyMap[tk] = tv
-		}
-	}
-	if source.Array != nil {
-		target.MyArray = make([]string, len(source.Array))
-		for i, val := range source.Array {
-			target.MyArray[i] = val
-		}
-	}
-}
-`
-
-	customFieldProtoToCompositeSvcCode = `func transform() {
-	target := &Composite{
-		RequiredString: &source.MyString,
-	}
-	if source.MyInt != 0 {
-		defaultIntptr := int(source.MyInt)
-		target.DefaultInt = &defaultIntptr
-	}
-	if source.MyType != nil {
-		target.Type = protobufSimpleToSimple(source.MyType)
-	}
-	if source.MyMap != nil {
-		target.Map = make(map[int]string, len(source.MyMap))
-		for key, val := range source.MyMap {
-			tk := int(key)
-			tv := val
-			target.Map[tk] = tv
-		}
-	}
-	if source.MyArray != nil {
-		target.Array = make([]string, len(source.MyArray))
-		for i, val := range source.MyArray {
-			target.Array[i] = val
-		}
-	}
-}
-`
-
-	resultTypeProtoToResultTypeSvcCode = `func transform() {
-	target := &ResultType{}
-	if source.Int != 0 {
-		int_ptr := int(source.Int)
-		target.Int = &int_ptr
-	}
-	if source.Map_ != nil {
-		target.Map = make(map[int]string, len(source.Map_))
-		for key, val := range source.Map_ {
-			tk := int(key)
-			tv := val
-			target.Map[tk] = tv
-		}
-	}
-}
-`
-
-	rtColProtoToRTColSvcCode = `func transform() {
-	target := &ResultTypeCollection{}
-	if source.Collection != nil {
-		target.Collection = make([]*ResultType, len(source.Collection.Field))
-		for i, val := range source.Collection.Field {
-			target.Collection[i] = &ResultType{}
-			if val.Int != 0 {
-				int_ptr := int(val.Int)
-				target.Collection[i].Int = &int_ptr
-			}
-			if val.Map_ != nil {
-				target.Collection[i].Map = make(map[int]string, len(val.Map_))
-				for key, val := range val.Map_ {
-					tk := int(key)
-					tv := val
-					target.Collection[i].Map[tk] = tv
-				}
-			}
-		}
-	}
-}
-`
-
-	optionalProtoToOptionalSvcCode = `func transform() {
-	target := &Optional{
-		Bytes: source.Bytes_,
-		Any:   source.Any,
-	}
-	if source.Int != 0 {
-		int_ptr := int(source.Int)
-		target.Int = &int_ptr
-	}
-	if source.Uint != 0 {
-		uint_ptr := uint(source.Uint)
-		target.Uint = &uint_ptr
-	}
-	if source.Float_ != 0 {
-		target.Float = &source.Float_
-	}
-	if source.String_ != "" {
-		target.String = &source.String_
-	}
-	if source.Array != nil {
-		target.Array = make([]string, len(source.Array))
-		for i, val := range source.Array {
-			target.Array[i] = val
-		}
-	}
-	if source.Map_ != nil {
-		target.Map = make(map[int]string, len(source.Map_))
-		for key, val := range source.Map_ {
-			tk := int(key)
-			tv := val
-			target.Map[tk] = tv
-		}
-	}
-	if source.UserType != nil {
-		target.UserType = protobufOptionalToOptional(source.UserType)
-	}
-}
-`
-
-	defaultsProtoToDefaultsSvcCode = `func transform() {
-	target := &WithDefaults{
-		Int:            int(source.Int),
-		RequiredInt:    int(source.RequiredInt),
-		String:         source.String_,
-		RequiredString: source.RequiredString,
-		Bytes:          source.Bytes_,
-		RequiredBytes:  source.RequiredBytes,
-		Any:            source.Any,
-		RequiredAny:    source.RequiredAny,
-	}
-	if source.Int == 0 {
-		target.Int = 100
-	}
-	if source.String_ == "" {
-		target.String = "foo"
-	}
-	if len(source.Bytes_) == 0 {
-		target.Bytes = []byte{0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72}
-	}
-	if source.Any == nil {
-		target.Any = "something"
-	}
-	if source.Array != nil {
-		target.Array = make([]string, len(source.Array))
-		for i, val := range source.Array {
-			target.Array[i] = val
-		}
-	}
-	if len(source.Array) == 0 {
-		target.Array = []string{"foo", "bar"}
-	}
-	if source.RequiredArray != nil {
-		target.RequiredArray = make([]string, len(source.RequiredArray))
-		for i, val := range source.RequiredArray {
-			target.RequiredArray[i] = val
-		}
-	}
-	if source.Map_ != nil {
-		target.Map = make(map[int]string, len(source.Map_))
-		for key, val := range source.Map_ {
-			tk := int(key)
-			tv := val
-			target.Map[tk] = tv
-		}
-	}
-	if len(source.Map_) == 0 {
-		target.Map = map[int]string{1: "foo"}
-	}
-	if source.RequiredMap != nil {
-		target.RequiredMap = make(map[int]string, len(source.RequiredMap))
-		for key, val := range source.RequiredMap {
-			tk := int(key)
-			tv := val
-			target.RequiredMap[tk] = tv
-		}
-	}
-}
-`
-)

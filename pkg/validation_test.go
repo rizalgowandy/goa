@@ -53,7 +53,7 @@ func TestValidateFormat(t *testing.T) {
 		expected error
 	}{
 		"valid date":                 {"validDate", validDate, FormatDate, nil},
-		"invalid date":               {"invalidDate", invalidDate, FormatDate, InvalidFormatError("invalidDate", invalidDate, FormatDate, &time.ParseError{Layout: "2006-01-02", Value: invalidDate, LayoutElem: "-", ValueElem: invalidDate[4:]})},
+		"invalid date":               {"invalidDate", invalidDate, FormatDate, InvalidFormatError("invalidDate", invalidDate, FormatDate, &time.ParseError{Layout: time.DateOnly, Value: invalidDate, LayoutElem: "-", ValueElem: invalidDate[4:]})},
 		"valid date-time":            {"validDateTime", validDateTime, FormatDateTime, nil},
 		"invalid date-time":          {"invalidDateTime", invalidDateTime, FormatDateTime, InvalidFormatError("invalidDateTime", invalidDateTime, FormatDateTime, &time.ParseError{Layout: time.RFC3339, Value: invalidDateTime, LayoutElem: "-", ValueElem: invalidDateTime[4:]})},
 		"valid uuid":                 {"validUUID", validUUID, FormatUUID, nil},
@@ -96,7 +96,7 @@ func TestValidateFormat(t *testing.T) {
 
 	for k, tc := range cases {
 		actual := ValidateFormat(tc.name, tc.val, tc.format)
-		if actual != tc.expected {
+		if !errors.Is(actual, tc.expected) {
 			// Compare only the messages because the error has always a new error ID.
 			if actual == nil || tc.expected == nil || actual.Error() != tc.expected.Error() {
 				t.Errorf("%s: got %#v, expected %#v", k, actual, tc.expected)
@@ -124,7 +124,7 @@ func TestValidatePattern(t *testing.T) {
 
 	for k, tc := range cases {
 		actual := ValidatePattern(tc.name, tc.val, tc.pattern)
-		if actual != tc.expected {
+		if !errors.Is(actual, tc.expected) {
 			// Compare only the messages because the error has always a new error ID.
 			if actual.Error() != tc.expected.Error() {
 				t.Errorf("%s: got %#v, expected %#v", k, actual, tc.expected)

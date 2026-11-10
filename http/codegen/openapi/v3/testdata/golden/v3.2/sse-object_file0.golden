@@ -1,0 +1,101 @@
+{
+  "components": {
+    "schemas": {
+      "SSEObjectMethodResponseBody": {
+        "example": {
+          "flag": true,
+          "id": "event",
+          "value": 1
+        },
+        "properties": {
+          "flag": {
+            "example": true,
+            "type": "boolean"
+          },
+          "id": {
+            "example": "event",
+            "type": "string"
+          },
+          "value": {
+            "example": 1,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Goa API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.2.0",
+  "paths": {
+    "/object": {
+      "get": {
+        "operationId": "SSEObjectService#SSEObjectMethod",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "contentMediaType": "application/json",
+                      "contentSchema": {
+                        "example": {
+                          "flag": true,
+                          "id": "event",
+                          "value": 1
+                        },
+                        "properties": {
+                          "flag": {
+                            "example": true,
+                            "type": "boolean"
+                          },
+                          "id": {
+                            "example": "event",
+                            "type": "string"
+                          },
+                          "value": {
+                            "example": 1,
+                            "format": "int64",
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK response."
+          }
+        },
+        "summary": "SSEObjectMethod SSEObjectService",
+        "tags": [
+          "SSEObjectService"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Default server for test api",
+      "name": "test api",
+      "url": "http://localhost:80"
+    }
+  ],
+  "tags": [
+    {
+      "name": "SSEObjectService"
+    }
+  ]
+}

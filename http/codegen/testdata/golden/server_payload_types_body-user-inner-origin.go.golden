@@ -1,0 +1,13 @@
+// NewMethodBodyUserOriginDefaultPayload builds a ServiceBodyUserOriginDefault
+// service MethodBodyUserOriginDefault endpoint payload.
+func NewMethodBodyUserOriginDefaultPayload(body *MethodBodyUserOriginDefaultRequestBody) *servicebodyuserorigindefault.MethodBodyUserOriginDefaultPayload {
+	res := &servicebodyuserorigindefault.MethodBodyUserOriginDefaultPayload{}
+	if body != nil {
+		v := &servicebodyuserorigindefault.PayloadType{
+			A: *body.A,
+		}
+		res.Body = v
+	}
+
+	return res
+}

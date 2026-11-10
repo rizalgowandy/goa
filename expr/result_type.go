@@ -1,3 +1,5 @@
+// This file defines result types and views and records the original
+// declaration used when a result type is copied.
 package expr
 
 import (
@@ -11,6 +13,9 @@ import (
 const (
 	// DefaultView is the name of the default result type view.
 	DefaultView = "default"
+
+	// ViewMetaKey is the key used to store the view name in the attribute meta.
+	ViewMetaKey = "view"
 )
 
 type (
@@ -26,6 +31,9 @@ type (
 		ContentType string
 		// Views list the supported views indexed by name.
 		Views []*ViewExpr
+		// origin is the earliest result type declaration copied to create this
+		// result type.
+		origin UserType
 	}
 
 	// ViewExpr defines which fields to render when building a response. The view
@@ -53,15 +61,8 @@ var (
 			AttributeExpr: &AttributeExpr{
 				Type:        errorResultType,
 				Description: "Error response result type",
-				UserExamples: []*ExampleExpr{{
-					Summary: "BadRequest",
-					Value: Val{
-						"name":    "bad_request",
-						"id":      "3F1FKVRR",
-						"message": "Value of ID must be an integer",
-					},
-				}},
-				Validation: &ValidationExpr{Required: []string{"name", "id", "message", "temporary", "timeout", "fault"}},
+				Validation:  &ValidationExpr{Required: []string{"name", "id", "message", "temporary", "timeout", "fault"}},
+				finalized:   true,
 			},
 			TypeName: "error",
 		},
@@ -102,7 +103,7 @@ var (
 
 	errorResultView = &ViewExpr{
 		AttributeExpr: &AttributeExpr{Type: errorResultType},
-		Name:          "default",
+		Name:          DefaultView,
 	}
 )
 
@@ -117,6 +118,13 @@ func NewResultTypeExpr(name, identifier string, fn func()) *ResultTypeExpr {
 		},
 		Identifier: identifier,
 	}
+}
+
+// IsErrorResult reports whether dataType is Goa's built-in service error type
+// or a generator copy made from it.
+func IsErrorResult(dataType DataType) bool {
+	userType, ok := dataType.(UserType)
+	return ok && userType.Origin() == ErrorResult
 }
 
 // CanonicalIdentifier returns the result type identifier sans suffix
@@ -134,28 +142,46 @@ func CanonicalIdentifier(identifier string) string {
 }
 
 // Kind implements DataKind.
-func (m *ResultTypeExpr) Kind() Kind { return ResultTypeKind }
+func (*ResultTypeExpr) Kind() Kind { return ResultTypeKind }
 
 // Dup creates a deep copy of the result type given a deep copy of its attribute.
-func (m *ResultTypeExpr) Dup(att *AttributeExpr) UserType {
+func (rt *ResultTypeExpr) Dup(att *AttributeExpr) UserType {
 	return &ResultTypeExpr{
-		UserTypeExpr: m.UserTypeExpr.Dup(att).(*UserTypeExpr),
-		Identifier:   m.Identifier,
-		Views:        m.Views,
+		UserTypeExpr: rt.UserTypeExpr.Dup(att).(*UserTypeExpr),
+		Identifier:   rt.Identifier,
+		Views:        rt.Views,
+		origin:       rt.Origin(),
 	}
 }
 
+// Origin returns the earliest result type declaration from which rt was
+// copied. Result types override their embedded user-type origin so later copies
+// still point to the original result declaration.
+func (rt *ResultTypeExpr) Origin() UserType {
+	if rt.origin != nil {
+		return rt.origin
+	}
+	return rt
+}
+
 // ID returns the identifier of the result type.
-func (m *ResultTypeExpr) ID() string {
-	return m.Identifier
+func (rt *ResultTypeExpr) ID() string {
+	return rt.Identifier
 }
 
 // Name returns the result type name.
-func (m *ResultTypeExpr) Name() string { return m.TypeName }
+func (rt *ResultTypeExpr) Name() string { return rt.TypeName }
+
+// Rename changes the result type name and starts a new generated declaration
+// origin at rt.
+func (rt *ResultTypeExpr) Rename(name string) {
+	rt.UserTypeExpr.Rename(name)
+	rt.origin = nil
+}
 
 // View returns the view with the given name.
-func (m *ResultTypeExpr) View(name string) *ViewExpr {
-	for _, v := range m.Views {
+func (rt *ResultTypeExpr) View(name string) *ViewExpr {
+	for _, v := range rt.Views {
 		if v.Name == name {
 			return v
 		}
@@ -164,32 +190,32 @@ func (m *ResultTypeExpr) View(name string) *ViewExpr {
 }
 
 // HasMultipleViews returns true if the result type has more than one view.
-func (m *ResultTypeExpr) HasMultipleViews() bool {
-	return len(m.Views) > 1
+func (rt *ResultTypeExpr) HasMultipleViews() bool {
+	return len(rt.Views) > 1
 }
 
 // ViewHasAttribute returns true if the result type view has the given
 // attribute.
-func (m *ResultTypeExpr) ViewHasAttribute(view, attr string) bool {
-	v := m.View(view)
+func (rt *ResultTypeExpr) ViewHasAttribute(view, attr string) bool {
+	v := rt.View(view)
 	if v == nil {
 		return false
 	}
-	return v.AttributeExpr.Find(attr) != nil
+	return v.Find(attr) != nil
 }
 
 // Finalize builds the default view if not explicitly defined and finalizes
 // the underlying UserTypeExpr.
-func (m *ResultTypeExpr) Finalize() {
-	if m.View("default") == nil {
-		m.ensureDefaultView()
-	}
-	m.UserTypeExpr.Finalize()
+func (rt *ResultTypeExpr) Finalize() {
+	rt.useExplicitView()
+	rt.ensureDefaultView()
+	rt.UserTypeExpr.Finalize()
 	seen := make(map[string]struct{})
-	walkAttribute(m.AttributeExpr, func(_ string, att *AttributeExpr) error {
+	walkAttribute(rt.AttributeExpr, func(_ string, att *AttributeExpr) error { // nolint: errcheck
 		if rt, ok := att.Type.(*ResultTypeExpr); ok {
 			if _, ok := seen[rt.Identifier]; !ok {
 				seen[rt.Identifier] = struct{}{}
+				rt.useExplicitView()
 				rt.ensureDefaultView()
 			}
 		}
@@ -197,19 +223,31 @@ func (m *ResultTypeExpr) Finalize() {
 	})
 }
 
+// useExplicitView projects the result type using the view explicitly set on the
+// attribute if any.
+func (rt *ResultTypeExpr) useExplicitView() {
+	if view, ok := rt.Meta.Last(ViewMetaKey); ok {
+		p, err := Project(rt, view)
+		if err != nil {
+			panic(err) // bug - presence of view meta should have been validated before
+		}
+		*rt = *p
+	}
+}
+
 // ensureDefaultView builds the default view if not explicitly defined.
-func (m *ResultTypeExpr) ensureDefaultView() {
-	if m.View("default") == nil {
-		att := DupAtt(m.AttributeExpr)
+func (rt *ResultTypeExpr) ensureDefaultView() {
+	if rt.View(DefaultView) == nil {
+		att := DupAtt(rt.AttributeExpr)
 		if arr := AsArray(att.Type); arr != nil {
 			att.Type = AsObject(arr.ElemType.Type)
 		}
 		v := &ViewExpr{
 			AttributeExpr: att,
-			Name:          "default",
-			Parent:        m,
+			Name:          DefaultView,
+			Parent:        rt,
 		}
-		m.Views = append(m.Views, v)
+		rt.Views = append(rt.Views, v)
 	}
 }
 
@@ -224,26 +262,34 @@ func (m *ResultTypeExpr) ensureDefaultView() {
 // or any result type that makes up its attributes recursively. Note that
 // individual attributes may use a different view. In this case Project uses
 // that view and returns an error if it isn't defined on the attribute type.
-func Project(m *ResultTypeExpr, view string, seen ...map[string]*AttributeExpr) (*ResultTypeExpr, error) {
-	_, params, _ := mime.ParseMediaType(m.Identifier)
-	if params["view"] == view {
-		// nothing to do
-		return m, nil
-	}
-	if _, ok := m.Type.(*Array); ok {
-		return projectCollection(m, view, seen...)
-	}
-	var s map[string]*AttributeExpr
-	if len(seen) > 0 {
-		s = seen[0]
-	} else {
-		s = make(map[string]*AttributeExpr)
-	}
-	return projectSingle(m, view, s)
+func Project(rt *ResultTypeExpr, view string) (*ResultTypeExpr, error) {
+	return project(rt, view, make(map[string]UserType))
 }
 
-func projectSingle(m *ResultTypeExpr, view string, seen map[string]*AttributeExpr) (*ResultTypeExpr, error) {
-	v := m.View(view)
+// project computes the projection of rt for view. seen memoizes projected
+// types keyed by (type hash, view). It caches types only - never field
+// attributes - so that sibling fields referencing the same type each keep
+// their own AttributeExpr (description and meta would otherwise leak across
+// fields). projectSingle registers its projection before computing the fields
+// so that recursive references resolve to the in-flight projection and the
+// recursion terminates.
+func project(rt *ResultTypeExpr, view string, seen map[string]UserType) (*ResultTypeExpr, error) {
+	_, params, _ := mime.ParseMediaType(rt.Identifier)
+	if params["view"] == view {
+		// nothing to do
+		return rt, nil
+	}
+	if p, ok := seen[hashTypeAndView(rt, view)]; ok {
+		return p.(*ResultTypeExpr), nil
+	}
+	if _, ok := rt.Type.(*Array); ok {
+		return projectCollection(rt, view, seen)
+	}
+	return projectSingle(rt, view, seen)
+}
+
+func projectSingle(rt *ResultTypeExpr, view string, seen map[string]UserType) (*ResultTypeExpr, error) {
+	v := rt.View(view)
 	if v == nil {
 		return nil, fmt.Errorf("unknown view %#v", view)
 	}
@@ -251,64 +297,52 @@ func projectSingle(m *ResultTypeExpr, view string, seen map[string]*AttributeExp
 
 	// Compute validations - view may not have all fields
 	var val *ValidationExpr
-	if m.Validation != nil {
+	if rt.Validation != nil {
 		var required []string
-		for _, n := range m.Validation.Required {
+		for _, n := range rt.Validation.Required {
 			if att := viewObj.Attribute(n); att != nil {
 				required = append(required, n)
 			}
 		}
-		val = m.Validation.Dup()
+		val = rt.Validation.Dup()
 		val.Required = required
 	}
 
 	// Compute description
-	desc := m.Description
+	desc := rt.Description
 	if desc == "" {
-		desc = m.TypeName + " result type"
+		desc = rt.TypeName + " result type"
 	}
 	desc += " (" + view + " view)"
 
 	// Compute type name
-	typeName := m.TypeName
-	if view != "default" {
-		typeName += strings.Title(view)
+	typeName := rt.TypeName
+	if view != DefaultView {
+		typeName += Title(view)
 	}
 
-	var ut *UserTypeExpr
-	if att, ok := seen[hash(m.Attribute(), view)]; ok {
-		if rt, ok2 := att.Type.(*ResultTypeExpr); ok2 {
-			ut = &UserTypeExpr{
-				AttributeExpr: DupAtt(rt.Attribute()),
-				TypeName:      rt.TypeName,
-			}
-		}
-	}
-	id := m.projectIdentifier(view)
-	if ut == nil {
-		ut = &UserTypeExpr{
-			AttributeExpr: &AttributeExpr{
-				Description: desc,
-				Validation:  val,
-			},
-		}
-	}
-	ut.TypeName = typeName
-	ut.UID = id
-	ut.AttributeExpr.Type = Dup(v.Type)
-	ut.AttributeExpr.UserExamples = v.UserExamples
+	id := rt.projectIdentifier(view)
+	attribute := &AttributeExpr{Description: desc, Validation: val}
+	ut := projectedUserType(rt, typeName, id, attribute)
+	ut.Type = Dup(v.Type)
+	ut.UserExamples = v.UserExamples
 	projected := &ResultTypeExpr{
 		Identifier:   id,
 		UserTypeExpr: ut,
 	}
 	projected.Views = []*ViewExpr{{
-		Name:          "default",
+		Name:          DefaultView,
 		AttributeExpr: DupAtt(v.AttributeExpr),
 		Parent:        projected,
 	}}
 
+	// Register the projection before computing the fields so that recursive
+	// references to rt resolve to the in-flight projection - its fields are
+	// filled in place below - and the recursion terminates.
+	seen[hashTypeAndView(rt, view)] = projected
+
 	projectedObj := projected.Type.(*Object)
-	mtObj := AsObject(m.Type)
+	mtObj := AsObject(rt.Type)
 	for _, nat := range *viewObj {
 		if at := mtObj.Attribute(nat.Name); at != nil {
 			pat, err := projectRecursive(at, nat, view, seen)
@@ -321,30 +355,27 @@ func projectSingle(m *ResultTypeExpr, view string, seen map[string]*AttributeExp
 	return projected, nil
 }
 
-func projectCollection(m *ResultTypeExpr, view string, seen ...map[string]*AttributeExpr) (*ResultTypeExpr, error) {
+func projectCollection(rt *ResultTypeExpr, view string, seen map[string]UserType) (*ResultTypeExpr, error) {
 	// Project the collection element result type
-	e := m.Type.(*Array).ElemType.Type.(*ResultTypeExpr) // validation checked this cast would work
-	pe, err2 := Project(e, view, seen...)
+	e := rt.Type.(*Array).ElemType.Type.(*ResultTypeExpr) // validation checked this cast would work
+	pe, err2 := project(e, view, seen)
 	if err2 != nil {
-		return nil, fmt.Errorf("collection element: %s", err2)
+		return nil, fmt.Errorf("collection element: %w", err2)
 	}
 
 	// Build the projected collection with the results
-	id := m.projectIdentifier(view)
+	id := rt.projectIdentifier(view)
+	attribute := &AttributeExpr{
+		Description:  rt.TypeName + " is the result type for an array of " + e.TypeName + " (" + view + " view)",
+		Type:         &Array{ElemType: &AttributeExpr{Type: pe}},
+		UserExamples: rt.UserExamples,
+	}
 	proj := &ResultTypeExpr{
-		Identifier: id,
-		UserTypeExpr: &UserTypeExpr{
-			AttributeExpr: &AttributeExpr{
-				Description:  m.TypeName + " is the result type for an array of " + e.TypeName + " (" + view + " view)",
-				Type:         &Array{ElemType: &AttributeExpr{Type: pe}},
-				UserExamples: m.UserExamples,
-			},
-			TypeName: pe.TypeName + "Collection",
-			UID:      id,
-		},
+		Identifier:   id,
+		UserTypeExpr: projectedUserType(rt, pe.TypeName+"Collection", id, attribute),
 		Views: []*ViewExpr{{
-			AttributeExpr: DupAtt(pe.View("default").AttributeExpr),
-			Name:          "default",
+			AttributeExpr: DupAtt(pe.View(DefaultView).AttributeExpr),
+			Name:          DefaultView,
 			Parent:        pe,
 		}},
 	}
@@ -354,59 +385,95 @@ func projectCollection(m *ResultTypeExpr, view string, seen ...map[string]*Attri
 		return nil, eval.Context.Errors
 	}
 
+	seen[hashTypeAndView(rt, view)] = proj
 	return proj, nil
 }
 
-func projectRecursive(at *AttributeExpr, vat *NamedAttributeExpr, view string, seen map[string]*AttributeExpr) (*AttributeExpr, error) {
-	if att, ok := seen[hash(at, view)]; ok {
-		return att, nil
+// projectedUserType makes a synthesized result type use the same repeatable
+// example sequence as source. A view-specific type authored in the design keeps
+// its media-type-derived UID instead.
+func projectedUserType(source UserType, name, uid string, attribute *AttributeExpr) *UserTypeExpr {
+	if identity, ok := GeneratedUserTypeExampleIdentity(source); ok {
+		return NewGeneratedUserType(name, attribute, identity)
 	}
+	return &UserTypeExpr{AttributeExpr: attribute, TypeName: name, UID: uid}
+}
+
+// projectRecursive computes the projected attribute for the field described
+// by at within a result type being projected with view. vat is the matching
+// view attribute. It always returns a fresh attribute: projected types are
+// shared through seen but the attributes wrapping them never are, so that
+// per-field metadata does not leak across fields of the same type.
+func projectRecursive(at *AttributeExpr, vat *NamedAttributeExpr, view string, seen map[string]UserType) (*AttributeExpr, error) {
 	at = DupAtt(at)
 
 	if rt, ok := at.Type.(*ResultTypeExpr); ok {
 		vatt := vat.Attribute
-		var view string
-		if len(vatt.Meta["view"]) > 0 {
-			view = vatt.Meta["view"][0]
+		view, ok := vatt.Meta.Last(ViewMetaKey)
+		if !ok {
+			if v, ok := at.Meta.Last(ViewMetaKey); ok {
+				view = v
+			} else {
+				view = DefaultView
+			}
 		}
-		if view == "" && len(at.Meta["view"]) > 0 {
-			view = at.Meta["view"][0]
-		}
-		if view == "" {
-			view = DefaultView
-		}
-		seen[hash(at, view)] = at
-		pr, err := Project(rt, view, seen)
+		pr, err := project(rt, view, seen)
 		if err != nil {
-			return nil, fmt.Errorf("view %#v on field %#v cannot be computed: %s", view, vat.Name, err)
+			return nil, fmt.Errorf("view %#v on field %#v cannot be computed: %w", view, vat.Name, err)
 		}
 		at.Type = pr
 		return at, nil
 	}
 
-	seen[hash(at, view)] = at
+	if ut, ok := at.Type.(*UserTypeExpr); ok {
+		key := hashTypeAndView(ut, view)
+		if p, ok := seen[key]; ok {
+			at.Type = p
+			return at, nil
+		}
+		// Register before recursing into the fields below (they are projected
+		// in place) so that recursive user types terminate.
+		seen[key] = ut
+	}
 
 	if obj := AsObject(at.Type); obj != nil {
 		vobj := AsObject(vat.Attribute.Type)
-		if vobj == nil {
-			return at, nil
-		}
 		for _, cnat := range *obj {
-			var cvnat *NamedAttributeExpr
-			for _, nnat := range *vobj {
-				if nnat.Name == cnat.Name {
-					cvnat = nnat
-					break
+			selected := cnat
+			if vobj != nil {
+				for _, nnat := range *vobj {
+					if nnat.Name == cnat.Name {
+						selected = nnat
+						break
+					}
 				}
 			}
-			if cvnat == nil {
-				continue
-			}
-			pat, err := projectRecursive(cnat.Attribute, cvnat, view, seen)
+			pat, err := projectRecursive(cnat.Attribute, selected, view, seen)
 			if err != nil {
 				return nil, err
 			}
 			cnat.Attribute = pat
+		}
+		return at, nil
+	}
+
+	if union := AsUnion(at.Type); union != nil {
+		viewUnion := AsUnion(vat.Attribute.Type)
+		for _, branch := range union.Values {
+			selected := branch
+			if viewUnion != nil {
+				for _, candidate := range viewUnion.Values {
+					if candidate.Name == branch.Name {
+						selected = candidate
+						break
+					}
+				}
+			}
+			projected, err := projectRecursive(branch.Attribute, selected, view, seen)
+			if err != nil {
+				return nil, err
+			}
+			branch.Attribute = projected
 		}
 		return at, nil
 	}
@@ -419,6 +486,18 @@ func projectRecursive(at *AttributeExpr, vat *NamedAttributeExpr, view string, s
 		ar.ElemType = pat
 	}
 
+	if mapping := AsMap(at.Type); mapping != nil {
+		key, err := projectRecursive(mapping.KeyType, vat, view, seen)
+		if err != nil {
+			return nil, err
+		}
+		value, err := projectRecursive(mapping.ElemType, vat, view, seen)
+		if err != nil {
+			return nil, err
+		}
+		mapping.KeyType, mapping.ElemType = key, value
+	}
+
 	return at, nil
 }
 
@@ -426,10 +505,10 @@ func projectRecursive(at *AttributeExpr, vat *NamedAttributeExpr, view string, s
 // "view" param. We need the projected result type identifier to be different so
 // that looking up projected result types from ProjectedResultTypes works
 // correctly. It's also good for clients.
-func (m *ResultTypeExpr) projectIdentifier(view string) string {
-	base, params, err := mime.ParseMediaType(m.Identifier)
+func (rt *ResultTypeExpr) projectIdentifier(view string) string {
+	base, params, err := mime.ParseMediaType(rt.Identifier)
 	if err != nil {
-		base = m.Identifier
+		base = rt.Identifier
 	}
 	if params == nil {
 		params = make(map[string]string)
@@ -452,44 +531,8 @@ func (v *ViewExpr) EvalName() string {
 	return prefix + suffix
 }
 
-// hash computes a hash for an attribute and a view that returns the same value
-// for two attributes and views that produce the same projected type.
-func hash(att *AttributeExpr, view string) string {
-	sep := "!"
-	ut, ok := att.Type.(UserType)
-	if !ok {
-		return att.Type.Name() + sep + view
-	}
-	// elems contain the elements that affect how types are projected:
-	// - the type identifier
-	// - the view
-	// - the type attribute tags (if any)
-	elems := []string{ut.ID(), view}
-
-	add := func(att *AttributeExpr) {
-		for k, v := range att.Meta {
-			elems = append(elems, k)
-			elems = append(elems, v...)
-		}
-	}
-
-	add(att)
-	if obj := AsObject(ut); obj != nil {
-		for _, nat := range *obj {
-			add(nat.Attribute)
-		}
-	}
-	n := len(sep) * (len(elems) - 1)
-	for i := 0; i < len(elems); i++ {
-		n += len(elems[i])
-	}
-
-	var b strings.Builder
-	b.Grow(n)
-	b.WriteString(elems[0])
-	for _, s := range elems[1:] {
-		b.WriteString(sep)
-		b.WriteString(s)
-	}
-	return b.String()
+// hashTypeAndView computes the projection cache key for the given type and
+// view. Two types with the same key project to the same type for the view.
+func hashTypeAndView(t DataType, view string) string {
+	return Hash(t, false, false, false) + "::" + view
 }

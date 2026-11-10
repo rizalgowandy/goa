@@ -1,0 +1,38 @@
+{
+  "components": {},
+  "info": {
+    "title": "Goa API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "testService#testEndpoint",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": "ok",
+                "schema": {
+                  "example": "ok",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK response."
+          }
+        },
+        "summary": "testEndpoint testService",
+        "tags": [
+          "testService"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "testService"
+    }
+  ]
+}

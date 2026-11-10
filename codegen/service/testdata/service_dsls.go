@@ -4,53 +4,23 @@ import (
 	. "goa.design/goa/v3/dsl"
 )
 
-var APayload = Type("APayload", func() {
-	Attribute("IntField", Int)
-	Attribute("StringField", String)
-	Attribute("BooleanField", Boolean)
-	Attribute("BytesField", Bytes)
-	Attribute("OptionalField", String)
-	Required("IntField", "StringField", "BooleanField", "BytesField")
-})
-
-var AResult = Type("AResult", func() {
-	Attribute("IntField", Int)
-	Attribute("StringField", String)
-	Attribute("BooleanField", Boolean)
-	Attribute("BytesField", Bytes)
-	Attribute("OptionalField", String)
-	Required("IntField", "StringField", "BooleanField", "BytesField")
-})
-
-var BPayload = Type("BPayload", func() {
-	Attribute("ArrayField", ArrayOf(Boolean))
-	Attribute("MapField", MapOf(Int, String))
-	Attribute("ObjectField", func() {
-		Attribute("IntField", Int)
-		Attribute("StringField", String)
-	})
-	Attribute("UserTypeField", ParentType)
-})
-
-var BResult = Type("BResult", func() {
-	Attribute("ArrayField", ArrayOf(Boolean))
-	Attribute("MapField", MapOf(Int, String))
-	Attribute("ObjectField", func() {
-		Attribute("IntField", Int)
-		Attribute("StringField", String)
-	})
-	Attribute("UserTypeField", ParentType)
-})
-
-var ParentType = Type("Parent", func() {
-	Attribute("c", "Child")
-})
-
-var ChildType = Type("Child", func() {
-	Attribute("p", "Parent")
-})
-
 var SingleMethodDSL = func() {
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
 	Service("SingleMethod", func() {
 		Method("A", func() {
 			Payload(APayload)
@@ -60,6 +30,46 @@ var SingleMethodDSL = func() {
 }
 
 var MultipleMethodsDSL = func() {
+	var _ = Type("Child", func() {
+		Attribute("p", "Parent")
+	})
+	var ParentType = Type("Parent", func() {
+		Attribute("c", "Child")
+	})
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var BPayload = Type("BPayload", func() {
+		Attribute("ArrayField", ArrayOf(Boolean))
+		Attribute("MapField", MapOf(Int, String))
+		Attribute("ObjectField", func() {
+			Attribute("IntField", Int)
+			Attribute("StringField", String)
+		})
+		Attribute("UserTypeField", ParentType)
+	})
+	var BResult = Type("BResult", func() {
+		Attribute("ArrayField", ArrayOf(Boolean))
+		Attribute("MapField", MapOf(Int, String))
+		Attribute("ObjectField", func() {
+			Attribute("IntField", Int)
+			Attribute("StringField", String)
+		})
+		Attribute("UserTypeField", ParentType)
+	})
 	Service("MultipleMethods", func() {
 		Method("A", func() {
 			Payload(APayload)
@@ -68,6 +78,192 @@ var MultipleMethodsDSL = func() {
 		Method("B", func() {
 			Payload(BPayload)
 			Result(BResult)
+		})
+	})
+}
+
+var RepeatedInlineErrorsDSL = func() {
+	Service("Secured", func() {
+		for _, method := range []string{"Read", "Write", "Delete"} {
+			Method(method, func() {
+				Error("invalid_scopes", String)
+			})
+		}
+	})
+}
+
+var UnionMethodDSL = func() {
+	var AUnion = Type("AUnion", func() {
+		OneOf("Values", func() {
+			Attribute("Int", Int)
+			Attribute("String", String)
+			Attribute("Boolean", Boolean)
+			Attribute("Bytes", Bytes)
+		})
+	})
+	Service("UnionService", func() {
+		Method("A", func() {
+			Payload(AUnion)
+			Result(AUnion)
+		})
+	})
+}
+
+var MultiUnionMethodDSL = func() {
+	var TypeA = Type("TypeA", func() {
+		Attribute("a", Int)
+	})
+	var TypeB = Type("TypeB", func() {
+		Attribute("b", String)
+	})
+	var Union = Type("Union", func() {
+		OneOf("Values", func() {
+			Attribute("a", TypeA)
+			Attribute("b", TypeB)
+		})
+		Required("Values")
+	})
+	Service("MultiUnionService", func() {
+		Method("MultiUnion", func() {
+			Payload(Union)
+			Result(Union)
+		})
+	})
+}
+
+// Union with alias user types placed in a custom package via struct:pkg:path.
+// The same alias type is used in multiple branches to exercise wrapper generation
+// for cross-package and duplicate underlying types.
+var UnionWithAliasCrossPkgDSL = func() {
+	var Alias = Type("Alias", String, func() {
+		Meta("struct:pkg:path", "alias")
+	})
+	var Scope = Type("Scope", func() {
+		OneOf("Values", func() {
+			Attribute("Device", Alias)
+			Attribute("Metric", Alias)
+		})
+	})
+	Service("UnionWithAliasCrossPkg", func() {
+		Method("A", func() {
+			Payload(Scope)
+			Result(Scope)
+		})
+	})
+}
+
+// PkgPathUnionDSL tests that union sum types generated into struct:pkg:path files
+// include the required JSON imports for the generated marshalers.
+var PkgPathUnionDSL = func() {
+	var TypeWithUnion = Type("TypeWithUnion", func() {
+		Meta("struct:pkg:path", "types")
+		OneOf("Values", func() {
+			Attribute("A", String)
+			Attribute("B", Int)
+		})
+	})
+	Service("PkgPathUnion", func() {
+		Method("M", func() {
+			Payload(TypeWithUnion)
+		})
+	})
+}
+
+// PkgPathUnionNameScopeDSL exercises services that place separately named
+// unions in relocated files that compile in one Go package.
+var PkgPathUnionNameScopeDSL = func() {
+	var FirstValue = Type("FirstValue", func() {
+		Meta("struct:pkg:path", "types")
+		Meta("type:generate:force")
+		OneOf("Value", func() {
+			TypeName("FirstValueChoice")
+			Attribute("Bool", Boolean)
+			Attribute("Enum", String)
+			Attribute("Number", Float64)
+		})
+	})
+	var SecondValue = Type("SecondValue", func() {
+		Meta("struct:pkg:path", "types")
+		Meta("type:generate:force")
+		OneOf("Value", func() {
+			TypeName("SecondValueChoice")
+			Attribute("Bool", Boolean)
+			Attribute("Enum", String)
+			Attribute("Number", Float64)
+		})
+	})
+	var ThirdValue = Type("ThirdValue", func() {
+		Meta("struct:pkg:path", "types")
+		Meta("type:generate:force")
+		OneOf("Value", func() {
+			TypeName("ThirdValueChoice")
+			Attribute("Bool", Boolean)
+			Attribute("Enum", String)
+			Attribute("Number", Float64)
+		})
+	})
+	Service("FirstValueService", func() {
+		Method("Read", func() {
+			Payload(FirstValue)
+		})
+	})
+	Service("SecondValueService", func() {
+		Method("Read", func() {
+			Payload(SecondValue)
+		})
+	})
+	Service("ThirdValueService", func() {
+		Method("Read", func() {
+			Payload(ThirdValue)
+		})
+	})
+}
+
+// PkgPathUnionJSONFieldDSL tests OneOf branches declared with JSONField in a
+// struct:pkg:path type.
+var PkgPathUnionJSONFieldDSL = func() {
+	var TypeWithJSONFieldUnion = Type("TypeWithJSONFieldUnion", func() {
+		Meta("struct:pkg:path", "types")
+		OneOf("Values", func() {
+			Field(1, "A", String, func() {
+				Meta("struct:tag:json", "a")
+			})
+			Field(2, "B", Int, func() {
+				Meta("struct:tag:json", "b")
+			})
+		})
+	})
+	Service("PkgPathUnionJSONField", func() {
+		Method("M", func() {
+			Payload(TypeWithJSONFieldUnion)
+		})
+	})
+}
+
+// PkgPathExtendedUnionDSL tests that extending a relocated type copies its
+// nested union into the package that owns the extending type.
+var PkgPathExtendedUnionDSL = func() {
+	var ScopeDescription = Type("ScopeDescription", String, func() {
+		Meta("struct:pkg:path", "types")
+	})
+	var EquipmentAliases = Type("EquipmentAliases", ArrayOf(String), func() {
+		Meta("struct:pkg:path", "types")
+	})
+	var EquipmentScope = Type("EquipmentScope", func() {
+		Meta("struct:pkg:path", "types")
+		Meta("type:generate:force")
+		OneOf("Scope", func() {
+			Attribute("Description", ScopeDescription)
+			Attribute("DeviceAliases", EquipmentAliases)
+		})
+	})
+	var ToolPayload = Type("ToolPayload", func() {
+		Extend(EquipmentScope)
+		Attribute("query", String)
+	})
+	Service("PkgPathExtendedUnion", func() {
+		Method("M", func() {
+			Payload(ToolPayload)
 		})
 	})
 }
@@ -109,6 +305,14 @@ var EmptyMethodDSL = func() {
 }
 
 var EmptyPayloadMethodDSL = func() {
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
 	Service("EmptyPayload", func() {
 		Method("EmptyPayload", func() {
 			Result(AResult)
@@ -117,6 +321,15 @@ var EmptyPayloadMethodDSL = func() {
 }
 
 var EmptyResultMethodDSL = func() {
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+
 	Service("EmptyResult", func() {
 		Method("EmptyResult", func() {
 			Payload(APayload)
@@ -131,13 +344,36 @@ var ServiceErrorDSL = func() {
 	})
 }
 
+var APIErrorReferenceDSL = func() {
+	API("ErrorReference", func() {
+		Error("busy", func() {
+			Temporary()
+			Timeout()
+			Fault()
+		})
+	})
+	Service("ErrorReference", func() {
+		Error("busy")
+		Method("Run", func() {
+			Error("busy")
+		})
+	})
+}
+
 var CustomErrorsDSL = func() {
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+
 	var Result = ResultType("application/vnd.goa.error", func() {
 		TypeName("Result")
 		Attribute("a", String)
-		Attribute("b", String, func() {
-			Meta("struct:error:name")
-		})
+		ErrorName("b", String)
 		Required("b")
 	})
 	Service("CustomErrors", func() {
@@ -149,10 +385,23 @@ var CustomErrorsDSL = func() {
 	})
 }
 
+var NestedCustomErrorDSL = func() {
+	var Detail = Type("Detail", func() {
+		Attribute("Message", String)
+	})
+	var Failure = Type("Failure", func() {
+		Attribute("Detail", Detail)
+	})
+	Service("NestedCustomError", func() {
+		Method("Fail", func() {
+			Error("failure", Failure)
+		})
+	})
+}
+
 var CustomErrorsCustomFieldDSL = func() {
 	var Result = ResultType("application/vnd.goa.error", func() {
-		Attribute("error", String, func() {
-			Meta("struct:error:name")
+		ErrorName("error", String, func() {
 			Meta("struct:field:name", "ErrorCode")
 		})
 		Required("error")
@@ -165,6 +414,14 @@ var CustomErrorsCustomFieldDSL = func() {
 }
 
 var MultipleMethodsResultMultipleViewsDSL = func() {
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
 	var RTWithViews = ResultType("application/vnd.result.multiple.views", func() {
 		TypeName("MultipleViews")
 		Attributes(func() {
@@ -221,7 +478,7 @@ var WithExplicitAndDefaultViewsDSL = func() {
 		Method("A", func() {
 			Result(RTWithViews)
 		})
-		Method("A", func() {
+		Method("B", func() {
 			Result(RTWithViews, func() {
 				View("tiny")
 			})
@@ -356,6 +613,44 @@ var ResultWithDashedMimeTypeMethodDSL = func() {
 	})
 }
 
+var ResultWithOneOfTypeMethodDSL = func() {
+	var Item = Type("Item", func() { Attribute("a") })
+	var T = Type("T", func() { Attribute("message") })
+	var U = Type("U", func() { Attribute("item", Item) })
+	var RT = ResultType("application/vnd.result.oneof", func() {
+		Attributes(func() {
+			OneOf("result", func() {
+				Attribute("t", T)
+				Attribute("u", U)
+			})
+		})
+	})
+	Service("ResultWithOneOfType", func() {
+		Method("A", func() {
+			Result(RT)
+		})
+	})
+}
+
+var ResultWithInlineValidationDSL = func() {
+	var RT = ResultType("application/vnd.result.inline.validation", func() {
+		Attributes(func() {
+			Attribute("a", String)
+			Attribute("b", Int)
+		})
+	})
+	Service("ResultWithInlineValidation", func() {
+		Method("A", func() {
+			Result(RT)
+		})
+		Method("B", func() {
+			Result(RT, func() {
+				Required("a")
+			})
+		})
+	})
+}
+
 var ForceGenerateTypeDSL = func() {
 	var _ = Type("ForcedType", func() {
 		Attribute("a", String)
@@ -377,6 +672,22 @@ var ForceGenerateTypeExplicitDSL = func() {
 }
 
 var StreamingResultMethodDSL = func() {
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
 	Service("StreamingResultService", func() {
 		Method("StreamingResultMethod", func() {
 			Payload(APayload)
@@ -434,6 +745,15 @@ var StreamingResultWithExplicitViewMethodDSL = func() {
 }
 
 var StreamingResultNoPayloadMethodDSL = func() {
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+
 	Service("StreamingResultNoPayloadService", func() {
 		Method("StreamingResultNoPayloadMethod", func() {
 			StreamingResult(AResult)
@@ -442,6 +762,38 @@ var StreamingResultNoPayloadMethodDSL = func() {
 }
 
 var StreamingPayloadMethodDSL = func() {
+	var _ = Type("Child", func() {
+		Attribute("p", "Parent")
+	})
+	var ParentType = Type("Parent", func() {
+		Attribute("c", "Child")
+	})
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var BPayload = Type("BPayload", func() {
+		Attribute("ArrayField", ArrayOf(Boolean))
+		Attribute("MapField", MapOf(Int, String))
+		Attribute("ObjectField", func() {
+			Attribute("IntField", Int)
+			Attribute("StringField", String)
+		})
+		Attribute("UserTypeField", ParentType)
+	})
+
 	Service("StreamingPayloadService", func() {
 		Method("StreamingPayloadMethod", func() {
 			Payload(BPayload)
@@ -469,6 +821,14 @@ var StreamingPayloadNoResultMethodDSL = func() {
 }
 
 var StreamingPayloadResultWithViewsMethodDSL = func() {
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
 	var RTWithViews = ResultType("application/vnd.result.multiple.views", func() {
 		TypeName("MultipleViews")
 		Attributes(func() {
@@ -483,6 +843,7 @@ var StreamingPayloadResultWithViewsMethodDSL = func() {
 			Attribute("a")
 		})
 	})
+
 	Service("StreamingPayloadResultWithViewsService", func() {
 		Method("StreamingPayloadResultWithViewsMethod", func() {
 			StreamingPayload(APayload)
@@ -517,6 +878,37 @@ var StreamingPayloadResultWithExplicitViewMethodDSL = func() {
 }
 
 var BidirectionalStreamingMethodDSL = func() {
+	var _ = Type("Child", func() {
+		Attribute("p", "Parent")
+	})
+	var ParentType = Type("Parent", func() {
+		Attribute("c", "Child")
+	})
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+	var BPayload = Type("BPayload", func() {
+		Attribute("ArrayField", ArrayOf(Boolean))
+		Attribute("MapField", MapOf(Int, String))
+		Attribute("ObjectField", func() {
+			Attribute("IntField", Int)
+			Attribute("StringField", String)
+		})
+		Attribute("UserTypeField", ParentType)
+	})
 	Service("BidirectionalStreamingService", func() {
 		Method("BidirectionalStreamingMethod", func() {
 			Payload(BPayload)
@@ -536,6 +928,15 @@ var BidirectionalStreamingNoPayloadMethodDSL = func() {
 }
 
 var BidirectionalStreamingResultWithViewsMethodDSL = func() {
+	var APayload = Type("APayload", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
+
 	var RTWithViews = ResultType("application/vnd.result.multiple.views", func() {
 		TypeName("MultipleViews")
 		Attributes(func() {
@@ -606,6 +1007,351 @@ var NamesWithSpacesDSL = func() {
 				GET("/")
 			})
 			GRPC(func() {})
+		})
+	})
+}
+
+var PkgPathDSL = func() {
+	var Foo = Type("Foo", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "foo")
+	})
+	Service("PkgPathMethod", func() {
+		Method("A", func() {
+			Payload(Foo)
+			Result(Foo)
+		})
+	})
+}
+
+var PkgPathArrayDSL = func() {
+	var Foo = Type("Foo", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "foo")
+	})
+	Service("PkgPathArrayMethod", func() {
+		Method("A", func() {
+			Payload(ArrayOf(Foo))
+			Result(ArrayOf(Foo))
+		})
+	})
+}
+
+var PkgPathRecursiveDSL = func() {
+	var Foo = Type("Foo", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "foo")
+	})
+	var RecursiveFoo = Type("RecursiveFoo", func() {
+		Attribute("Foo", Foo)
+		Meta("struct:pkg:path", "foo")
+	})
+
+	Service("PkgPathRecursiveMethod", func() {
+		Method("A", func() {
+			Payload(RecursiveFoo)
+			Result(RecursiveFoo)
+		})
+	})
+}
+
+var PkgPathMultipleDSL = func() {
+	var Bar = Type("Bar", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "bar")
+	})
+	var Baz = Type("Baz", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "baz")
+	})
+
+	Service("MultiplePkgPathMethod", func() {
+		Method("A", func() {
+			Payload(Bar)
+			Result(Bar)
+		})
+
+		Method("B", func() {
+			Payload(Baz)
+			Result(Baz)
+		})
+
+		Method("EnvelopedB", func() {
+			Payload(func() {
+				Attribute("Baz", Baz)
+			})
+			Result(func() {
+				Attribute("Baz", Baz)
+			})
+		})
+	})
+}
+
+var PkgPathNoDirDSL = func() {
+	var NoDir = Type("NoDir", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "")
+	})
+
+	Service("NoDirMethod", func() {
+		Method("A", func() {
+			Payload(NoDir)
+			Result(NoDir)
+		})
+	})
+}
+
+var PkgPathDupeDSL = func() {
+	var Foo = Type("Foo", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "foo")
+	})
+
+	Service("PkgPathDupeMethod", func() {
+		Method("A", func() {
+			Payload(Foo)
+			Result(Foo)
+		})
+		Method("B", func() {
+			Payload(Foo)
+			Result(Foo)
+		})
+	})
+	Service("PkgPathDupeMethod2", func() {
+		Method("A", func() {
+			Payload(Foo)
+			Result(Foo)
+		})
+		Method("B", func() {
+			Payload(Foo)
+			Result(Foo)
+		})
+	})
+}
+
+var PkgPathSharedRolesDSL = func() {
+	var Detail = Type("Detail", func() {
+		Attribute("Message", String)
+		Meta("struct:pkg:path", "shared")
+	})
+	var Shared = Type("Shared", func() {
+		Attribute("IntField", Int)
+		Attribute("Detail", Detail)
+		Meta("struct:pkg:path", "shared")
+		Meta("type:generate:force")
+	})
+
+	Service("PkgPathSharedRoles", func() {
+		Method("Exchange", func() {
+			Payload(Shared)
+			StreamingPayload(Shared)
+			Result(Shared)
+			StreamingResult(Shared)
+			Error("shared_error", Shared)
+		})
+	})
+
+	Service("PkgPathSharedError", func() {
+		Method("Fail", func() {
+			Error("shared_error", Shared)
+		})
+	})
+}
+
+var PkgPathPayloadAttributeDSL = func() {
+	var Foo = Type("Foo", func() {
+		Attribute("IntField", Int)
+		Meta("struct:pkg:path", "foo")
+	})
+	var Bar = Type("Bar", func() {
+		Attribute("Foo", Foo)
+	})
+
+	Service("PkgPathPayloadAttributeDSL", func() {
+		Method("Foo", func() {
+			Payload(Bar)
+			Result(Bar)
+		})
+	})
+}
+
+var EndpointWithClientInterceptorDSL = func() {
+	Interceptor("tracing")
+	Service("ServiceWithClientInterceptor", func() {
+		Method("Method", func() {
+			ClientInterceptor("tracing")
+			Payload(String)
+			Result(String)
+			HTTP(func() {
+				POST("/")
+			})
+		})
+	})
+}
+
+var NoMethodClientInterceptorDSL = func() {
+	Interceptor("tracing")
+	Service("NoMethodClientInterceptor", func() {
+		ClientInterceptor("tracing")
+	})
+}
+
+var MultipleAPIKeySecurityDSL = func() {
+	var APIKeyAuth = APIKeySecurity("api_key")
+	var TenantKeyAuth = APIKeySecurity("tenant")
+
+	Service("MultipleAPIKeySecurity", func() {
+		Security(APIKeyAuth, TenantKeyAuth)
+		Method("A", func() {
+			Payload(func() {
+				APIKey("api_key", "api_key", String)
+				APIKey("tenant", "tenant_id", String)
+				Required("api_key", "tenant_id")
+			})
+
+			HTTP(func() {
+				POST("/")
+				Header("api_key:X-API-Key")
+				Header("tenant_id:X-Tenant")
+			})
+		})
+	})
+}
+
+var MixedAndMultipleAPIKeySecurityDSL = func() {
+	var Signature = JWTSecurity("jwt", func() {
+		Scope("api:read", "Read access to API")
+	})
+	var APIKeyAuth = APIKeySecurity("api_key")
+	var TenantKeyAuth = APIKeySecurity("tenant")
+
+	Service("MixedAndMultipleAPIKeySecurity", func() {
+		Security(Signature, func() {
+			Scope("api:read")
+		})
+		Security(APIKeyAuth, TenantKeyAuth)
+
+		Method("A", func() {
+			Payload(func() {
+				Token("jwt", String)
+				APIKey("api_key", "api_key", String)
+				APIKey("tenant", "tenant_id", String)
+			})
+
+			HTTP(func() {
+				POST("/")
+				Header("api_key:X-API-Key")
+				Header("tenant_id:X-Tenant")
+				Header("jwt:Authorization")
+			})
+		})
+	})
+}
+
+var BearerSecurityDSL = func() {
+	var BearerAuth = BearerSecurity("bearer", func() {
+		Scope("api:read", "Read access to API")
+	})
+
+	Service("BearerSecurity", func() {
+		Method("A", func() {
+			Security(BearerAuth, func() {
+				Scope("api:read")
+			})
+			Payload(func() {
+				BearerToken("token", String)
+			})
+			HTTP(func() {
+				POST("/")
+			})
+		})
+	})
+}
+
+// RawObjectPayloadTypeNameCollisionDSL exercises the naming of synthetic user
+// types created when wrapping raw object payloads.
+//
+// The service generator wraps raw object payloads in a synthetic user type
+// named after the method (e.g. Foo -> FooPayload). That name must be computed
+// using NameScope uniqueness rules even when a would-be suffix (FooPayload2) is
+// already taken, otherwise codegen can emit invalid references.
+var RawObjectPayloadTypeNameCollisionDSL = func() {
+	var FooPayload = Type("FooPayload", func() {
+		Attribute("x", String)
+	})
+	var FooPayload2 = Type("FooPayload2", func() {
+		Attribute("y", String)
+	})
+
+	Service("RawObjectPayloadTypeNameCollision", func() {
+		// Reserve FooPayload and FooPayload2 in the NameScope *before* raw-object
+		// payload wrapping occurs (wrapObject runs before method data is built).
+		Error("reserve_foo_payload", FooPayload)
+		Error("reserve_foo_payload2", FooPayload2)
+
+		Method("Foo", func() {
+			Payload(func() {
+				Attribute("a", String)
+				Required("a")
+			})
+		})
+	})
+}
+
+// UnionCustomKeysDSL tests union with custom type and value keys via Meta tags.
+var UnionCustomKeysDSL = func() {
+	var CustomUnion = Type("CustomUnion", func() {
+		OneOf("Values", func() {
+			Meta("oneof:type:field", "kind")
+			Meta("oneof:value:field", "data")
+			Attribute("Int", Int)
+			Attribute("String", String)
+		})
+	})
+	Service("CustomKeysService", func() {
+		Method("CustomUnion", func() {
+			Payload(CustomUnion)
+			Result(CustomUnion)
+		})
+	})
+}
+
+// UnionCustomKeysMultiTypeDSL tests union with custom keys and user-defined types.
+var UnionCustomKeysMultiTypeDSL = func() {
+	var TypeA = Type("TypeA", func() {
+		Attribute("a", Int)
+	})
+	var TypeB = Type("TypeB", func() {
+		Attribute("b", String)
+	})
+	var PaymentMethod = Type("PaymentMethod", func() {
+		OneOf("method", func() {
+			Meta("oneof:type:field", "paymentType")
+			Meta("oneof:value:field", "details")
+			Attribute("credit_card", TypeA)
+			Attribute("paypal", TypeB)
+		})
+	})
+	Service("PaymentService", func() {
+		Method("ProcessPayment", func() {
+			Payload(PaymentMethod)
+			Result(PaymentMethod)
+		})
+	})
+}
+
+// UnionDefaultKeysDSL tests that unions without custom Meta tags still use "type" and "value".
+var UnionDefaultKeysDSL = func() {
+	var DefaultUnion = Type("DefaultUnion", func() {
+		OneOf("Values", func() {
+			Attribute("Int", Int)
+			Attribute("String", String)
+		})
+	})
+	Service("DefaultKeysService", func() {
+		Method("DefaultUnion", func() {
+			Payload(DefaultUnion)
+			Result(DefaultUnion)
 		})
 	})
 }

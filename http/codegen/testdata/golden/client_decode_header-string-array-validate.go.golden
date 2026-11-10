@@ -1,0 +1,48 @@
+// DecodeMethodAResponse returns a decoder for responses returned by the
+// ServiceHeaderStringArrayValidateResponse MethodA endpoint. restoreBody
+// controls whether the response body should be restored after having been read.
+func DecodeMethodAResponse(decoder func(*http.Response) goahttp.Decoder, restoreBody bool) func(*http.Response) (any, error) {
+	return func(resp *http.Response) (result any, decodeErr error) {
+		responseBody := resp.Body
+		if restoreBody {
+			b, readErr := io.ReadAll(responseBody)
+			closeErr := responseBody.Close()
+			if err := errors.Join(readErr, closeErr); err != nil {
+				return nil, goahttp.ErrDecodingError("ServiceHeaderStringArrayValidateResponse", "MethodA", err)
+			}
+			resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			defer func() {
+				resp.Body = io.NopCloser(bytes.NewBuffer(b))
+			}()
+		} else {
+			defer func() {
+				if err := responseBody.Close(); err != nil {
+					decodeErr = errors.Join(decodeErr, goahttp.ErrDecodingError("ServiceHeaderStringArrayValidateResponse", "MethodA", err))
+				}
+			}()
+		}
+		switch resp.StatusCode {
+		case http.StatusOK:
+			var (
+				array []string
+				err   error
+			)
+			array = resp.Header["Array"]
+
+			if len(array) < 5 {
+				err = goa.MergeErrors(err, goa.InvalidLengthError("array", array, len(array), 5, true))
+			}
+			if err != nil {
+				return nil, goahttp.ErrValidationError("ServiceHeaderStringArrayValidateResponse", "MethodA", err)
+			}
+			res := NewMethodAResultOK(array)
+			return res, nil
+		default:
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, goahttp.ErrDecodingError("ServiceHeaderStringArrayValidateResponse", "MethodA", err)
+			}
+			return nil, goahttp.ErrInvalidResponse("ServiceHeaderStringArrayValidateResponse", "MethodA", resp.StatusCode, string(body))
+		}
+	}
+}

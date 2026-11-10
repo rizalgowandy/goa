@@ -1,8 +1,12 @@
+// This file prepares, validates, and finalizes the HTTP transport contract for
+// one service method.
 package expr
 
 import (
+	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/dimfeld/httppath"
@@ -45,6 +49,17 @@ type (
 		// StreamingBody describes the body transferred through the websocket
 		// stream.
 		StreamingBody *AttributeExpr
+		// PayloadIDAttribute is retained for generator compatibility.
+		//
+		// Deprecated: inspect the payload field marked with "jsonrpc:id".
+		PayloadIDAttribute string
+		// ResultIDAttribute is retained for generator compatibility.
+		//
+		// Deprecated: JSON-RPC results cannot define an ID field.
+		ResultIDAttribute string
+		// JSONRPCNotification is true when generated clients send this method
+		// without an ID and do not wait for a JSON-RPC response.
+		JSONRPCNotification bool
 		// SkipRequestBodyEncodeDecode indicates that the service method accepts
 		// a reader and that the client provides a reader to stream the request
 		// body.
@@ -64,8 +79,14 @@ type (
 		// MultipartRequest indicates that the request content type for
 		// the endpoint is a multipart type.
 		MultipartRequest bool
+		// FormRequest selects generated URL-encoded codecs for the request body.
+		FormRequest bool
 		// Redirect defines a redirect for the endpoint.
 		Redirect *HTTPRedirectExpr
+		// SSE defines the Server-Sent Events configuration for this endpoint if it's
+		// a streaming endpoint. If nil, the endpoint uses WebSockets by default or
+		// inherits the service-level SSE configuration if defined.
+		SSE *HTTPSSEExpr
 		// Meta is a set of key/value pairs with semantic that is
 		// specific to each generator, see dsl.Meta.
 		Meta MetaExpr
@@ -86,7 +107,18 @@ type (
 		// dsl.Meta
 		Meta MetaExpr
 	}
+
+	// jsonRPCIDField records where one ID declaration appears so validation can
+	// reject declarations that code generation cannot represent.
+	jsonRPCIDField struct {
+		name      string
+		attribute *AttributeExpr
+		depth     int
+	}
 )
+
+// A generated JSON-RPC request ID uses the standard 36-character UUID form.
+const generatedJSONRPCRequestIDLength = 36
 
 // Name of HTTP endpoint
 func (e *HTTPEndpointExpr) Name() string {
@@ -112,6 +144,30 @@ func (e *HTTPEndpointExpr) EvalName() string {
 	return prefix + suffix
 }
 
+// IsJSONRPC returns true if the endpoint is a JSON-RPC endpoint.
+func (e *HTTPEndpointExpr) IsJSONRPC() bool {
+	_, ok := e.Meta["jsonrpc"]
+	return ok
+}
+
+// IsJSONRPCNotification reports whether generated clients call the JSON-RPC
+// method without an ID and do not wait for a JSON-RPC response.
+func (e *HTTPEndpointExpr) IsJSONRPCNotification() bool {
+	return e.IsJSONRPC() && e.JSONRPCNotification
+}
+
+// UsesSSE returns true if the endpoint streams result events over Server-Sent
+// Events.
+func (e *HTTPEndpointExpr) UsesSSE() bool {
+	return e.SSE != nil && (e.MethodExpr.IsResultStreaming() || e.MethodExpr.HasMixedResults())
+}
+
+// UsesWebSocket returns true if an ordinary HTTP endpoint streams payloads or
+// results over a WebSocket connection.
+func (e *HTTPEndpointExpr) UsesWebSocket() bool {
+	return !e.IsJSONRPC() && e.MethodExpr.IsStreaming() && e.SSE == nil
+}
+
 // HasAbsoluteRoutes returns true if all the endpoint routes are absolute.
 func (e *HTTPEndpointExpr) HasAbsoluteRoutes() bool {
 	for _, r := range e.Routes {
@@ -127,13 +183,20 @@ func (e *HTTPEndpointExpr) HasAbsoluteRoutes() bool {
 func (e *HTTPEndpointExpr) PathParams() *MappedAttributeExpr {
 	obj := Object{}
 	v := &ValidationExpr{}
-	pat := e.Params.Attribute() // need "attribute:name" style keys
 	for _, r := range e.Routes {
 		for _, p := range r.Params() {
-			att := pat.Find(p)
-			obj.Set(p, att)
-			if e.Params.IsRequired(p) {
-				v.AddRequired(p)
+			name := e.Params.KeyName(p)
+			att := e.Params.Find(name)
+			if att == nil {
+				continue
+			}
+			key := name
+			if name != p {
+				key += ":" + p
+			}
+			obj.Set(key, att)
+			if e.Params.IsRequired(name) {
+				v.AddRequired(name)
 			}
 		}
 	}
@@ -154,25 +217,30 @@ func (e *HTTPEndpointExpr) QueryParams() *MappedAttributeExpr {
 	}
 	pat := e.Params.Attribute() // need "attribute:name" style keys
 	for _, at := range *(pat.Type.(*Object)) {
-		found := false
-		for n := range pp {
-			if n == at.Name {
-				found = true
-				break
-			}
+		name := strings.Split(at.Name, ":")[0]
+		if _, found := pp[e.Params.ElemName(name)]; found {
+			continue
 		}
-		if !found {
-			obj.Set(at.Name, at.Attribute)
-			// when looking for required attributes we need the unmapped keys
-			// (i.e. without the "attribute:name" syntax)
-			attName := strings.Split(at.Name, ":")[0]
-			if e.Params.IsRequired(attName) {
-				v.AddRequired(attName)
-			}
+		obj.Set(at.Name, at.Attribute)
+		if e.Params.IsRequired(name) {
+			v.AddRequired(name)
 		}
 	}
 	at := &AttributeExpr{Type: &obj, Validation: v}
 	return NewMappedAttributeExpr(at)
+}
+
+// RequestBodyRequired reports whether a finalized endpoint rejects an absent
+// request body. Body("name") permits absence when that payload field is optional;
+// every other nonempty body is required, regardless of its individual fields.
+func (e *HTTPEndpointExpr) RequestBodyRequired() bool {
+	if e.Body.Type == Empty {
+		return false
+	}
+	if origin, selected := e.Body.Meta["origin:attribute"]; selected {
+		return e.MethodExpr.Payload.IsRequired(origin[0])
+	}
+	return true
 }
 
 // Prepare computes the request path and query string parameters as well as the
@@ -195,15 +263,15 @@ func (e *HTTPEndpointExpr) Prepare() {
 
 	// Inherit headers, cookies and params from parent service and API
 	headers := NewEmptyMappedAttributeExpr()
-	headers.Merge(Root.API.HTTP.Headers)
+	headers.Merge(e.MethodExpr.Service.design.API.HTTP.Headers)
 	headers.Merge(e.Service.Headers)
 
 	cookies := NewEmptyMappedAttributeExpr()
-	cookies.Merge(Root.API.HTTP.Cookies)
+	cookies.Merge(e.MethodExpr.Service.design.API.HTTP.Cookies)
 	cookies.Merge(e.Service.Cookies)
 
 	params := NewEmptyMappedAttributeExpr()
-	params.Merge(Root.API.HTTP.Params)
+	params.Merge(e.MethodExpr.Service.design.API.HTTP.Params)
 	params.Merge(e.Service.Params)
 
 	if p := e.Service.Parent(); p != nil {
@@ -216,7 +284,7 @@ func (e *HTTPEndpointExpr) Prepare() {
 				params.Merge(cpp)
 
 				// Inherit attributes for path params from parent service
-				WalkMappedAttr(cpp, func(name, _ string, _ *AttributeExpr) error {
+				WalkMappedAttr(cpp, func(name, _ string, _ *AttributeExpr) error { // nolint: errcheck
 					if att := c.MethodExpr.Payload.Find(name); att != nil {
 						if e.MethodExpr.Payload.Type == Empty {
 							e.MethodExpr.Payload.Type = &Object{}
@@ -244,9 +312,13 @@ func (e *HTTPEndpointExpr) Prepare() {
 	e.Cookies = cookies
 	e.Params = params
 
-	// Initialize path params that are not defined explicitly in
+	// For each URL wildcard without an explicit Param mapping, infer its
+	// payload field by the same name. Mapped wildcards keep their authored field.
 	for _, r := range e.Routes {
 		for _, p := range r.Params() {
+			if _, mapped := params.reverseMap[p]; mapped {
+				continue
+			}
 			if a := params.Find(p); a == nil {
 				params.Merge(NewMappedAttributeExpr(&AttributeExpr{
 					Type: &Object{
@@ -271,6 +343,15 @@ func (e *HTTPEndpointExpr) Prepare() {
 		e.Responses = []*HTTPResponseExpr{{StatusCode: status}}
 	}
 
+	// Inherit SSE configuration from service or API level for streaming endpoints
+	if e.MethodExpr.Stream == ServerStreamKind && e.SSE == nil {
+		if e.Service.SSE != nil {
+			e.SSE = e.Service.SSE
+		} else if e.MethodExpr.Service.design.API.HTTP.SSE != nil {
+			e.SSE = e.MethodExpr.Service.design.API.HTTP.SSE
+		}
+	}
+
 	// Error -> ResponseError
 	methodErrors := map[string]struct{}{}
 	for _, v := range e.HTTPErrors {
@@ -293,7 +374,7 @@ func (e *HTTPEndpointExpr) Prepare() {
 			continue
 		}
 		// Lookup undefined HTTP errors in API.
-		for _, v := range Root.API.HTTP.Errors {
+		for _, v := range e.Service.Root.Errors {
 			if me.Name == v.Name {
 				e.HTTPErrors = append(e.HTTPErrors, v.Dup())
 			}
@@ -313,13 +394,18 @@ func (e *HTTPEndpointExpr) Prepare() {
 			}
 		}
 		if !found {
-			for _, ae := range Root.API.HTTP.Errors {
+			for _, ae := range e.MethodExpr.Service.design.API.HTTP.Errors {
 				if se.Name == ae.Name {
 					e.HTTPErrors = append(e.HTTPErrors, ae.Dup())
 					break
 				}
 			}
 		}
+	}
+
+	// WebSocket endpoints use GET for the HTTP upgrade request.
+	if e.UsesWebSocket() && len(e.Routes) > 0 {
+		e.Routes[0].Method = "GET"
 	}
 
 	// Prepare responses
@@ -341,7 +427,7 @@ func (e *HTTPEndpointExpr) Validate() error {
 
 	// SkipRequestBodyEncodeDecode is not compatible with gRPC or WebSocket
 	if e.SkipRequestBodyEncodeDecode {
-		if s := Root.API.GRPC.Service(e.Service.Name()); s != nil {
+		if s := e.MethodExpr.Service.design.API.GRPC.Service(e.Service.Name()); s != nil {
 			if s.Endpoint(e.Name()) != nil {
 				verr.Add(e, "Endpoint cannot use SkipRequestBodyEncodeDecode and define a gRPC transport.")
 			}
@@ -356,7 +442,7 @@ func (e *HTTPEndpointExpr) Validate() error {
 
 	// SkipResponseBodyEncodeDecode is not compatible with gRPC or WebSocket.
 	if e.SkipResponseBodyEncodeDecode {
-		if s := Root.API.GRPC.Service(e.Service.Name()); s != nil {
+		if s := e.MethodExpr.Service.design.API.GRPC.Service(e.Service.Name()); s != nil {
 			if s.Endpoint(e.Name()) != nil {
 				verr.Add(e, "Endpoint response cannot use SkipResponseBodyEncodeDecode and define a gRPC transport.")
 			}
@@ -370,6 +456,164 @@ func (e *HTTPEndpointExpr) Validate() error {
 		if rt, ok := e.MethodExpr.Result.Type.(*ResultTypeExpr); ok {
 			if len(rt.Views) > 1 {
 				verr.Add(e, "Endpoint cannot use SkipResponseBodyEncodeDecode when method result type defines multiple views.")
+			}
+		}
+	}
+
+	// A WebSocket client learns the result view from the connection handshake.
+	// Receiving a streamed payload starts that connection before the service can
+	// choose a result view, so the design must select the view in advance.
+	if e.UsesWebSocket() && e.MethodExpr.IsPayloadStreaming() && !e.MethodExpr.HasMixedResults() {
+		if result, ok := e.MethodExpr.Result.Type.(*ResultTypeExpr); ok {
+			viewCount := len(result.Views)
+			if result.View(DefaultView) == nil {
+				viewCount++
+			}
+			_, selectedByMethod := e.MethodExpr.Result.Meta.Last(ViewMetaKey)
+			_, selectedByType := result.Meta.Last(ViewMetaKey)
+			if viewCount > 1 && !selectedByMethod && !selectedByType {
+				verr.Add(e, "Endpoint cannot choose a result view at runtime when the method defines StreamingPayload because the WebSocket connection starts before the result view is known. Select a view in Result or StreamingResult.")
+			}
+		}
+	}
+
+	// Validate streaming endpoints for SSE compatibility
+	if e.MethodExpr.Stream == ServerStreamKind {
+		if e.SSE != nil {
+			if err := e.SSE.Validate(e.MethodExpr); err != nil {
+				var valErr *eval.ValidationErrors
+				if errors.As(err, &valErr) {
+					verr.Merge(valErr)
+				}
+			}
+			if e.IsJSONRPC() && e.SSE.DataField != "" {
+				result := e.MethodExpr.StreamingResult
+				if result == nil {
+					result = e.MethodExpr.Result
+				}
+				if _, viewed := result.Type.(*ResultTypeExpr); viewed {
+					verr.Add(e, "SSE event data cannot select one field from a viewed streaming result because the selected data would omit the result view needed to decode the stream")
+				}
+			}
+			if e.SSE.RequestIDField != "" {
+				for _, field := range *AsObject(e.Headers.Type) {
+					header := e.Headers.ElemName(field.Name)
+					if field.Name == e.SSE.RequestIDField {
+						verr.Add(e, "SSE request ID field %q cannot also be mapped with Header because ServerSentEvents maps it to Last-Event-ID", field.Name)
+						continue
+					}
+					if strings.EqualFold(header, "Last-Event-ID") {
+						verr.Add(e, "HTTP header %q is reserved for SSE request ID field %q", header, e.SSE.RequestIDField)
+					}
+				}
+			}
+		}
+	}
+
+	// Validate mixed results configuration
+	if e.MethodExpr.HasMixedResults() {
+		// A separate streaming result requires SSE.
+		if e.SSE == nil {
+			verr.Add(e, "Methods with both Result and StreamingResult must use ServerSentEvents()")
+		}
+		// Cannot have bidirectional streaming with mixed results
+		if e.MethodExpr.IsPayloadStreaming() {
+			verr.Add(e, "Methods with both Result and StreamingResult cannot have StreamingPayload")
+		}
+	} else if e.SSE != nil {
+		// Error if SSE is defined but endpoint is not server streaming or mixed results
+		switch e.MethodExpr.Stream {
+		case BidirectionalStreamKind:
+			verr.Add(e, "Server-Sent Events cannot be used with bidirectional streaming endpoints")
+		case ClientStreamKind:
+			verr.Add(e, "Server-Sent Events cannot be used with client-to-server streaming endpoints")
+		case NoStreamKind:
+			// SSE requires either server streaming or mixed results
+			if !e.MethodExpr.HasMixedResults() {
+				verr.Add(e, "Server-Sent Events can only be used with endpoints that have a streaming result or mixed results")
+			}
+			// case ServerStreamKind is valid, no error
+		}
+	}
+
+	// JSON-RPC validation
+	if e.IsJSONRPC() {
+		if strings.HasPrefix(e.MethodExpr.Name, "rpc.") {
+			verr.Add(e, "JSON-RPC method %q cannot begin with %q because JSON-RPC reserves that namespace", e.MethodExpr.Name, "rpc.")
+		}
+		requestIDs := jsonRPCIDFields(e.MethodExpr.Payload)
+		if len(requestIDs) > 1 {
+			verr.Add(e, "JSON-RPC method %q cannot define more than one request ID field", e.MethodExpr.Name)
+		}
+		for _, id := range requestIDs {
+			if id.depth != 1 {
+				verr.Add(e, "JSON-RPC request ID field %q must be a direct payload field", id.name)
+			}
+			if !isJSONRPCIDString(id.attribute.Type) {
+				verr.Add(e, "JSON-RPC request ID field %q must be a string", id.name)
+			}
+		}
+		if len(requestIDs) == 1 {
+			id := requestIDs[0]
+			name := id.name
+			if id.depth == 1 && isJSONRPCIDString(id.attribute.Type) &&
+				!e.MethodExpr.Payload.IsRequired(name) && e.MethodExpr.Payload.GetDefault(name) == nil {
+				if incompatible := incompatibleGeneratedJSONRPCRequestIDValidations(id.attribute); len(incompatible) > 0 {
+					verr.Add(e, "JSON-RPC request ID field %q is optional and has no default, so generated clients create a UUID when it is absent; the following validation rules may reject that UUID: %s; make the field required or give it a default", name, strings.Join(incompatible, ", "))
+				}
+			}
+			if e.Body != nil && jsonRPCBodyContainsID(e.Body, name) {
+				verr.Add(e, "JSON-RPC request ID field %q cannot also appear in params", name)
+			}
+			if _, ok := e.Params.FindKey(name); ok {
+				verr.Add(e, "JSON-RPC request ID field %q cannot also be mapped as an HTTP parameter", name)
+			}
+			if _, ok := e.Headers.FindKey(name); ok {
+				verr.Add(e, "JSON-RPC request ID field %q cannot also be mapped as an HTTP header", name)
+			}
+			if _, ok := e.Cookies.FindKey(name); ok {
+				verr.Add(e, "JSON-RPC request ID field %q cannot also be mapped as an HTTP cookie", name)
+			}
+			if e.SSE != nil && e.SSE.RequestIDField == name {
+				verr.Add(e, "JSON-RPC request ID field %q cannot also be mapped to the Last-Event-ID header", name)
+			}
+		}
+		if len(jsonRPCIDFields(e.MethodExpr.Result)) > 0 || len(jsonRPCIDFields(e.MethodExpr.StreamingResult)) > 0 {
+			verr.Add(e, "JSON-RPC method %q cannot define an ID field in its result because the transport copies the request ID", e.MethodExpr.Name)
+		}
+		seenErrors := make(map[string]struct{})
+		for _, mapped := range e.HTTPErrors {
+			if _, ok := seenErrors[mapped.Name]; ok {
+				continue
+			}
+			seenErrors[mapped.Name] = struct{}{}
+			designError := e.MethodExpr.Error(mapped.Name)
+			if designError != nil && len(jsonRPCIDFields(designError.AttributeExpr)) > 0 {
+				verr.Add(e, "JSON-RPC error %q cannot define an ID field because the transport copies the request ID", mapped.Name)
+			}
+		}
+		if e.IsJSONRPCNotification() {
+			if e.MethodExpr.Result.Type != Empty {
+				verr.Add(e, "JSON-RPC notification %q cannot define a result because notifications receive no response", e.MethodExpr.Name)
+			}
+			if e.MethodExpr.IsStreaming() {
+				verr.Add(e, "JSON-RPC notification %q cannot stream because notifications send one message and receive no response", e.MethodExpr.Name)
+			}
+			if hasJSONRPCIDField(e.MethodExpr.Payload) || hasJSONRPCIDField(e.MethodExpr.StreamingPayload) {
+				verr.Add(e, "JSON-RPC notification %q cannot define an ID field because notifications omit the request ID", e.MethodExpr.Name)
+			}
+		}
+		if e.MethodExpr.HasMixedResults() {
+			verr.Add(e, "JSON-RPC method %q cannot define both Result and StreamingResult because its client stream cannot return a separate final result", e.MethodExpr.Name)
+		}
+		switch e.MethodExpr.Stream {
+		case ClientStreamKind:
+			verr.Add(e, "JSON-RPC method %q cannot use client streaming because one JSON-RPC request contains one params value", e.MethodExpr.Name)
+		case BidirectionalStreamKind:
+			verr.Add(e, "JSON-RPC method %q cannot use bidirectional streaming because one JSON-RPC request contains one params value", e.MethodExpr.Name)
+		case ServerStreamKind:
+			if e.SSE == nil {
+				verr.Add(e, "JSON-RPC method %q with a streaming result must use ServerSentEvents()", e.MethodExpr.Name)
 			}
 		}
 	}
@@ -401,25 +645,13 @@ func (e *HTTPEndpointExpr) Validate() error {
 		params := e.Routes[0].Params()
 		for _, r := range e.Routes[1:] {
 			for _, p := range params {
-				found := false
-				for _, p2 := range r.Params() {
-					if p == p2 {
-						found = true
-						break
-					}
-				}
+				found := slices.Contains(r.Params(), p)
 				if !found {
 					verr.Add(e, "Param %q does not appear in all routes", p)
 				}
 			}
 			for _, p2 := range r.Params() {
-				found := false
-				for _, p := range params {
-					if p == p2 {
-						found = true
-						break
-					}
-				}
+				found := slices.Contains(params, p2)
 				if !found {
 					verr.Add(e, "Param %q does not appear in all routes", p2)
 				}
@@ -429,9 +661,11 @@ func (e *HTTPEndpointExpr) Validate() error {
 
 	// Validate responses
 
-	// All responses but one must have tags for the same status code
+	// Exactly one response must omit a tag so the generated server has a
+	// response to use when no tagged response matches the result.
 	hasTags := false
 	allTagged := true
+	untaggedResponse := false
 	successResp := false
 	for i, r := range e.Responses {
 		verr.Merge(r.Validate(e))
@@ -442,10 +676,22 @@ func (e *HTTPEndpointExpr) Validate() error {
 		}
 		if r.Tag[0] == "" {
 			allTagged = false
+			if untaggedResponse {
+				verr.Add(r, "Multiple response definitions without a Tag")
+			}
+			untaggedResponse = true
 		} else {
 			hasTags = true
 		}
 		if r.StatusCode < 400 {
+			if e.MethodExpr.IsStreaming() {
+				if !r.Headers.IsEmpty() {
+					verr.Add(r, "streaming success response cannot map result attributes to HTTP headers")
+				}
+				if !r.Cookies.IsEmpty() {
+					verr.Add(r, "streaming success response cannot map result attributes to HTTP cookies")
+				}
+			}
 			if successResp && e.MethodExpr.Stream == ServerStreamKind {
 				verr.Add(r, "At most one success response can be defined for a streaming endpoint.")
 				if r.Body != nil && r.Body.Type == Empty {
@@ -465,7 +711,7 @@ func (e *HTTPEndpointExpr) Validate() error {
 	}
 
 	// Make sure parameters and headers use compatible types
-	verr.Merge(e.validateParams())
+	verr.Merge(e.ValidateParams())
 	verr.Merge(e.validateHeadersAndCookies())
 
 	// Validate body attribute (required fields exist etc.)
@@ -482,13 +728,7 @@ func (e *HTTPEndpointExpr) Validate() error {
 				preqs = e.MethodExpr.Payload.Validation.Required
 			}
 			for _, req := range v.Required {
-				found := false
-				for _, preq := range preqs {
-					if req == preq {
-						found = true
-						break
-					}
-				}
+				found := slices.Contains(preqs, req)
 				if !found {
 					missing = append(missing, req)
 				}
@@ -510,6 +750,7 @@ func (e *HTTPEndpointExpr) Validate() error {
 	for _, er := range e.HTTPErrors {
 		verr.Merge(er.Validate())
 	}
+	verr.Merge(e.validateErrorMappings())
 
 	// Validate definitions of params, headers and bodies against definition of payload
 	var (
@@ -523,6 +764,9 @@ func (e *HTTPEndpointExpr) Validate() error {
 		}
 		if e.MultipartRequest {
 			verr.Add(e, "MultipartRequest is set but Payload is not defined")
+		}
+		if e.FormRequest {
+			verr.Add(e, "FormRequest requires a nonempty object request body.")
 		}
 		if !e.Params.IsEmpty() {
 			verr.Add(e, "Params are set but Payload is not defined.")
@@ -637,16 +881,58 @@ func (e *HTTPEndpointExpr) Validate() error {
 	}
 
 	body := httpRequestBody(e)
+	if e.FormRequest {
+		e.validateFormBody(body, verr)
+	}
+	if e.MultipartRequest && body.Type == Empty {
+		verr.Add(e, "MultipartRequest requires a request body.")
+	}
 	if e.SkipRequestBodyEncodeDecode && body.Type != Empty {
 		verr.Add(e, "HTTP endpoint request body must be empty when using SkipRequestBodyEncodeDecode but not all method payload attributes are mapped to headers and params. Make sure to define Headers and Params as needed.")
 	}
+
+	// WebSocket upgrade requests cannot carry a request body.
 	if e.MethodExpr.IsStreaming() && body.Type != Empty {
-		// Refer Websocket protocol - https://tools.ietf.org/html/rfc6455
-		// Protocol does not allow HTTP request body to be passed.
-		verr.Add(e, "HTTP endpoint request body must be empty when the endpoint uses streaming. Payload attributes must be mapped to headers and/or params.")
+		if e.UsesWebSocket() {
+			verr.Add(e, "HTTP endpoint request body must be empty when the endpoint uses streaming. Payload attributes must be mapped to headers and/or params.")
+		}
 	}
 
 	return verr
+}
+
+// validateErrorMappings ensures inherited HTTP response policy describes the
+// same concrete error value returned by the endpoint method.
+func (e *HTTPEndpointExpr) validateErrorMappings() *eval.ValidationErrors {
+	verr := new(eval.ValidationErrors)
+	for _, mapping := range e.HTTPErrors {
+		mapped, owner := mapping.mappedError()
+		method := e.MethodExpr.Error(mapping.Name)
+		if mapped == nil || method == nil || equivalentErrorAttributes(mapped.AttributeExpr, method.AttributeExpr) {
+			continue
+		}
+		verr.Add(
+			mapping.Response,
+			`HTTP error mapping %q inherited from the %s uses error type %q, but method %q of service %q uses %q; both definitions must define the same error attribute; %s`,
+			mapping.Name,
+			owner,
+			mapped.Type.Name(),
+			e.MethodExpr.Name,
+			e.MethodExpr.Service.Name,
+			method.Type.Name(),
+			errorAttributeDifference(mapped.AttributeExpr, method.AttributeExpr),
+		)
+	}
+	return verr
+}
+
+// errorAttributeDifference names qualifier settings when they are the reason
+// two reusable error definitions disagree.
+func errorAttributeDifference(first, second *AttributeExpr) string {
+	if settings := differingErrorQualifierSettings(first, second); len(settings) > 0 {
+		return "the " + strings.Join(settings, ", ") + " setting differs"
+	}
+	return "their type, validations, defaults, or metadata differ"
 }
 
 // Finalize is run post DSL execution. It merges response definitions, creates
@@ -656,9 +942,10 @@ func (e *HTTPEndpointExpr) Validate() error {
 // the response that it needs to build.
 func (e *HTTPEndpointExpr) Finalize() {
 	// Compute security scheme attribute name and corresponding HTTP location
-	if reqLen := len(e.MethodExpr.Requirements); reqLen > 0 {
+	requirements := EffectiveSecurityRequirements(e.MethodExpr.Requirements)
+	if reqLen := len(requirements); reqLen > 0 {
 		e.Requirements = make([]*SecurityExpr, 0, reqLen)
-		for _, req := range e.MethodExpr.Requirements {
+		for _, req := range requirements {
 			dupReq := DupRequirement(req)
 			for _, sch := range dupReq.Schemes {
 				var field string
@@ -671,6 +958,8 @@ func (e *HTTPEndpointExpr) Finalize() {
 					continue
 				case APIKeyKind:
 					field = TaggedAttribute(e.MethodExpr.Payload, "security:apikey:"+sch.SchemeName)
+				case BearerKind:
+					field = TaggedAttribute(e.MethodExpr.Payload, "security:bearer")
 				case JWTKind:
 					field = TaggedAttribute(e.MethodExpr.Payload, "security:token")
 				case OAuth2Kind:
@@ -701,105 +990,49 @@ func (e *HTTPEndpointExpr) Finalize() {
 	initAttr(e.Params, e.MethodExpr.Payload)
 	initAttr(e.Headers, e.MethodExpr.Payload)
 	initAttr(e.Cookies, e.MethodExpr.Payload)
+	if e.SSE != nil && e.SSE.RequestIDField != "" {
+		name := e.SSE.RequestIDField
+		attribute := DupAtt(e.MethodExpr.Payload.Find(name))
+		if attribute.Meta == nil {
+			attribute.Meta = make(MetaExpr)
+		}
+		attribute.Meta["sse:last-event-id"] = []string{"true"}
+		AsObject(e.Headers.Type).Set(name, attribute)
+		e.Headers.Map("Last-Event-ID", name)
+		if e.MethodExpr.Payload.IsRequired(name) {
+			if e.Headers.Validation == nil {
+				e.Headers.Validation = &ValidationExpr{}
+			}
+			e.Headers.Validation.AddRequired(name)
+		}
+	}
 
+	bodySource := bodyFieldNameSource(e.Body, e.MethodExpr.Payload)
 	e.Body = httpRequestBody(e)
 	e.Body.Finalize()
+	e.Body = e.Service.mapBodyFieldNames(e.Body, bodySource)
 
 	e.StreamingBody = httpStreamingBody(e)
 	if e.StreamingBody != nil {
 		e.StreamingBody.Finalize()
+		e.StreamingBody = e.Service.mapBodyFieldNames(e.StreamingBody, bodyFieldNameSource(nil, e.MethodExpr.StreamingPayload))
 	}
 
 	// Initialize responses parent, headers and body
 	for _, r := range e.Responses {
+		bodySource := bodyFieldNameSource(r.Body, e.MethodExpr.Result)
 		r.Finalize(e, e.MethodExpr.Result)
 		r.Body = httpResponseBody(e, r)
 		r.Body.Finalize()
+		r.Body = e.Service.mapBodyFieldNames(r.Body, bodySource)
 	}
 
 	// Make sure all error types are user types and have a body.
 	for _, herr := range e.HTTPErrors {
+		bodySource := bodyFieldNameSource(herr.Response.Body, e.MethodExpr.Error(herr.Name).AttributeExpr)
 		herr.Finalize(e)
+		herr.Response.Body = e.Service.mapBodyFieldNames(herr.Response.Body, bodySource)
 	}
-}
-
-// validateParams checks the endpoint parameters are of an allowed type and the
-// method payload contains the parameters.
-func (e *HTTPEndpointExpr) validateParams() *eval.ValidationErrors {
-	if e.Params.IsEmpty() {
-		return nil
-	}
-
-	var (
-		pparams = DupMappedAtt(e.PathParams())
-		qparams = DupMappedAtt(e.QueryParams())
-	)
-	// We have to figure out the actual type for the params because the actual
-	// type is initialized only during the finalize phase. In the validation
-	// phase, all param types are string type by default unless specified
-	// expliclty.
-	initAttr(pparams, e.MethodExpr.Payload)
-	initAttr(qparams, e.MethodExpr.Payload)
-
-	verr := new(eval.ValidationErrors)
-	WalkMappedAttr(pparams, func(name, _ string, a *AttributeExpr) error {
-		switch {
-		case IsObject(a.Type):
-			verr.Add(e, "path parameter %s cannot be an object, path parameter types must be primitive, array or map (query string only)", name)
-		case IsMap(a.Type):
-			verr.Add(e, "path parameter %s cannot be a map, path parameter types must be primitive or array", name)
-		case IsArray(a.Type):
-			arr := AsArray(a.Type)
-			if !IsPrimitive(arr.ElemType.Type) {
-				verr.Add(e, "elements of array path parameter %q must be primitive", name)
-			}
-		default:
-			ctx := fmt.Sprintf("path parameter %s", name)
-			verr.Merge(a.Validate(ctx, e))
-		}
-		return nil
-	})
-	WalkMappedAttr(qparams, func(name, _ string, a *AttributeExpr) error {
-		switch {
-		case IsObject(a.Type):
-			verr.Add(e, "query parameter %s cannot be an object, query parameter types must be primitive, array or map (query string only)", name)
-		case IsArray(a.Type):
-			arr := AsArray(a.Type)
-			if !IsPrimitive(arr.ElemType.Type) {
-				verr.Add(e, "elements of array query parameter %q must be primitive", name)
-			}
-		default:
-			ctx := fmt.Sprintf("query parameter %s", name)
-			verr.Merge(a.Validate(ctx, e))
-		}
-		return nil
-	})
-	if e.MethodExpr.Payload != nil {
-		switch e.MethodExpr.Payload.Type.(type) {
-		case *Object, UserType:
-			WalkMappedAttr(pparams, func(name, _ string, a *AttributeExpr) error {
-				if e.MethodExpr.Payload.Find(name) == nil {
-					verr.Add(e, "Path parameter %q not found in payload.", name)
-				}
-				return nil
-			})
-			WalkMappedAttr(qparams, func(name, _ string, a *AttributeExpr) error {
-				if e.MethodExpr.Payload.Find(name) == nil {
-					verr.Add(e, "Query string parameter %q not found in payload.", name)
-				}
-				return nil
-			})
-		case *Array:
-			if len(*AsObject(pparams.Type))+len(*AsObject(qparams.Type)) > 1 {
-				verr.Add(e, "Payload type is array but HTTP endpoint defines multiple parameters. At most one parameter must be defined and it must be an array.")
-			}
-		case *Map:
-			if len(*AsObject(pparams.Type))+len(*AsObject(qparams.Type)) > 1 {
-				verr.Add(e, "Payload type is map but HTTP endpoint defines multiple parameters. At most one query string parameter must be defined and it must be a map.")
-			}
-		}
-	}
-	return verr
 }
 
 // validateHeadersAndCookies makes sure headers and cookies are of an allowed
@@ -814,10 +1047,10 @@ func (e *HTTPEndpointExpr) validateHeadersAndCookies() *eval.ValidationErrors {
 	cookies := DupMappedAtt(e.Cookies)
 	initAttr(headers, e.MethodExpr.Payload)
 	initAttr(cookies, e.MethodExpr.Payload)
-	WalkMappedAttr(headers, func(name, _ string, a *AttributeExpr) error {
+	WalkMappedAttr(headers, func(name, _ string, a *AttributeExpr) error { // nolint: errcheck
 		switch {
-		case IsObject(a.Type):
-			verr.Add(e, "header %q cannot be an object, header type must be primitive or array", name)
+		case IsObject(a.Type), IsUnion(a.Type):
+			verr.Add(e, "header %q must be primitive or array", name)
 		case IsArray(a.Type):
 			arr := AsArray(a.Type)
 			if !IsPrimitive(arr.ElemType.Type) {
@@ -829,12 +1062,10 @@ func (e *HTTPEndpointExpr) validateHeadersAndCookies() *eval.ValidationErrors {
 		}
 		return nil
 	})
-	WalkMappedAttr(cookies, func(name, _ string, a *AttributeExpr) error {
+	WalkMappedAttr(cookies, func(name, _ string, a *AttributeExpr) error { // nolint: errcheck
 		switch {
-		case IsObject(a.Type):
-			verr.Add(e, "cookie %q cannot be an object, cookie type must be primitive", name)
-		case IsArray(a.Type):
-			verr.Add(e, "cookie %q cannot be an array, cookie type must be primitive", name)
+		case IsObject(a.Type), IsUnion(a.Type), IsArray(a.Type):
+			verr.Add(e, "cookie %q must be primitive", name)
 		default:
 			ctx := fmt.Sprintf("cookie %q", name)
 			verr.Merge(a.Validate(ctx, e))
@@ -844,7 +1075,7 @@ func (e *HTTPEndpointExpr) validateHeadersAndCookies() *eval.ValidationErrors {
 	switch e.MethodExpr.Payload.Type.(type) {
 	case *Object, UserType:
 		hasBasicAuth := TaggedAttribute(e.MethodExpr.Payload, "security:username") != ""
-		WalkMappedAttr(headers, func(name, elem string, a *AttributeExpr) error {
+		WalkMappedAttr(headers, func(name, elem string, _ *AttributeExpr) error { // nolint: errcheck
 			if e.MethodExpr.Payload.Find(name) == nil {
 				verr.Add(e, "header %q not found in payload.", name)
 			}
@@ -856,7 +1087,7 @@ func (e *HTTPEndpointExpr) validateHeadersAndCookies() *eval.ValidationErrors {
 			}
 			return nil
 		})
-		WalkMappedAttr(cookies, func(name, elem string, a *AttributeExpr) error {
+		WalkMappedAttr(cookies, func(name, _ string, _ *AttributeExpr) error { // nolint: errcheck
 			if e.MethodExpr.Payload.Find(name) == nil {
 				verr.Add(e, "cookie %q not found in payload.", name)
 			}
@@ -876,7 +1107,7 @@ func (e *HTTPEndpointExpr) validateHeadersAndCookies() *eval.ValidationErrors {
 
 // EvalName returns the generic definition name used in error messages.
 func (r *RouteExpr) EvalName() string {
-	return fmt.Sprintf(`route %s "%s" of %s`, r.Method, r.Path, r.Endpoint.EvalName())
+	return fmt.Sprintf(`route %s %q of %s`, r.Method, r.Path, r.Endpoint.EvalName())
 }
 
 // Validate validates a route expression by ensuring that the route parameters
@@ -895,7 +1126,7 @@ func (r *RouteExpr) Validate() *eval.ValidationErrors {
 				verr.Add(r, "Route parameters are defined, but method payload is a map. Method payload must be a primitive or an object.")
 			case *Object, UserType:
 				for _, p := range rparams {
-					if r.Endpoint.MethodExpr.Payload.Find(p) == nil {
+					if r.Endpoint.MethodExpr.Payload.Find(r.Endpoint.Params.KeyName(p)) == nil {
 						verr.Add(r, "Route param %q not found in method payload", p)
 					}
 				}
@@ -919,8 +1150,9 @@ func (r *RouteExpr) Validate() *eval.ValidationErrors {
 		}
 	}
 
-	// For streaming endpoints, websockets does not support verbs other than GET
-	if r.Endpoint.MethodExpr.IsStreaming() && len(r.Endpoint.Responses) > 0 {
+	// For WebSocket streaming endpoints, only GET is supported
+	// SSE endpoints can use both GET and POST (JSON-RPC SSE uses POST)
+	if r.Endpoint.UsesWebSocket() && len(r.Endpoint.Responses) > 0 {
 		if r.Method != "GET" {
 			verr.Add(r, "WebSocket endpoint supports only \"GET\" method. Got %q.", r.Method)
 		}
@@ -952,13 +1184,7 @@ func (r *RouteExpr) Params() []string {
 	for _, p := range paths {
 		ws := ExtractHTTPWildcards(p)
 		for _, w := range ws {
-			found := false
-			for _, r := range res {
-				if r == w {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(res, w)
 			if !found {
 				res = append(res, w)
 			}
@@ -1027,6 +1253,7 @@ func initAttrFromDesign(att, patt *AttributeExpr) {
 	if patt == nil || patt.Type == Empty {
 		return
 	}
+	att.authored = patt.AuthoredAttribute()
 	att.Type = patt.Type
 	if att.Description == "" {
 		att.Description = patt.Description
@@ -1042,9 +1269,6 @@ func initAttrFromDesign(att, patt *AttributeExpr) {
 	}
 	if att.UserExamples == nil {
 		att.UserExamples = patt.UserExamples
-	}
-	if att.ZeroValue == nil {
-		att.ZeroValue = patt.ZeroValue
 	}
 	if att.Meta == nil {
 		att.Meta = patt.Meta
@@ -1073,4 +1297,115 @@ func isEmpty(a *AttributeExpr) bool {
 		}
 	}
 	return true
+}
+
+// hasJSONRPCIDField reports whether an attribute graph contains an ID
+// declaration.
+func hasJSONRPCIDField(attr *AttributeExpr) bool {
+	return len(jsonRPCIDFields(attr)) > 0
+}
+
+// jsonRPCIDFields lists every ID declaration and its distance from the root
+// attribute. A direct payload field has depth one.
+func jsonRPCIDFields(attr *AttributeExpr) []jsonRPCIDField {
+	var fields []jsonRPCIDField
+	collectJSONRPCIDFields(attr, "", 0, make(map[*AttributeExpr]struct{}), &fields)
+	return fields
+}
+
+// collectJSONRPCIDFields walks one attribute path at a time so a shared type
+// can be checked at each place it is used while recursive types still stop.
+func collectJSONRPCIDFields(attr *AttributeExpr, name string, depth int, active map[*AttributeExpr]struct{}, fields *[]jsonRPCIDField) {
+	if attr == nil || attr.Type == Empty {
+		return
+	}
+	if _, ok := active[attr]; ok {
+		return
+	}
+	active[attr] = struct{}{}
+	defer delete(active, attr)
+
+	if _, ok := attr.Meta["jsonrpc:id"]; ok {
+		*fields = append(*fields, jsonRPCIDField{name: name, attribute: attr, depth: depth})
+	}
+	if userType, ok := attr.Type.(UserType); ok {
+		collectJSONRPCIDFields(userType.Attribute(), name, depth, active, fields)
+		return
+	}
+	if object := AsObject(attr.Type); object != nil {
+		for _, field := range *object {
+			collectJSONRPCIDFields(field.Attribute, field.Name, depth+1, active, fields)
+		}
+		return
+	}
+	if array := AsArray(attr.Type); array != nil {
+		collectJSONRPCIDFields(array.ElemType, name, depth+1, active, fields)
+		return
+	}
+	if mapped := AsMap(attr.Type); mapped != nil {
+		collectJSONRPCIDFields(mapped.KeyType, name, depth+1, active, fields)
+		collectJSONRPCIDFields(mapped.ElemType, name, depth+1, active, fields)
+		return
+	}
+	if union := AsUnion(attr.Type); union != nil {
+		for _, field := range union.Values {
+			collectJSONRPCIDFields(field.Attribute, field.Name, depth+1, active, fields)
+		}
+	}
+}
+
+// isJSONRPCIDString reports whether an ID field is a string or a named string.
+func isJSONRPCIDString(dataType DataType) bool {
+	switch actual := dataType.(type) {
+	case Primitive:
+		return actual == String
+	case UserType:
+		return isJSONRPCIDString(actual.Attribute().Type)
+	default:
+		return false
+	}
+}
+
+// incompatibleGeneratedJSONRPCRequestIDValidations lists the rules that are
+// not guaranteed by the UUID generated when an optional request ID is absent.
+func incompatibleGeneratedJSONRPCRequestIDValidations(attribute *AttributeExpr) []string {
+	validation := EffectiveValidation(attribute)
+	if validation == nil {
+		return nil
+	}
+	var incompatible []string
+	if len(validation.Values) > 0 {
+		incompatible = append(incompatible, "enum")
+	}
+	if validation.Format != "" && validation.Format != FormatUUID {
+		incompatible = append(incompatible, fmt.Sprintf("format %q", validation.Format))
+	}
+	if validation.Pattern != "" {
+		incompatible = append(incompatible, "pattern")
+	}
+	if validation.MinLength != nil && *validation.MinLength > generatedJSONRPCRequestIDLength {
+		incompatible = append(incompatible, fmt.Sprintf("minimum length %d", *validation.MinLength))
+	}
+	if validation.MaxLength != nil && *validation.MaxLength < generatedJSONRPCRequestIDLength {
+		incompatible = append(incompatible, fmt.Sprintf("maximum length %d", *validation.MaxLength))
+	}
+	return incompatible
+}
+
+// jsonRPCBodyContainsID reports whether an explicitly designed params body
+// includes the payload field carried by the JSON-RPC envelope.
+func jsonRPCBodyContainsID(body *AttributeExpr, name string) bool {
+	if origin, ok := body.Meta["origin:attribute"]; ok {
+		return len(origin) > 0 && origin[0] == name
+	}
+	object := AsObject(body.Type)
+	if object == nil {
+		return false
+	}
+	for _, field := range *object {
+		if strings.Split(field.Name, ":")[0] == name {
+			return true
+		}
+	}
+	return false
 }

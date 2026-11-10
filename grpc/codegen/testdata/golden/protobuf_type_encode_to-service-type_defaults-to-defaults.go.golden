@@ -1,0 +1,66 @@
+func transform() {
+	target := &proto.WithDefaults{
+		RequiredInt:    int(*source.RequiredInt),
+		RequiredString: *source.RequiredString,
+		Bytes:          source.Bytes_,
+		RequiredBytes:  source.RequiredBytes,
+		RequiredAny:    *source.RequiredAny,
+	}
+	if source.Int != nil {
+		target.Int = int(*source.Int)
+	}
+	if source.RawJson != nil {
+		target.RawJSON = json.RawMessage(*source.RawJson)
+	}
+	if source.String_ != nil {
+		target.String = *source.String_
+	}
+	if source.Any != nil {
+		target.Any = *source.Any
+	}
+	if source.Int == nil {
+		target.Int = 100
+	}
+	if source.RawJson == nil {
+		target.RawJSON = json.RawMessage([]byte{0x66, 0x6f, 0x6f})
+	}
+	if source.String_ == nil {
+		target.String = "foo"
+	}
+	if source.Bytes_ == nil {
+		target.Bytes = []byte{0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72}
+	}
+	if source.Any == nil {
+		target.Any = "something"
+	}
+	if source.Array != nil {
+		target.Array = make([]string, len(source.Array))
+		for i, val := range source.Array {
+			target.Array[i] = val
+		}
+	}
+	if source.Array == nil {
+		target.Array = []string{"foo", "bar"}
+	}
+	target.RequiredArray = make([]string, len(source.RequiredArray))
+	for i, val := range source.RequiredArray {
+		target.RequiredArray[i] = val
+	}
+	if source.Map_ != nil {
+		target.Map = make(map[int]string, len(source.Map_))
+		for key, val := range source.Map_ {
+			tk := int(key)
+			tv := val
+			target.Map[tk] = tv
+		}
+	}
+	if source.Map_ == nil {
+		target.Map = map[int]string{1: "foo"}
+	}
+	target.RequiredMap = make(map[int]string, len(source.RequiredMap))
+	for key, val := range source.RequiredMap {
+		tk := int(key)
+		tv := val
+		target.RequiredMap[tk] = tv
+	}
+}

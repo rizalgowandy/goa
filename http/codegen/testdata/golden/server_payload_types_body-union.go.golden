@@ -1,0 +1,25 @@
+// NewMethodBodyUnionUnion builds a ServiceBodyUnion service MethodBodyUnion
+// endpoint payload.
+func NewMethodBodyUnionUnion(body *MethodBodyUnionRequestBody) *servicebodyunion.Union {
+	v := &servicebodyunion.Union{}
+	if body.Values != nil {
+		switch string(body.Values.Kind()) {
+		case "String":
+			actual, _ := body.Values.AsString()
+			obj := servicebodyunion.ValuesBranchString(actual)
+
+			u := v.Values
+			u.SetString((servicebodyunion.ValuesBranchString)(obj))
+			v.Values = u
+		case "Int":
+			actual, _ := body.Values.AsInt()
+			obj := servicebodyunion.ValuesBranchInt(actual)
+
+			u := v.Values
+			u.SetInt((servicebodyunion.ValuesBranchInt)(obj))
+			v.Values = u
+		}
+	}
+
+	return v
+}

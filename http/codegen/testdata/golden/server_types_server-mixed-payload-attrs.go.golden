@@ -1,0 +1,79 @@
+// MethodARequestBody is the type of the "ServiceMixedPayloadInBody" service
+// "MethodA" endpoint HTTP request body.
+type MethodARequestBody struct {
+	Any    any                  `form:"any,omitempty" json:"any,omitempty" xml:"any,omitempty"`
+	Array  []float32            `form:"array,omitempty" json:"array,omitempty" xml:"array,omitempty"`
+	Map    map[uint]any         `form:"map,omitempty" json:"map,omitempty" xml:"map,omitempty"`
+	Object *BPayloadRequestBody `form:"object,omitempty" json:"object,omitempty" xml:"object,omitempty"`
+	DupObj *BPayloadRequestBody `form:"dup_obj,omitempty" json:"dup_obj,omitempty" xml:"dup_obj,omitempty"`
+}
+
+// BPayloadRequestBody is used to define fields on request body types.
+type BPayloadRequestBody struct {
+	Int   *int   `form:"int,omitempty" json:"int,omitempty" xml:"int,omitempty"`
+	Bytes []byte `form:"bytes,omitempty" json:"bytes,omitempty" xml:"bytes,omitempty"`
+}
+
+// NewMethodAAPayload builds a ServiceMixedPayloadInBody service MethodA
+// endpoint payload.
+func NewMethodAAPayload(body *MethodARequestBody) *servicemixedpayloadinbody.APayload {
+	v := &servicemixedpayloadinbody.APayload{
+		Any: body.Any,
+	}
+	v.Array = make([]float32, len(body.Array))
+	for i, val := range body.Array {
+		v.Array[i] = val
+	}
+	if body.Map != nil {
+		v.Map = make(map[uint]any, len(body.Map))
+		for key, val := range body.Map {
+			tk := key
+			tv := val
+			v.Map[tk] = tv
+		}
+	}
+	v.Object = unmarshalBPayloadRequestBodyToServicemixedpayloadinbodyBPayload(body.Object)
+	if body.DupObj != nil {
+		v.DupObj = unmarshalBPayloadRequestBodyToServicemixedpayloadinbodyBPayload(body.DupObj)
+	}
+
+	return v
+}
+
+// ValidateMethodARequestBody runs the validations defined on MethodARequestBody
+func ValidateMethodARequestBody(body *MethodARequestBody) (err error) {
+	if body.Array == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("array", "body"))
+	}
+	if body.Object == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("object", "body"))
+	}
+	if body.Object != nil {
+		if err2 := validateBPayloadRequestBody(body.Object, "body.object"); err2 != nil {
+			err = goa.MergeErrors(err, err2)
+		}
+	}
+	if body.DupObj != nil {
+		if err2 := validateBPayloadRequestBody(body.DupObj, "body.dup_obj"); err2 != nil {
+			err = goa.MergeErrors(err, err2)
+		}
+	}
+	return
+}
+
+// ValidateBPayloadRequestBody runs the validations defined on BPayload
+func ValidateBPayloadRequestBody(body *BPayloadRequestBody) (err error) {
+	if body.Int == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("int", "body"))
+	}
+	return
+}
+
+// validateBPayloadRequestBody checks BPayload and reports errors using the
+// path supplied by its caller
+func validateBPayloadRequestBody(body *BPayloadRequestBody, path string) (err error) {
+	if body.Int == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("int", path))
+	}
+	return
+}

@@ -222,7 +222,7 @@ func NewMethodQueryBytesValidatePayload(q []byte) *servicequerybytesvalidate.Met
 
 var PayloadQueryAnyConstructorCode = `// NewMethodQueryAnyPayload builds a ServiceQueryAny service MethodQueryAny
 // endpoint payload.
-func NewMethodQueryAnyPayload(q interface{}) *servicequeryany.MethodQueryAnyPayload {
+func NewMethodQueryAnyPayload(q any) *servicequeryany.MethodQueryAnyPayload {
 	v := &servicequeryany.MethodQueryAnyPayload{}
 	v.Q = q
 
@@ -232,7 +232,7 @@ func NewMethodQueryAnyPayload(q interface{}) *servicequeryany.MethodQueryAnyPayl
 
 var PayloadQueryAnyValidateConstructorCode = `// NewMethodQueryAnyValidatePayload builds a ServiceQueryAnyValidate service
 // MethodQueryAnyValidate endpoint payload.
-func NewMethodQueryAnyValidatePayload(q interface{}) *servicequeryanyvalidate.MethodQueryAnyValidatePayload {
+func NewMethodQueryAnyValidatePayload(q any) *servicequeryanyvalidate.MethodQueryAnyValidatePayload {
 	v := &servicequeryanyvalidate.MethodQueryAnyValidatePayload{}
 	v.Q = q
 
@@ -472,7 +472,7 @@ func NewMethodQueryArrayBytesValidatePayload(q [][]byte) *servicequeryarraybytes
 
 var PayloadQueryArrayAnyConstructorCode = `// NewMethodQueryArrayAnyPayload builds a ServiceQueryArrayAny service
 // MethodQueryArrayAny endpoint payload.
-func NewMethodQueryArrayAnyPayload(q []interface{}) *servicequeryarrayany.MethodQueryArrayAnyPayload {
+func NewMethodQueryArrayAnyPayload(q []any) *servicequeryarrayany.MethodQueryArrayAnyPayload {
 	v := &servicequeryarrayany.MethodQueryArrayAnyPayload{}
 	v.Q = q
 
@@ -482,7 +482,7 @@ func NewMethodQueryArrayAnyPayload(q []interface{}) *servicequeryarrayany.Method
 
 var PayloadQueryArrayAnyValidateConstructorCode = `// NewMethodQueryArrayAnyValidatePayload builds a ServiceQueryArrayAnyValidate
 // service MethodQueryArrayAnyValidate endpoint payload.
-func NewMethodQueryArrayAnyValidatePayload(q []interface{}) *servicequeryarrayanyvalidate.MethodQueryArrayAnyValidatePayload {
+func NewMethodQueryArrayAnyValidatePayload(q []any) *servicequeryarrayanyvalidate.MethodQueryArrayAnyValidatePayload {
 	v := &servicequeryarrayanyvalidate.MethodQueryArrayAnyValidatePayload{}
 	v.Q = q
 
@@ -803,6 +803,50 @@ func NewMethodBodyQueryUserValidatePayloadType(body *MethodBodyQueryUserValidate
 }
 `
 
+var PayloadBodyUnionConstructorCode = `// NewMethodBodyUnionUnion builds a ServiceBodyUnion service MethodBodyUnion
+// endpoint payload.
+func NewMethodBodyUnionUnion(body *MethodBodyUnionRequestBody) *servicebodyunion.Union {
+	v := &servicebodyunion.Union{}
+	if body.Values != nil {
+		switch actual := body.Values.(type) {
+		case ValuesStringRequestBody:
+			obj := servicebodyunion.ValuesString(actual)
+			v.Values = obj
+		case ValuesIntRequestBody:
+			obj := servicebodyunion.ValuesInt(actual)
+			v.Values = obj
+		}
+	}
+
+	return v
+}
+`
+
+var PayloadBodyQueryUserUnionConstructorCode = `// NewMethodBodyQueryUserUnionPayloadType builds a ServiceBodyQueryUserUnion
+// service MethodBodyQueryUserUnion endpoint payload.
+func NewMethodBodyQueryUserUnionPayloadType(body *MethodBodyQueryUserUnionRequestBody, b *string) *servicebodyqueryuserunion.PayloadType {
+	v := &servicebodyqueryuserunion.PayloadType{}
+	if body.A != nil {
+		v.A = unmarshalUnionRequestBodyToServicebodyqueryuserunionUnion(body.A)
+	}
+	v.B = b
+
+	return v
+}
+`
+
+var PayloadBodyQueryUserUnionValidateConstructorCode = `// NewMethodBodyQueryUserUnionValidatePayloadType builds a
+// ServiceBodyQueryUserUnionValidate service MethodBodyQueryUserUnionValidate
+// endpoint payload.
+func NewMethodBodyQueryUserUnionValidatePayloadType(body *MethodBodyQueryUserUnionValidateRequestBody, b string) *servicebodyqueryuserunionvalidate.PayloadType {
+	v := &servicebodyqueryuserunionvalidate.PayloadType{}
+	v.A = unmarshalUnionRequestBodyToServicebodyqueryuserunionvalidateUnion(body.A)
+	v.B = b
+
+	return v
+}
+`
+
 var PayloadBodyPathObjectConstructorCode = `// NewMethodBodyPathObjectPayload builds a ServiceBodyPathObject service
 // MethodBodyPathObject endpoint payload.
 func NewMethodBodyPathObjectPayload(body *MethodBodyPathObjectRequestBody, b string) *servicebodypathobject.MethodBodyPathObjectPayload {
@@ -963,6 +1007,10 @@ func NewMethodBodyInlineMapUserMapKeyTypeElemType(body map[*KeyTypeRequestBody]*
 	v := make(map[*servicebodyinlinemapuser.KeyType]*servicebodyinlinemapuser.ElemType, len(body))
 	for key, val := range body {
 		tk := unmarshalKeyTypeRequestBodyToServicebodyinlinemapuserKeyType(val)
+		if val == nil {
+			v[tk] = nil
+			continue
+		}
 		v[tk] = unmarshalElemTypeRequestBodyToServicebodyinlinemapuserElemType(val)
 	}
 	return v

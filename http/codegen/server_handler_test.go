@@ -3,39 +3,34 @@ package codegen
 import (
 	"testing"
 
-	"goa.design/goa/v3/codegen"
+	"goa.design/goa/v3/codegen/testutil"
 	"goa.design/goa/v3/expr"
+
+	"github.com/stretchr/testify/require"
+
+	"goa.design/goa/v3/codegen"
+	"goa.design/goa/v3/codegen/codegentest"
 	"goa.design/goa/v3/http/codegen/testdata"
 )
 
 func TestServerHandler(t *testing.T) {
-	const genpkg = "gen"
 	cases := []struct {
-		Name       string
-		DSL        func()
-		Code       string
-		FileCount  int
-		SectionNum int
+		Name string
+		DSL  func()
 	}{
-		{"server simple routing", testdata.ServerSimpleRoutingDSL, testdata.ServerSimpleRoutingCode, 2, 7},
-		{"server trailing slash routing", testdata.ServerTrailingSlashRoutingDSL, testdata.ServerTrailingSlashRoutingCode, 2, 7},
-		{"server simple routing with a redirect", testdata.ServerSimpleRoutingWithRedirectDSL, testdata.ServerSimpleRoutingCode, 1, 7},
+		{"server simple routing", testdata.ServerSimpleRoutingDSL},
+		{"server trailing slash routing", testdata.ServerTrailingSlashRoutingDSL},
+		{"server simple routing with a redirect", testdata.ServerSimpleRoutingWithRedirectDSL},
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			RunHTTPDSL(t, c.DSL)
-			fs := ServerFiles(genpkg, expr.Root)
-			if len(fs) != c.FileCount {
-				t.Fatalf("got %d files, expected %d", len(fs), c.FileCount)
-			}
-			sections := fs[0].SectionTemplates
-			if len(sections) < 8 {
-				t.Fatalf("got %d sections, expected at least 8", len(sections))
-			}
-			code := codegen.SectionCode(t, sections[c.SectionNum])
-			if code != c.Code {
-				t.Errorf("invalid code, got:\n%s\ngot vs. expected:\n%s", code, codegen.Diff(t, code, c.Code))
-			}
+			root := expr.RunDSL(t, c.DSL)
+			plan := linkedHTTPPlanForRoot(t, root)
+			fs := plan.ServerFiles()
+			sections := codegentest.Sections(fs, "server.go", "server-handler")
+			require.Greater(t, len(sections), 0)
+			code := codegen.SectionCode(t, sections[0])
+			testutil.AssertGo(t, "testdata/golden/server_handler_"+c.Name+".go.golden", code)
 		})
 	}
 }

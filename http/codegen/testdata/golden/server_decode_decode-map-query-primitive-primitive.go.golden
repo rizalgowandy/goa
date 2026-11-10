@@ -1,0 +1,31 @@
+// DecodeMapQueryPrimitivePrimitiveRequest returns a decoder for requests sent
+// to the ServiceMapQueryPrimitivePrimitive MapQueryPrimitivePrimitive endpoint.
+func DecodeMapQueryPrimitivePrimitiveRequest(mux goahttp.Muxer, decoder func(*http.Request) goahttp.Decoder) func(*http.Request) (map[string]string, error) {
+	return func(r *http.Request) (map[string]string, error) {
+		var payload map[string]string
+		var (
+			query map[string]string
+			err   error
+		)
+		{
+			queryRaw := r.URL.Query()
+			if len(queryRaw) == 0 {
+				err = goa.MergeErrors(err, goa.MissingFieldError("query", "query string"))
+			}
+			if query == nil {
+				query = make(map[string]string)
+			}
+			for keyRaw, valRaw := range queryRaw {
+				var key string
+				key = keyRaw
+				query[key] = valRaw[0]
+			}
+		}
+		if err != nil {
+			return payload, err
+		}
+		payload = query
+
+		return payload, nil
+	}
+}

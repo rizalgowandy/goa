@@ -1,0 +1,152 @@
+// This file lets generators change the few conversion steps that differ from
+// Goa's normal Go type conversion. The gRPC generator uses these functions for
+// protobuf wrapper messages, fields, collections, unions, and nil checks.
+package codegen
+
+import (
+	"fmt"
+
+	"goa.design/goa/v3/expr"
+)
+
+type (
+	// TransformHooks lets a generator change specific parts of
+	// GoTransformWithAttrs. A nil function uses Goa's normal conversion. Hooks
+	// may inspect their expression arguments but must not mutate or retain them
+	// for later mutation. NewTransformPlan rejects a planning hook that changes
+	// its copied expressions. Render rejects later rendering mutations and caches
+	// each exact Render request, so hook state cannot produce different code when
+	// that request is repeated.
+	TransformHooks struct {
+		// UnwrapPair replaces a source and target before Goa checks or
+		// converts them. It also tells Goa whether generated code must
+		// create or read a protobuf wrapper message.
+		UnwrapPair func(src, tgt *expr.AttributeExpr) (*expr.AttributeExpr, *expr.AttributeExpr, *WrapDirective)
+
+		// FieldPairAttrs changes a matched pair after their field names
+		// are known and before their values are converted. The gRPC
+		// generator replaces primitive aliases with their primitive
+		// types. The hook runs before UnwrapPair.
+		FieldPairAttrs func(src, tgt *expr.AttributeExpr) (*expr.AttributeExpr, *expr.AttributeExpr)
+
+		// ConvertPrimitive returns the expression that initializes a
+		// target primitive from the source primitive value held by
+		// srcVar (e.g. protobuf int32 casts or Go any to
+		// structpb.Value conversions). srcPtr and tgtPtr report
+		// whether the source and target values are pointers: the
+		// returned expression must dereference srcVar when srcPtr is
+		// true. ok must be false to use the engine default conversion.
+		// The expression may be srcVar itself when no conversion is
+		// needed. When ok is true, the engine uses the expression as
+		// returned.
+		ConvertPrimitive func(src, tgt *expr.AttributeExpr, srcVar string, srcPtr, tgtPtr bool, ta *TransformAttrs) (string, bool)
+
+		// TransformArray overrides the rendering of array
+		// transformations. The variables and newVar have the same
+		// meaning as in TransformAttribute.
+		TransformArray func(source, target *expr.Array, sourceVar, targetVar string, newVar bool, ta *TransformAttrs) (string, error)
+
+		// TransformMap overrides the rendering of map transformations.
+		// The variables and newVar have the same meaning as in
+		// TransformAttribute.
+		TransformMap func(source, target *expr.Map, sourceVar, targetVar string, newVar bool, ta *TransformAttrs) (string, error)
+
+		// TransformUnion overrides the rendering of union
+		// transformations. srcParent and tgtParent are the attributes
+		// of the object being transformed when the union is an object
+		// field and nil when the union is transformed directly. A
+		// generator can use them when its union conversion depends on
+		// the enclosing object.
+		TransformUnion func(source, target *expr.AttributeExpr, sourceVar, targetVar string, newVar bool, srcParent, tgtParent *expr.AttributeExpr, ta *TransformAttrs) (string, error)
+
+		// PlanUnionHelpers lists the helper-name calls made by TransformUnion.
+		// It is called only when TransformUnion is set. Call record once for each
+		// source and target branch pair, in the same order that TransformUnion
+		// calls TransformHelperName. The shared planner writes each helper body
+		// and records any recursive calls it makes. A nil function means the
+		// custom union renderer does not call TransformHelperName.
+		PlanUnionHelpers func(source, target *expr.AttributeExpr, record func(source, target *expr.AttributeExpr))
+
+		// SameHelperDefinition reports whether two helper calls can use one
+		// function body. It may return true only when every transform hook will
+		// produce the same code for both source and target pairs. A nil function
+		// compares the complete retained attributes.
+		SameHelperDefinition func(firstSource, firstTarget, nextSource, nextTarget *expr.AttributeExpr) bool
+
+		// GuardCondition returns the condition that guards the
+		// value assignment of a primitive or composite object field, e.g.
+		// "if p.Name != nil {\n". src is the (possibly normalized)
+		// field attribute, srcVar the source field variable, required
+		// reports whether the field is required and srcPtr whether the
+		// source field uses a pointer. An empty condition
+		// with ok true means the field transformation must not be
+		// guarded. Target defaults are applied separately when the source
+		// value is absent; the condition does not suppress them.
+		// ok must be false to use Goa's normal check
+		// (the gRPC generator always guards non-primitives because
+		// proto3 message fields are always nilable).
+		GuardCondition func(src *expr.AttributeExpr, srcVar string, required, srcPtr bool) (string, bool)
+
+		// ZeroTypeName returns the Go type name used to declare the
+		// zero value or temporary variable in generated default value
+		// handling for the given target attribute. ok must be false to
+		// use the engine default (metadata type, alias reference or
+		// native Go type name). The gRPC generator returns the Go type
+		// generated by the protocol buffer compiler.
+		ZeroTypeName func(tgt *expr.AttributeExpr) (string, bool)
+
+		// ObjectDeref returns the operator prefixing object
+		// initializers ("&" or ""). ok must be false to use the engine
+		// default ("&"). The gRPC generator returns "" for raw struct
+		// targets which are not generated as pointers.
+		ObjectDeref func(tgt *expr.AttributeExpr) (string, bool)
+
+		// InlineCompositeElems reports that the TransformArray and
+		// TransformMap renderers inline the transformation of array
+		// element, map key and map element types instead of calling
+		// transform helper functions. When true the engine does not
+		// collect helpers for the element types themselves; it still
+		// collects helpers for the user types referenced by the
+		// element object fields.
+		InlineCompositeElems bool
+	}
+
+	// WrapDirective tells TransformAttribute how to create or read a protobuf
+	// wrapper message removed by UnwrapPair.
+	WrapDirective struct {
+		// WrapTarget is true when the target attribute was the
+		// wrapper: the engine initializes the wrapper value and
+		// assigns the transformation result to its field. When false
+		// the source attribute was the wrapper and the engine reads
+		// the value being transformed from the wrapper field.
+		WrapTarget bool
+		// Target is the wrapper type initialized when WrapTarget is true.
+		// The transform resolves its Go name after package names are fixed.
+		Target *expr.AttributeExpr
+		// FieldName is the Go name of the wrapper field holding the
+		// wrapped value.
+		FieldName string
+	}
+)
+
+// apply changes the source or target variable to use the wrapper field. It
+// returns the code that creates the wrapper when the target uses one. A nil
+// WrapDirective leaves the variables unchanged and returns an empty string.
+func (d *WrapDirective) apply(sourceVar, targetVar *string, newVar *bool, attrs *TransformAttrs) string {
+	if d == nil {
+		return ""
+	}
+	if !d.WrapTarget {
+		*sourceVar += "." + d.FieldName
+		return ""
+	}
+	assign := "="
+	if *newVar {
+		assign = ":="
+	}
+	name := attrs.TargetCtx.Scope.Name(d.Target, attrs.TargetCtx.Pkg(d.Target), attrs.TargetCtx.Pointer, attrs.TargetCtx.UseDefault)
+	code := fmt.Sprintf("%s %s &%s{}\n", *targetVar, assign, name)
+	*targetVar += "." + d.FieldName
+	*newVar = false
+	return code
+}

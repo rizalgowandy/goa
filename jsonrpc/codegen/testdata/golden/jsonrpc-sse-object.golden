@@ -1,0 +1,34 @@
+// StreamServerStream implements the jsonrpcsseobjectservice.StreamServerStream
+// interface using Server-Sent Events.
+type StreamServerStream struct {
+	// sseServerStream writes JSON-RPC messages as server-sent events.
+	sseServerStream
+}
+
+// Send streams instances of "StreamResult".
+func (s *StreamServerStream) Send(event *jsonrpcsseobjectservice.StreamResult) error {
+	return s.SendWithContext(context.Background(), event)
+}
+
+// SendWithContext streams instances of "StreamResult" with context.
+func (s *StreamServerStream) SendWithContext(ctx context.Context, event *jsonrpcsseobjectservice.StreamResult) error {
+	result := event
+	body := NewStreamResponseBody(result)
+	var eventID *string
+	if result.ID != nil {
+		value := string(*result.ID)
+		eventID = &value
+	}
+
+	message := jsonrpc.MakeNotification(
+		"Stream",
+		body,
+	)
+	return s.sendSSEEvent(ctx, message, eventID, nil, nil)
+}
+
+// Close does nothing because the HTTP response closes when the service method
+// returns.
+func (s *StreamServerStream) Close() error {
+	return nil
+}

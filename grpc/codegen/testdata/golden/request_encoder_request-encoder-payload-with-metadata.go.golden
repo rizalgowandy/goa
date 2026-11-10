@@ -1,0 +1,13 @@
+// EncodeMethodMessageWithMetadataRequest encodes requests sent to
+// ServiceMessageWithMetadata MethodMessageWithMetadata endpoint.
+func EncodeMethodMessageWithMetadataRequest(ctx context.Context, v any, md *metadata.MD) (any, error) {
+	payload, ok := v.(*servicemessagewithmetadata.RequestUT)
+	if !ok {
+		return nil, goagrpc.ErrInvalidType("ServiceMessageWithMetadata", "MethodMessageWithMetadata", "*servicemessagewithmetadata.RequestUT", v)
+	}
+	if payload.InMetadata != nil {
+		inMetadataWire := *payload.InMetadata
+		(*md).Append("Authorization", strconv.Itoa(inMetadataWire))
+	}
+	return NewProtoMethodMessageWithMetadataRequest(payload), nil
+}

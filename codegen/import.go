@@ -1,7 +1,16 @@
+// This file models generated Go imports and derives type imports from explicit
+// Goa metadata without assigning them to unrelated generated files.
 package codegen
 
 import (
+	"bytes"
 	"fmt"
+	"go/ast"
+	goformat "go/format"
+	"go/parser"
+	"go/token"
+	"path"
+	"path/filepath"
 	"strconv"
 
 	"goa.design/goa/v3/expr"
@@ -21,6 +30,15 @@ type (
 		Name string
 		// Go import path of package.
 		Path string
+	}
+
+	// Location defines a file location and import details.
+	Location struct {
+		// FilePath is the path to the file.
+		FilePath string
+		// RelImportPath is the Go import path starting after the gen
+		// folder.
+		RelImportPath string
 	}
 )
 
@@ -64,11 +82,54 @@ func (s *ImportSpec) Code() string {
 	return fmt.Sprintf(`"%s"`, s.Path)
 }
 
+// preferredName returns the package name requested by this import. When the
+// import has no explicit name, Go uses the last part of its path.
+func (s *ImportSpec) preferredName() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return path.Base(s.Path)
+}
+
+// UserTypeLocation returns the location of the user type if set via the
+// struct:pkg:path metadata, nil otherwise..
+func UserTypeLocation(dt expr.DataType) *Location {
+	ut, ok := dt.(expr.UserType)
+	if !ok {
+		return nil
+	}
+	p, ok := ut.Attribute().Meta.Last("struct:pkg:path")
+	if !ok || p == "" {
+		return nil
+	}
+	return &Location{
+		FilePath:      filepath.Join(filepath.FromSlash(p), SnakeCase(ut.Name())+".go"),
+		RelImportPath: p,
+	}
+}
+
+// PackageName returns the package name of the given location.
+func (loc *Location) PackageName() string {
+	if loc == nil {
+		return ""
+	}
+	return Goify(filepath.Base(loc.RelImportPath), false)
+}
+
+// PackageNameOrDefault returns the package name of the location if not nil,
+// def otherwise.
+func (loc *Location) PackageNameOrDefault(def string) string {
+	if loc == nil {
+		return def
+	}
+	return loc.PackageName()
+}
+
 // GetMetaType retrieves the type and package defined by the struct:field:type
 // metadata if any.
 func GetMetaType(att *expr.AttributeExpr) (typeName string, importS *ImportSpec) {
 	if att == nil {
-		return typeName, importS
+		return
 	}
 	if args, ok := att.Meta["struct:field:type"]; ok {
 		if len(args) > 0 {
@@ -81,7 +142,41 @@ func GetMetaType(att *expr.AttributeExpr) (typeName string, importS *ImportSpec)
 			importS.Name = args[2]
 		}
 	}
-	return typeName, importS
+	return
+}
+
+// rebindMetaTypeQualifier changes every reference to one imported package in
+// a custom Go field type. The type is parsed while source is generated, so
+// pointers, slices, maps, and repeated package references remain valid Go.
+func rebindMetaTypeQualifier(typeName, current, selected string) string {
+	if current == "" || current == selected {
+		return typeName
+	}
+	typeExpression, err := parser.ParseExpr(typeName)
+	if err != nil {
+		panic(fmt.Sprintf("invalid struct:field:type %q: %v", typeName, err))
+	}
+	changed := false
+	ast.Inspect(typeExpression, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		packageName, ok := selector.X.(*ast.Ident)
+		if ok && packageName.Name == current {
+			packageName.Name = selected
+			changed = true
+		}
+		return true
+	})
+	if !changed {
+		return typeName
+	}
+	var source bytes.Buffer
+	if err := goformat.Node(&source, token.NewFileSet(), typeExpression); err != nil {
+		panic(fmt.Sprintf("format struct:field:type %q: %v", typeName, err))
+	}
+	return source.String()
 }
 
 // GetMetaTypeImports parses the attribute for all user defined imports
@@ -90,45 +185,48 @@ func GetMetaTypeImports(att *expr.AttributeExpr) []*ImportSpec {
 }
 
 // safelyGetMetaTypeImports parses attributes while keeping track of previous usertypes to avoid infinite recursion
-func safelyGetMetaTypeImports(att *expr.AttributeExpr, seen map[string]struct{}) []*ImportSpec {
+func safelyGetMetaTypeImports(att *expr.AttributeExpr, seen map[expr.UserType]struct{}) []*ImportSpec {
 	if att == nil {
 		return nil
 	}
 	if seen == nil {
-		seen = make(map[string]struct{})
+		seen = make(map[expr.UserType]struct{})
 	}
 	uniqueImports := make(map[ImportSpec]struct{})
 	imports := make([]*ImportSpec, 0)
 
 	switch t := att.Type.(type) {
 	case expr.UserType:
-		if _, wasSeen := seen[t.ID()]; wasSeen {
+		origin := t.Origin()
+		if _, wasSeen := seen[origin]; wasSeen {
 			return imports
 		}
-		seen[t.ID()] = struct{}{}
+		seen[origin] = struct{}{}
 		for _, im := range safelyGetMetaTypeImports(t.Attribute(), seen) {
 			if im != nil {
 				uniqueImports[*im] = struct{}{}
 			}
 		}
 	case *expr.Array:
-		_, im := GetMetaType(t.ElemType)
-		if im != nil {
-			uniqueImports[*im] = struct{}{}
+		for _, im := range safelyGetMetaTypeImports(t.ElemType, seen) {
+			if im != nil {
+				uniqueImports[*im] = struct{}{}
+			}
 		}
 	case *expr.Map:
-		_, im := GetMetaType(t.ElemType)
-		if im != nil {
-			uniqueImports[*im] = struct{}{}
+		for _, im := range safelyGetMetaTypeImports(t.ElemType, seen) {
+			if im != nil {
+				uniqueImports[*im] = struct{}{}
+			}
 		}
-		_, im = GetMetaType(t.KeyType)
-		if im != nil {
-			uniqueImports[*im] = struct{}{}
+		for _, im := range safelyGetMetaTypeImports(t.KeyType, seen) {
+			if im != nil {
+				uniqueImports[*im] = struct{}{}
+			}
 		}
 	case *expr.Object:
-		for _, key := range *t {
-			if key != nil {
-				_, im := GetMetaType(key.Attribute)
+		for _, na := range *t {
+			for _, im := range safelyGetMetaTypeImports(na.Attribute, seen) {
 				if im != nil {
 					uniqueImports[*im] = struct{}{}
 				}
@@ -140,18 +238,9 @@ func safelyGetMetaTypeImports(att *expr.AttributeExpr, seen map[string]struct{})
 		uniqueImports[*im] = struct{}{}
 	}
 	for imp := range uniqueImports {
-		// Copy loop variable into body so next iteration doesnt overwrite its address https://stackoverflow.com/questions/27610039/golang-appending-leaves-only-last-element
-		copy := imp
-		imports = append(imports, &copy)
+		// Copy loop variable into body so next iteration doesn't overwrite its address https://stackoverflow.com/questions/27610039/golang-appending-leaves-only-last-element
+		cp := imp
+		imports = append(imports, &cp)
 	}
 	return imports
-}
-
-// AddServiceMetaTypeImports adds meta type imports for each method of the service expr
-func AddServiceMetaTypeImports(header *SectionTemplate, svc *expr.ServiceExpr) {
-	for _, m := range svc.Methods {
-		AddImport(header, GetMetaTypeImports(m.Payload)...)
-		AddImport(header, GetMetaTypeImports(m.StreamingPayload)...)
-		AddImport(header, GetMetaTypeImports(m.Result)...)
-	}
 }

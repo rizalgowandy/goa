@@ -619,6 +619,23 @@ var ResultBodyUserDSL = func() {
 	})
 }
 
+var ResultBodyUnionDSL = func() {
+	var Union = Type("Union", func() {
+		OneOf("Vals", func() {
+			Attribute("String", String)
+			Attribute("Int", Int)
+		})
+	})
+	Service("ServiceBodyUnion", func() {
+		Method("MethodBodyUnion", func() {
+			Result(Union)
+			HTTP(func() {
+				POST("/")
+			})
+		})
+	})
+}
+
 var ResultTypeValidateDSL = func() {
 	var ResultType = Type("ResultType", func() {
 		Attribute("a", String, func() {
@@ -744,6 +761,296 @@ var ResultWithResultCollectionDSL = func() {
 	})
 }
 
+// ResultTypeSiblingUserTypeFieldsDSL defines a result type with sibling fields (a, b)
+// that both reference the same named type (UserType). This tests the projection cache
+// fix for a bug where sibling fields were sharing the same AttributeExpr pointer,
+// causing metadata (descriptions and JSON tags) to leak between them.
+var ResultTypeSiblingUserTypeFieldsDSL = func() {
+	var UserType = Type("UserType", func() {
+		Attribute("u", Int)
+	})
+
+	var RT = ResultType("ResultTypeSibling", func() {
+		Attribute("a", UserType, "Attribute A", func() {
+			Meta("struct:tag:json", "a")
+		})
+		Attribute("b", UserType, "Attribute B", func() {
+			Meta("struct:tag:json", "b")
+		})
+	})
+
+	Service("ServiceResultUserTypeSibling", func() {
+		Method("MethodResultUserTypeSibling", func() {
+			Result(RT)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+// ResultTypeCollectionSiblingUserTypeFieldsDSL defines a result type collection with
+// sibling fields (a, b) that both reference the same named type (UserType). This tests
+// the fix for a bug where sibling fields were sharing the same AttributeExpr pointer,
+// causing metadata (descriptions and JSON tags) to leak between them.
+var ResultTypeCollectionSiblingUserTypeFieldsDSL = func() {
+	var UserType = Type("UserType", func() {
+		Attribute("u", Int)
+	})
+
+	var RT = ResultType("ResultTypeSiblingCollection", func() {
+		Attribute("a", UserType, "Attribute A", func() {
+			Meta("struct:tag:json", "a")
+		})
+		Attribute("b", UserType, "Attribute B", func() {
+			Meta("struct:tag:json", "b")
+		})
+	})
+
+	Service("ServiceResultCollectionUserTypeSibling", func() {
+		Method("MethodResultCollectionUserTypeSibling", func() {
+			Result(CollectionOf(RT))
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+// ResultTypeNestedUserTypeFieldsDSL defines a result type and a nested user type
+// (Wrapper) that both have a field named "a" of the same type (UserType). This tests
+// that the projection cache keys projected types rather than field attributes so
+// that same-named fields in different parent types do not share metadata
+// (descriptions and JSON tags).
+var ResultTypeNestedUserTypeFieldsDSL = func() {
+	var UserType = Type("UserType", func() {
+		Attribute("u", Int)
+	})
+
+	var Wrapper = Type("Wrapper", func() {
+		Attribute("a", UserType, "Inner A", func() {
+			Meta("struct:tag:json", "inner_a")
+		})
+	})
+
+	var RT = ResultType("ResultTypeNested", func() {
+		Attribute("a", UserType, "Outer A", func() {
+			Meta("struct:tag:json", "outer_a")
+		})
+		Attribute("nested", Wrapper)
+	})
+
+	Service("ServiceResultUserTypeNested", func() {
+		Method("MethodResultUserTypeNested", func() {
+			Result(RT)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+// ResultDefaultResponseBeforeTagsDSL defines a default response before two
+// tagged responses. Generated encoders must test the tags in authored order
+// before using the default.
+var ResultDefaultResponseBeforeTagsDSL = func() {
+	Service("ServiceResponseOrder", func() {
+		Method("MethodResponseOrder", func() {
+			Result(func() {
+				Attribute("first", String)
+				Attribute("second", String)
+				Attribute("value", String)
+			})
+			HTTP(func() {
+				POST("/")
+				Response(StatusOK)
+				Response(StatusAccepted, func() {
+					Tag("first", "match")
+				})
+				Response(StatusCreated, func() {
+					Tag("second", "match")
+				})
+			})
+		})
+	})
+}
+
+// ResultTypeRequiredUserTypeArrayDSL defines a result type with a required
+// array of a user type. Generating the response body constructor must spell the
+// element type with the field context: the result type selects a view that does
+// not apply to its nested types.
+var ResultTypeRequiredUserTypeArrayDSL = func() {
+	var Elem = Type("Elem", func() {
+		Attribute("a", String)
+	})
+
+	var RT = ResultType("application/vnd.goa.required.array", func() {
+		Attributes(func() {
+			Attribute("items", ArrayOf(Elem))
+			Required("items")
+		})
+	})
+
+	Service("ServiceResultRequiredUserTypeArray", func() {
+		Method("MethodResultRequiredUserTypeArray", func() {
+			Result(RT)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+// ResultTypeRequiredNestedArrayDSL defines a result type with a required array
+// of arrays of a user type. The element of the outer array is itself an array,
+// so the element type is spelled through one more level of nesting.
+var ResultTypeRequiredNestedArrayDSL = func() {
+	var Elem = Type("NestedElem", func() {
+		Attribute("a", String)
+	})
+
+	var RT = ResultType("application/vnd.goa.required.nested.array", func() {
+		Attributes(func() {
+			Attribute("items", ArrayOf(ArrayOf(Elem)))
+			Required("items")
+		})
+	})
+
+	Service("ServiceResultRequiredNestedArray", func() {
+		Method("MethodResultRequiredNestedArray", func() {
+			Result(RT)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+// ResultTypeMultipleViewsRequiredArrayDSL defines a result type with explicit
+// views and a required array of a user type. The response body is built for a
+// named view, so the view must not leak into the element type.
+var ResultTypeMultipleViewsRequiredArrayDSL = func() {
+	var Elem = Type("ViewedElem", func() {
+		Attribute("a", String)
+	})
+
+	var RT = ResultType("application/vnd.goa.viewed.required.array", func() {
+		Attributes(func() {
+			Attribute("items", ArrayOf(Elem))
+			Attribute("name", String)
+			Required("items")
+		})
+		View("default", func() {
+			Attribute("items")
+			Attribute("name")
+		})
+		View("tiny", func() {
+			Attribute("items")
+		})
+	})
+
+	Service("ServiceResultViewedRequiredArray", func() {
+		Method("MethodResultViewedRequiredArray", func() {
+			Result(RT)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var ResultWithCustomPkgTypeDSL = func() {
+	var Foo = Type("Foo", func() {
+		Meta("struct:pkg:path", "foo")
+		Attribute("bar", String)
+	})
+
+	Service("ServiceResultWithCustomPkgTypeDSL", func() {
+		Method("MethodResultWithCustomPkgTypeDSL", func() {
+			Payload(Foo)
+			Result(Foo)
+
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var EmbeddedCustomPkgTypeDSL = func() {
+	var Foo = Type("Foo", func() {
+		Meta("struct:pkg:path", "foo")
+		Attribute("bar", String)
+	})
+
+	var ContainedFoo = Type("ContainedFoo", func() {
+		Attribute("Foo", Foo)
+	})
+
+	Service("ServiceResultWithEmbeddedCustomPkgTypeDSL", func() {
+		Method("MethodResultWithEmbeddedCustomPkgTypeDSL", func() {
+			Payload(ContainedFoo)
+			Result(ContainedFoo)
+
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var ArrayAliasExtendedDSL = func() {
+	var Foo = Type("Foo", String)
+
+	var Extension = Type("Extension", func() {
+		Attribute("Foo", Foo)
+	})
+
+	var ResultType = Type("ResultType", func() {
+		Extend(Extension)
+	})
+
+	var _ = Service("FooService", func() {
+		Method("FooMethod", func() {
+			Payload(ArrayOf(ResultType))
+			Result(ArrayOf(ResultType))
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+
+}
+
+var ExtensionWithAliasDSL = func() {
+	var Bar = Type("Bar", func() {
+		Attribute("Bar", UInt)
+		Required("Bar")
+	})
+
+	var TypeWithAlias = Type("TypeWithAlias", func() {
+		Attribute("Bar", Bar)
+	})
+
+	var Extension = Type("Extension", func() {
+		Extend(TypeWithAlias)
+	})
+
+	var ResultType = Type("ResultType", func() {
+		Attribute("Extension", Extension)
+	})
+
+	var _ = Service("FooService", func() {
+		Method("FooMethod", func() {
+			Payload(ArrayOf(ResultType))
+			Result(ArrayOf(ResultType))
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
 var EmptyErrorResponseBodyDSL = func() {
 	Service("ServiceEmptyErrorResponseBody", func() {
 		Method("MethodEmptyErrorResponseBody", func() {
@@ -765,6 +1072,23 @@ var EmptyErrorResponseBodyDSL = func() {
 	})
 }
 
+var WithErrorCustomPkgDSL = func() {
+	var CustomError = Type("CustomError", func() {
+		Meta("struct:pkg:path", "custom")
+		ErrorName("name")
+		Required("name")
+	})
+	Service("ServiceWithErrorCustomPkg", func() {
+		Method("MethodWithErrorCustomPkg", func() {
+			Error("error_name", CustomError)
+			HTTP(func() {
+				GET("/")
+				Response("error_name", StatusBadRequest)
+			})
+		})
+	})
+}
+
 var EmptyCustomErrorResponseBodyDSL = func() {
 	var ErrorType = Type("Error", func() {
 		Attribute("err", String)
@@ -777,6 +1101,25 @@ var EmptyCustomErrorResponseBodyDSL = func() {
 				Response(StatusOK)
 				Response("internal_error", StatusInternalServerError, func() {
 					Body(Empty)
+				})
+			})
+		})
+	})
+}
+
+var ErrorBodyAttributeResponseDSL = func() {
+	var ErrorType = Type("SelectedError", func() {
+		Attribute("detail", String)
+		Required("detail")
+	})
+	Service("ServiceErrorBodyAttributeResponse", func() {
+		Method("MethodErrorBodyAttributeResponse", func() {
+			Error("selected", ErrorType)
+			HTTP(func() {
+				GET("/")
+				Response(StatusOK)
+				Response("selected", StatusBadRequest, func() {
+					Body("detail")
 				})
 			})
 		})
@@ -836,6 +1179,30 @@ var EmptyBodyResultMultipleViewsDSL = func() {
 				Response(StatusOK, func() {
 					Header("c:Location")
 					Body(Empty)
+				})
+			})
+		})
+	})
+}
+
+// ExplicitBodyPrimitiveResultDefaultViewDSL sets the response body to one
+// attribute of a result type that declares no view. The body is an attribute of
+// the result, so no view projection applies to it.
+var ExplicitBodyPrimitiveResultDefaultViewDSL = func() {
+	var ResultType = ResultType("ResultTypeDefaultView", func() {
+		Attribute("a", String, func() {
+			MinLength(5)
+		})
+		Attribute("b", String)
+	})
+	Service("ServiceExplicitBodyPrimitiveResultDefaultView", func() {
+		Method("MethodExplicitBodyPrimitiveResultDefaultView", func() {
+			Result(ResultType)
+			HTTP(func() {
+				POST("/")
+				Response(StatusOK, func() {
+					Header("b:Location")
+					Body("a")
 				})
 			})
 		})
@@ -1229,6 +1596,27 @@ var ResultTagStringRequiredDSL = func() {
 	})
 }
 
+var ResultStatusTagRequiredDSL = func() {
+	result := ResultType("application/vnd.status-tag", func() {
+		TypeName("StatusTagResult")
+		Attribute("message", String)
+		Attribute("outcome", String)
+		Required("message", "outcome")
+	})
+	Service("ServiceStatusTagRequired", func() {
+		Method("MethodStatusTagRequired", func() {
+			Result(result)
+			HTTP(func() {
+				GET("/")
+				Response(StatusCreated, func() {
+					Tag("outcome", "created")
+				})
+				Response(StatusOK)
+			})
+		})
+	})
+}
+
 var ResultMultipleViewsTagDSL = func() {
 	var ResultType = ResultType("ResultTypeMultipleViews", func() {
 		Attribute("a", String)
@@ -1465,6 +1853,142 @@ var ValidateErrorResponseTypeDSL = func() {
 				Response("some_error", StatusBadRequest, func() {
 					Header("error:X-Application-Error")
 					Header("num_occur:X-Occur")
+				})
+			})
+		})
+	})
+}
+
+var ResultBodyUnionCustomKeysDSL = func() {
+	var CustomUnion = Type("CustomUnion", func() {
+		OneOf("Values", func() {
+			Meta("oneof:type:field", "kind")
+			Meta("oneof:value:field", "data")
+			Attribute("String", String)
+			Attribute("Int", Int)
+		})
+	})
+	Service("ServiceResultUnionCustomKeys", func() {
+		Method("MethodResultUnionCustomKeys", func() {
+			Result(CustomUnion)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var ResultBodyUnionCustomKeysMultiDSL = func() {
+	var TypeA = Type("TypeA", func() {
+		Attribute("a", Int)
+	})
+	var TypeB = Type("TypeB", func() {
+		Attribute("b", String)
+	})
+	var PaymentResponse = Type("PaymentResponse", func() {
+		OneOf("status", func() {
+			Meta("oneof:type:field", "statusType")
+			Meta("oneof:value:field", "statusDetails")
+			Attribute("success", TypeA)
+			Attribute("failure", TypeB)
+		})
+	})
+	Service("ServiceResultUnionCustomKeysMulti", func() {
+		Method("MethodResultUnionCustomKeysMulti", func() {
+			Result(PaymentResponse)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+// ResultViewedBodyCollectionDSL defines a result type with several views whose
+// only response body attribute is a collection of another viewed result type.
+// The generated client result constructor must assign the decoded slice to the
+// view field directly because view types never wrap collections in a pointer.
+var ResultViewedBodyCollectionDSL = func() {
+	var Item = ResultType("application/vnd.item", func() {
+		Attributes(func() {
+			Attribute("id", String)
+			Attribute("name", String)
+		})
+		View("default", func() {
+			Attribute("id")
+			Attribute("name")
+		})
+		View("tiny", func() {
+			Attribute("id")
+		})
+	})
+	var Items = ResultType("application/vnd.items", func() {
+		Attributes(func() {
+			Attribute("items", CollectionOf(Item))
+		})
+		View("default", func() {
+			Attribute("items", CollectionOf(Item), func() {
+				View("default")
+			})
+		})
+		View("tiny", func() {
+			Attribute("items", CollectionOf(Item), func() {
+				View("tiny")
+			})
+		})
+	})
+	Service("ServiceViewedBodyCollection", func() {
+		Method("MethodViewedBodyCollection", func() {
+			Result(Items)
+			HTTP(func() {
+				GET("/")
+				Response(StatusOK, func() {
+					Body("items")
+				})
+			})
+		})
+	})
+}
+
+// ResultViewedBodyMapDSL defines a result type with several views whose only
+// response body attribute is a map of another viewed result type. The
+// generated client result constructor must assign the decoded map to the view
+// field directly because view types never wrap maps in a pointer.
+var ResultViewedBodyMapDSL = func() {
+	var Item = ResultType("application/vnd.item", func() {
+		Attributes(func() {
+			Attribute("id", String)
+			Attribute("name", String)
+		})
+		View("default", func() {
+			Attribute("id")
+			Attribute("name")
+		})
+		View("tiny", func() {
+			Attribute("id")
+		})
+	})
+	var ItemsByKey = ResultType("application/vnd.itemsbykey", func() {
+		Attributes(func() {
+			Attribute("items", MapOf(String, Item))
+		})
+		View("default", func() {
+			Attribute("items", MapOf(String, Item, func() {
+				View("default")
+			}))
+		})
+		View("tiny", func() {
+			Attribute("items", MapOf(String, Item, func() {
+				View("tiny")
+			}))
+		})
+	})
+	Service("ServiceViewedBodyMap", func() {
+		Method("MethodViewedBodyMap", func() {
+			Result(ItemsByKey)
+			HTTP(func() {
+				GET("/")
+				Response(StatusOK, func() {
+					Body("items")
 				})
 			})
 		})

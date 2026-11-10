@@ -99,7 +99,7 @@ func NewClient(a goa.Endpoint) *Client {
 
 // A calls the "A" endpoint of the "WithResult" service.
 func (c *Client) A(ctx context.Context) (res *Rtype, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.AEndpoint(ctx, nil)
 	if err != nil {
 		return
@@ -124,12 +124,50 @@ func NewClient(streamingResultMethod goa.Endpoint) *Client {
 // StreamingResultMethod calls the "StreamingResultMethod" endpoint of the
 // "StreamingResultService" service.
 func (c *Client) StreamingResultMethod(ctx context.Context, p *APayload) (res StreamingResultMethodClientStream, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.StreamingResultMethodEndpoint(ctx, p)
 	if err != nil {
 		return
 	}
 	return ires.(StreamingResultMethodClientStream), nil
+}
+`
+
+const MixedResultsMethodClient = `// Client is the "MixedResultsEndpoint" service client.
+type Client struct {
+	MixedResultsMethodEndpoint       goa.Endpoint
+	MixedResultsMethodStreamEndpoint goa.Endpoint
+}
+
+// NewClient initializes a "MixedResultsEndpoint" service client given the
+// endpoints.
+func NewClient(mixedResultsMethod, mixedResultsMethodStream goa.Endpoint) *Client {
+	return &Client{
+		MixedResultsMethodEndpoint:       mixedResultsMethod,
+		MixedResultsMethodStreamEndpoint: mixedResultsMethodStream,
+	}
+}
+
+// MixedResultsMethod calls the "MixedResultsMethod" endpoint of the
+// "MixedResultsEndpoint" service.
+func (c *Client) MixedResultsMethod(ctx context.Context, p *Payload) (res *ResultType, err error) {
+	var ires any
+	ires, err = c.MixedResultsMethodEndpoint(ctx, p)
+	if err != nil {
+		return
+	}
+	return ires.(*ResultType), nil
+}
+
+// MixedResultsMethodStream calls the "MixedResultsMethod" endpoint of the
+// "MixedResultsEndpoint" service with server streaming enabled.
+func (c *Client) MixedResultsMethodStream(ctx context.Context, p *Payload) (res MixedResultsMethodClientStream, err error) {
+	var ires any
+	ires, err = c.MixedResultsMethodStreamEndpoint(ctx, p)
+	if err != nil {
+		return
+	}
+	return ires.(MixedResultsMethodClientStream), nil
 }
 `
 
@@ -149,7 +187,7 @@ func NewClient(streamingResultNoPayloadMethod goa.Endpoint) *Client {
 // StreamingResultNoPayloadMethod calls the "StreamingResultNoPayloadMethod"
 // endpoint of the "StreamingResultNoPayloadService" service.
 func (c *Client) StreamingResultNoPayloadMethod(ctx context.Context) (res StreamingResultNoPayloadMethodClientStream, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.StreamingResultNoPayloadMethodEndpoint(ctx, nil)
 	if err != nil {
 		return
@@ -174,7 +212,7 @@ func NewClient(streamingPayloadMethod goa.Endpoint) *Client {
 // StreamingPayloadMethod calls the "StreamingPayloadMethod" endpoint of the
 // "StreamingPayloadService" service.
 func (c *Client) StreamingPayloadMethod(ctx context.Context, p *BPayload) (res StreamingPayloadMethodClientStream, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.StreamingPayloadMethodEndpoint(ctx, p)
 	if err != nil {
 		return
@@ -199,7 +237,7 @@ func NewClient(streamingPayloadNoPayloadMethod goa.Endpoint) *Client {
 // StreamingPayloadNoPayloadMethod calls the "StreamingPayloadNoPayloadMethod"
 // endpoint of the "StreamingPayloadNoPayloadService" service.
 func (c *Client) StreamingPayloadNoPayloadMethod(ctx context.Context) (res StreamingPayloadNoPayloadMethodClientStream, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.StreamingPayloadNoPayloadMethodEndpoint(ctx, nil)
 	if err != nil {
 		return
@@ -224,7 +262,7 @@ func NewClient(streamingPayloadNoResultMethod goa.Endpoint) *Client {
 // StreamingPayloadNoResultMethod calls the "StreamingPayloadNoResultMethod"
 // endpoint of the "StreamingPayloadNoResultService" service.
 func (c *Client) StreamingPayloadNoResultMethod(ctx context.Context) (res StreamingPayloadNoResultMethodClientStream, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.StreamingPayloadNoResultMethodEndpoint(ctx, nil)
 	if err != nil {
 		return
@@ -249,7 +287,7 @@ func NewClient(bidirectionalStreamingMethod goa.Endpoint) *Client {
 // BidirectionalStreamingMethod calls the "BidirectionalStreamingMethod"
 // endpoint of the "BidirectionalStreamingService" service.
 func (c *Client) BidirectionalStreamingMethod(ctx context.Context, p *BPayload) (res BidirectionalStreamingMethodClientStream, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.BidirectionalStreamingMethodEndpoint(ctx, p)
 	if err != nil {
 		return
@@ -275,11 +313,47 @@ func NewClient(bidirectionalStreamingNoPayloadMethod goa.Endpoint) *Client {
 // "BidirectionalStreamingNoPayloadMethod" endpoint of the
 // "BidirectionalStreamingNoPayloadService" service.
 func (c *Client) BidirectionalStreamingNoPayloadMethod(ctx context.Context) (res BidirectionalStreamingNoPayloadMethodClientStream, err error) {
-	var ires interface{}
+	var ires any
 	ires, err = c.BidirectionalStreamingNoPayloadMethodEndpoint(ctx, nil)
 	if err != nil {
 		return
 	}
 	return ires.(BidirectionalStreamingNoPayloadMethodClientStream), nil
+}
+`
+
+const InterceptorClient = `// Client is the "ServiceWithClientInterceptor" service client.
+type Client struct {
+	MethodEndpoint goa.Endpoint
+}
+
+// NewClient initializes a "ServiceWithClientInterceptor" service client given
+// the endpoints.
+func NewClient(method goa.Endpoint, ci ClientInterceptors) *Client {
+	return &Client{
+		MethodEndpoint: WrapMethodClientEndpoint(method, ci),
+	}
+}
+
+// Method calls the "Method" endpoint of the "ServiceWithClientInterceptor"
+// service.
+func (c *Client) Method(ctx context.Context, p string) (res string, err error) {
+	var ires any
+	ires, err = c.MethodEndpoint(ctx, p)
+	if err != nil {
+		return
+	}
+	return ires.(string), nil
+}
+`
+
+const NoMethodInterceptorClient = `// Client is the "NoMethodClientInterceptor" service client.
+type Client struct {
+}
+
+// NewClient initializes a "NoMethodClientInterceptor" service client given the
+// endpoints.
+func NewClient(ci ClientInterceptors) *Client {
+	return &Client{}
 }
 `

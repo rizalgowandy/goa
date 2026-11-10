@@ -1,0 +1,47 @@
+// DecodeMethodBodyQueryPathObjectValidateRequest returns a decoder for
+// requests sent to the ServiceBodyQueryPathObjectValidate
+// MethodBodyQueryPathObjectValidate endpoint.
+func DecodeMethodBodyQueryPathObjectValidateRequest(mux goahttp.Muxer, decoder func(*http.Request) goahttp.Decoder) func(*http.Request) (*servicebodyquerypathobjectvalidate.MethodBodyQueryPathObjectValidatePayload, error) {
+	return func(r *http.Request) (*servicebodyquerypathobjectvalidate.MethodBodyQueryPathObjectValidatePayload, error) {
+		var payload *servicebodyquerypathobjectvalidate.MethodBodyQueryPathObjectValidatePayload
+		var (
+			body MethodBodyQueryPathObjectValidateRequestBody
+			err  error
+		)
+		err = decoder(r).Decode(&body)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return payload, goa.MissingPayloadError()
+			}
+			var gerr *goa.ServiceError
+			if errors.As(err, &gerr) {
+				return payload, gerr
+			}
+			return payload, goa.DecodePayloadError(err.Error())
+		}
+		err = ValidateMethodBodyQueryPathObjectValidateRequestBody(&body)
+		if err != nil {
+			return payload, err
+		}
+
+		var (
+			c2 string
+			b  string
+
+			params = mux.Vars(r)
+		)
+		c2 = params["c"]
+		err = goa.MergeErrors(err, goa.ValidatePattern("c", c2, "patternc"))
+		b = r.URL.Query().Get("b")
+		if b == "" {
+			err = goa.MergeErrors(err, goa.MissingFieldError("b", "query string"))
+		}
+		err = goa.MergeErrors(err, goa.ValidatePattern("b", b, "patternb"))
+		if err != nil {
+			return payload, err
+		}
+		payload = NewMethodBodyQueryPathObjectValidatePayload(&body, c2, b)
+
+		return payload, nil
+	}
+}

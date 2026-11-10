@@ -1,0 +1,26 @@
+// BuildMethodBodyInlineObjectPayload builds the payload for the
+// ServiceBodyInlineObject MethodBodyInlineObject endpoint from CLI flags.
+func BuildMethodBodyInlineObjectPayload(serviceBodyInlineObjectMethodBodyInlineObjectBody *string) (*servicebodyinlineobject.MethodBodyInlineObjectPayload, error) {
+	var err error
+	var body MethodBodyInlineObjectRequestBody
+	{
+		if serviceBodyInlineObjectMethodBodyInlineObjectBody == nil {
+			return nil, fmt.Errorf("missing required flag --body")
+		}
+		err = json.Unmarshal([]byte(*serviceBodyInlineObjectMethodBodyInlineObjectBody), &body)
+		if err != nil {
+			return nil, fmt.Errorf("invalid JSON for body, \nerror: %s, \nexample of valid JSON:\n%s", err, "'{\n      \"a\": \"Fugit atque.\"\n   }'")
+		}
+	}
+	v := &servicebodyinlineobject.MethodBodyInlineObjectPayload{
+		A: body.A,
+	}
+	{
+		var zero string
+		if v.A == zero {
+			v.A = "foo"
+		}
+	}
+
+	return v, nil
+}

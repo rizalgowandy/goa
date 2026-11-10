@@ -16,6 +16,8 @@ type (
 	// properties.
 	HTTPServiceExpr struct {
 		eval.DSLFunc
+		// Root is the root HTTP expression.
+		Root *HTTPExpr
 		// ServiceExpr is the service expression that backs this
 		// service.
 		ServiceExpr *ServiceExpr
@@ -40,9 +42,21 @@ type (
 		HTTPErrors []*HTTPErrorExpr
 		// FileServers is the list of static asset serving endpoints
 		FileServers []*HTTPFileServerExpr
+		// SSE defines the Server-Sent Events configuration for all streaming endpoints
+		// in this service. If nil, streaming endpoints use WebSockets by default.
+		SSE *HTTPSSEExpr
+		// JSONRPCRoute is the route used for all JSON-RPC endpoints in this service.
+		// Only applicable to JSON-RPC services.
+		JSONRPCRoute *RouteExpr
 		// Meta is a set of key/value pairs with semantic that is
 		// specific to each generator.
 		Meta MetaExpr
+		// BodyFieldNames maps fields of exact named declarations to wire names
+		// in this service's HTTP bodies. Other transports retain their names.
+		BodyFieldNames map[UserType]map[string]string
+		// mappedBodyOrigins gives copies of one declaration the same HTTP
+		// identity within this service while keeping their attributes separate.
+		mappedBodyOrigins map[UserType]UserType
 	}
 )
 
@@ -56,14 +70,13 @@ func (svc *HTTPServiceExpr) Description() string {
 	return svc.ServiceExpr.Description
 }
 
-// Error returns the error with the given name.
+// Error returns the error contract available to service-level HTTP mappings.
+// Service declarations take precedence over reusable API declarations.
 func (svc *HTTPServiceExpr) Error(name string) *ErrorExpr {
-	for _, erro := range svc.ServiceExpr.Errors {
-		if erro.Name == name {
-			return erro
-		}
+	if serviceError := svc.ServiceExpr.Error(name); serviceError != nil {
+		return serviceError
 	}
-	return Root.Error(name)
+	return svc.ServiceExpr.design.Error(name)
 }
 
 // Endpoint returns the service endpoint with the given name or nil if there
@@ -78,16 +91,13 @@ func (svc *HTTPServiceExpr) Endpoint(name string) *HTTPEndpointExpr {
 }
 
 // EndpointFor builds the endpoint for the given method.
-func (svc *HTTPServiceExpr) EndpointFor(name string, m *MethodExpr) *HTTPEndpointExpr {
-	if a := svc.Endpoint(name); a != nil {
-		return a
+func (svc *HTTPServiceExpr) EndpointFor(m *MethodExpr) *HTTPEndpointExpr {
+	if e := svc.Endpoint(m.Name); e != nil {
+		return e
 	}
-	a := &HTTPEndpointExpr{
-		MethodExpr: m,
-		Service:    svc,
-	}
-	svc.HTTPEndpoints = append(svc.HTTPEndpoints, a)
-	return a
+	e := &HTTPEndpointExpr{MethodExpr: m, Service: svc}
+	svc.HTTPEndpoints = append(svc.HTTPEndpoints, e)
+	return e
 }
 
 // CanonicalEndpoint returns the canonical endpoint of the service if any.
@@ -104,7 +114,7 @@ func (svc *HTTPServiceExpr) CanonicalEndpoint() *HTTPEndpointExpr {
 // API and parent service base paths as needed.
 func (svc *HTTPServiceExpr) FullPaths() []string {
 	if len(svc.Paths) == 0 {
-		return []string{path.Join(Root.API.HTTP.Path)}
+		return []string{path.Join(svc.Root.Path)}
 	}
 	var paths []string
 	for _, p := range svc.Paths {
@@ -127,7 +137,7 @@ func (svc *HTTPServiceExpr) FullPaths() []string {
 				}
 			}
 		} else {
-			basePaths = []string{Root.API.HTTP.Path}
+			basePaths = []string{svc.Root.Path}
 		}
 		for _, base := range basePaths {
 			v := httppath.Clean(path.Join(base, p))
@@ -144,7 +154,7 @@ func (svc *HTTPServiceExpr) FullPaths() []string {
 // Parent returns the parent service if any, nil otherwise.
 func (svc *HTTPServiceExpr) Parent() *HTTPServiceExpr {
 	if svc.ParentName != "" {
-		if parent := Root.API.HTTP.Service(svc.ParentName); parent != nil {
+		if parent := svc.Root.Service(svc.ParentName); parent != nil {
 			return parent
 		}
 	}
@@ -169,8 +179,18 @@ func (svc *HTTPServiceExpr) EvalName() string {
 	return fmt.Sprintf("service %#v", svc.Name())
 }
 
+// IsJSONRPC reports whether svc describes the JSON-RPC transport for its service.
+func (svc *HTTPServiceExpr) IsJSONRPC() bool {
+	return svc.ServiceExpr.Meta != nil && svc.ServiceExpr.Meta["jsonrpc:service"] != nil
+}
+
 // Prepare initializes the error responses.
 func (svc *HTTPServiceExpr) Prepare() {
+	// Create routes for JSON-RPC endpoints if needed
+	if svc.IsJSONRPC() {
+		svc.prepareJSONRPCRoutes()
+	}
+
 	// Lookup undefined HTTP errors in API.
 	for _, err := range svc.ServiceExpr.Errors {
 		found := false
@@ -181,7 +201,7 @@ func (svc *HTTPServiceExpr) Prepare() {
 			}
 		}
 		if !found {
-			for _, herr := range Root.API.HTTP.Errors {
+			for _, herr := range svc.Root.Errors {
 				if herr.Name == err.Name {
 					svc.HTTPErrors = append(svc.HTTPErrors, herr.Dup())
 				}
@@ -196,35 +216,71 @@ func (svc *HTTPServiceExpr) Prepare() {
 // Validate makes sure the service is valid.
 func (svc *HTTPServiceExpr) Validate() error {
 	verr := new(eval.ValidationErrors)
+
+	// Validate attributes
+	svc.validateAttributes(verr)
+
+	// Validate parent service
+	svc.validateParent(verr)
+
+	// Validate canonical endpoint
+	svc.validateCanonicalEndpoint(verr)
+
+	// Validate errors
+	svc.validateErrors(verr)
+
+	// Validate transport compatibility
+	svc.validateTransports(verr)
+	svc.validateBodyFieldNames(verr)
+
+	return verr
+}
+
+// validateAttributes validates service parameters and headers
+func (svc *HTTPServiceExpr) validateAttributes(verr *eval.ValidationErrors) {
 	if svc.Params != nil {
 		verr.Merge(svc.Params.Validate("parameters", svc))
 	}
 	if svc.Headers != nil {
 		verr.Merge(svc.Headers.Validate("headers", svc))
 	}
-	if n := svc.ParentName; n != "" {
-		if p := Root.API.HTTP.Service(n); p == nil {
-			verr.Add(svc, "Parent service %s not found", n)
-		} else {
-			if p.CanonicalEndpoint() == nil {
-				verr.Add(svc, "Parent service %s has no canonical endpoint", n)
-			}
-			if p.ParentName == svc.Name() {
-				verr.Add(svc, "Parent service %s is also child", n)
-			}
-		}
-	}
-	if n := svc.CanonicalEndpointName; n != "" {
-		if a := svc.Endpoint(n); a == nil {
-			verr.Add(svc, "Unknown canonical endpoint %s", n)
-		}
+}
+
+// validateParent validates parent service configuration
+func (svc *HTTPServiceExpr) validateParent(verr *eval.ValidationErrors) {
+	n := svc.ParentName
+	if n == "" {
+		return
 	}
 
-	// Validate errors (have status codes and bodies are valid)
+	p := svc.Root.Service(n)
+	if p == nil {
+		verr.Add(svc, "Parent service %s not found", n)
+		return
+	}
+
+	if p.CanonicalEndpoint() == nil {
+		verr.Add(svc, "Parent service %s has no canonical endpoint", n)
+	}
+	if p.ParentName == svc.Name() {
+		verr.Add(svc, "Parent service %s is also child", n)
+	}
+}
+
+// validateCanonicalEndpoint validates canonical endpoint configuration
+func (svc *HTTPServiceExpr) validateCanonicalEndpoint(verr *eval.ValidationErrors) {
+	n := svc.CanonicalEndpointName
+	if n != "" && svc.Endpoint(n) == nil {
+		verr.Add(svc, "Unknown canonical endpoint %s", n)
+	}
+}
+
+// validateErrors validates HTTP errors
+func (svc *HTTPServiceExpr) validateErrors(verr *eval.ValidationErrors) {
 	for _, er := range svc.HTTPErrors {
 		verr.Merge(er.Validate())
 	}
-	for _, er := range Root.API.HTTP.Errors {
+	for _, er := range svc.Root.Errors {
 		// This may result in the same error being validated multiple
 		// times however service is the top level expression being
 		// walked and errors cannot be walked until all expressions have
@@ -233,13 +289,80 @@ func (svc *HTTPServiceExpr) Validate() error {
 		// things simple for now.
 		verr.Merge(er.Validate())
 	}
-
-	return verr
 }
 
-// Finalize initializes the path if no path is set in design.
+// validateTransports validates JSON-RPC route constraints.
+func (svc *HTTPServiceExpr) validateTransports(verr *eval.ValidationErrors) {
+	if svc.IsJSONRPC() {
+		svc.validateJSONRPCRoutes(verr)
+	}
+}
+
+// Finalize initializes the path and discards temporary mapped identities made
+// during validation so endpoint finalization starts with its own declarations.
 func (svc *HTTPServiceExpr) Finalize() {
+	svc.mappedBodyOrigins = nil
 	if len(svc.Paths) == 0 {
 		svc.Paths = []string{"/"}
+	}
+}
+
+// prepareJSONRPCRoutes creates routes for all JSON-RPC endpoints.
+// All JSON-RPC methods share the same route.
+func (svc *HTTPServiceExpr) prepareJSONRPCRoutes() {
+	// Check if service has JSON-RPC endpoints
+	hasJSONRPC := false
+	for _, e := range svc.HTTPEndpoints {
+		if e.IsJSONRPC() {
+			hasJSONRPC = true
+			break
+		}
+	}
+
+	if !hasJSONRPC {
+		return
+	}
+
+	// Determine route from service-level configuration
+	var route *RouteExpr
+
+	if svc.JSONRPCRoute != nil {
+		// Use explicitly defined JSON-RPC route
+		route = svc.JSONRPCRoute
+	} else {
+		// Create default route
+		path := "/"
+		if len(svc.Paths) > 0 {
+			path = svc.Paths[0]
+		}
+
+		route = &RouteExpr{
+			Method: "POST",
+			Path:   path,
+		}
+	}
+
+	// Set the same route on all JSON-RPC endpoints
+	for _, e := range svc.HTTPEndpoints {
+		if e.IsJSONRPC() {
+			e.Routes = []*RouteExpr{{
+				Method:   route.Method,
+				Path:     route.Path,
+				Endpoint: e,
+			}}
+		}
+	}
+}
+
+// validateJSONRPCRoutes checks that every JSON-RPC route uses POST.
+func (svc *HTTPServiceExpr) validateJSONRPCRoutes(verr *eval.ValidationErrors) {
+	for _, e := range svc.HTTPEndpoints {
+		if e.IsJSONRPC() {
+			for _, r := range e.Routes {
+				if r.Method != "POST" {
+					verr.Add(r, "JSON-RPC endpoint must use POST method, got %q", r.Method)
+				}
+			}
+		}
 	}
 }

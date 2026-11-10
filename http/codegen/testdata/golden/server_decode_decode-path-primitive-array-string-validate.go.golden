@@ -1,0 +1,42 @@
+// DecodeMethodPathPrimitiveArrayStringValidateRequest returns a decoder for
+// requests sent to the ServicePathPrimitiveArrayStringValidate
+// MethodPathPrimitiveArrayStringValidate endpoint.
+func DecodeMethodPathPrimitiveArrayStringValidateRequest(mux goahttp.Muxer, decoder func(*http.Request) goahttp.Decoder) func(*http.Request) ([]string, error) {
+	return func(r *http.Request) ([]string, error) {
+		var payload []string
+		var (
+			p   []string
+			err error
+
+			params = mux.Vars(r)
+		)
+		{
+			pRaw := params["p"]
+			// Array paths contain an additional escaped value before the comma
+			// separator. Decode that layer before splitting, preserving literal
+			// text when an external caller sends an invalid escape.
+			if decoded, decodeErr := url.PathUnescape(pRaw); decodeErr == nil {
+				pRaw = decoded
+			}
+			pRawSlice := strings.Split(pRaw, ",")
+			p = make([]string, len(pRawSlice))
+			for i, rv := range pRawSlice {
+				p[i] = rv
+			}
+		}
+		if len(p) < 1 {
+			err = goa.MergeErrors(err, goa.InvalidLengthError("p", p, len(p), 1, true))
+		}
+		for _, e := range p {
+			if !(e == "val") {
+				err = goa.MergeErrors(err, goa.InvalidEnumValueError("p[*]", e, []any{"val"}))
+			}
+		}
+		if err != nil {
+			return payload, err
+		}
+		payload = p
+
+		return payload, nil
+	}
+}

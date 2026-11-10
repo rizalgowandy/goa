@@ -23,43 +23,51 @@ import (
 // Service accepts two arguments: the name of the service - which must be unique
 // in the design package - and its defining DSL.
 //
+// If the name of the service is not unique, then it will be merged will all
+// service definitions with matching names. Note that this allows you to
+// spread the definition of a single service across multiple files by simply
+// calling Service multiple times with the same name.
+//
 // Example:
 //
-//    var _ = Service("divider", func() {
-//        Description("divider service") // optional
+//	var _ = Service("divider", func() {
+//	    Description("divider service") // optional
 //
-//        Error("Unauthorized") // error that apply to all the service methods
-//        HTTP(func() {         // HTTP mapping for error responses
-//            // Use HTTP status 401 for 'Unauthorized' errors.
-//            Response("Unauthorized", StatusUnauthorized)
-//        })
+//	    Error("Unauthorized") // error that apply to all the service methods
+//	    HTTP(func() {         // HTTP mapping for error responses
+//	        // Use HTTP status 401 for 'Unauthorized' errors.
+//	        Response("Unauthorized", StatusUnauthorized)
+//	    })
 //
-//        Method("divide", func() {   // Defines a service method.
-//            Description("Divide divides two value.") // optional
-//            Payload(DividePayload)                   // input type
-//            Result(Float64)                          // output type
-//            Error("DivisionByZero")                  // method specific error
-//            // No HTTP mapping for "DivisionByZero" means default of status
-//            // 400 and error struct serialized in HTTP response body.
+//	    Method("divide", func() {   // Defines a service method.
+//	        Description("Divide divides two value.") // optional
+//	        Payload(DividePayload)                   // input type
+//	        Result(Float64)                          // output type
+//	        Error("DivisionByZero")                  // method specific error
+//	        // No HTTP mapping for "DivisionByZero" means default of status
+//	        // 400 and error struct serialized in HTTP response body.
 //
-//            HTTP(func() {      // Defines HTTP transport mapping.
-//                GET("/div")    // HTTP verb and path
-//                Param("a")     // query string parameter
-//                Param("b")     // 'a' and 'b' are attributes of DividePayload.
-//                // No 'Response' DSL means default of status 200 and result
-//                // marshaled in HTTP response body.
-//            })
-//        })
-//    })
-//
+//	        HTTP(func() {      // Defines HTTP transport mapping.
+//	            GET("/div")    // HTTP verb and path
+//	            Param("a")     // query string parameter
+//	            Param("b")     // 'a' and 'b' are attributes of DividePayload.
+//	            // No 'Response' DSL means default of status 200 and result
+//	            // marshaled in HTTP response body.
+//	        })
+//	    })
+//	})
 func Service(name string, fn func()) *expr.ServiceExpr {
 	if _, ok := eval.Current().(eval.TopExpr); !ok {
 		eval.IncompatibleDSL()
 		return nil
 	}
 	if s := expr.Root.Service(name); s != nil {
-		eval.ReportError("service %#v is defined twice", name)
-		return nil
+		oldDSL := s.DSL()
+		s.DSLFunc = func() {
+			oldDSL()
+			fn()
+		}
+		return s
 	}
 	s := &expr.ServiceExpr{Name: name, DSLFunc: fn}
 	expr.Root.Services = append(expr.Root.Services, s)

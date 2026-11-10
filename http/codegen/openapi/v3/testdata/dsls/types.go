@@ -15,6 +15,65 @@ func StringBodyDSL(svcName, metName string) func() {
 	}
 }
 
+func StringEnumBodyDSL() func() {
+	return func() {
+		var T1 = Type("T1", func() {
+			Attribute("my_attr", String, func() {
+				Enum("a", "b", "c")
+			})
+		})
+
+		var T2 = Type("T2", func() {
+			Attribute("my_attr", String, func() {
+				Enum("d", "e")
+			})
+		})
+
+		var _ = Service("svc_enum_1", func() {
+			Method("method_enum", func() {
+				Payload(func() {
+					Reference(T1)
+					Attribute("my_attr")
+					Required("my_attr")
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+
+		var _ = Service("svc_enum_2", func() {
+			Method("method_enum", func() {
+				Payload(func() {
+					Reference(T2)
+					Attribute("my_attr")
+					Required("my_attr")
+				})
+
+				HTTP(func() {
+					POST("/other")
+				})
+			})
+		})
+	}
+}
+
+func AliasStringBodyDSL(svcName, metName string) func() {
+	return func() {
+		var UUID = Type("UUID", String, func() {
+			Format(FormatUUID)
+		})
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(UUID)
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
 func ObjectBodyDSL(svcName, metName string) func() {
 	return func() {
 		var _ = Service(svcName, func() {
@@ -22,6 +81,21 @@ func ObjectBodyDSL(svcName, metName string) func() {
 				Payload(func() {
 					Attribute("name")
 					Attribute("age", Int)
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapBodyDSL(svcName, metName string) func() {
+	return func() {
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("map", MapOf(String, Any))
 				})
 				HTTP(func() {
 					POST("/")
@@ -51,9 +125,37 @@ func ObjectResponseBodyDSL(svcName, metName string) func() {
 				Result(func() {
 					Attribute("name")
 					Attribute("age", Int)
+					Attribute("misc", Any)
 				})
 				HTTP(func() {
 					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MultiCookieResponseBodyDSL(svcName, metName string) func() {
+	return func() {
+		var U = Type("U", func() {
+			Attribute("name")
+			Attribute("cookie")
+		})
+		var T = Type("T", func() {
+			Attribute("name")
+		})
+		var _ = Service(svcName, func() {
+			Method("other", func() {
+				Result(U)
+				HTTP(func() {
+					GET("/cookie")
+					Response(StatusOK, func() { Cookie("cookie") })
+				})
+			})
+			Method(metName, func() {
+				Result(T)
+				HTTP(func() {
+					GET("/")
 				})
 			})
 		})
@@ -114,6 +216,232 @@ func ObjectErrorResponseBodyDSL(svcName, metName string) func() {
 				HTTP(func() {
 					POST("/")
 					Response("bad", StatusBadRequest)
+				})
+			})
+		})
+	}
+}
+
+func UnusedTypeDSL(svcName, metName string) func() {
+	return func() {
+		var _ = Type("Unused", func() {
+			Attribute("foo")
+		})
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func ForcedTypeDSL(svcName, metName string) func() {
+	return func() {
+		var _ = Type("Forced", func() {
+			Attribute("foo")
+			Meta("type:generate:force")
+		})
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func ServiceScopedForcedTypeDSL(svcName, metName, forcedSvcName string) func() {
+	return func() {
+		var _ = Type("Forced", func() {
+			Attribute("foo")
+			Meta("type:generate:force", forcedSvcName)
+		})
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func OpenAPISuppressedForcedTypeDSL(svcName, metName string) func() {
+	return func() {
+		var _ = Type("Forced", func() {
+			Attribute("foo")
+			Meta("type:generate:force")
+			Meta("openapi:generate", "false")
+		})
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func ForcedResultTypeDSL(svcName, metName string) func() {
+	return func() {
+		var _ = ResultType("Forced", func() {
+			Attributes(func() {
+				Attribute("foo")
+			})
+			Meta("type:generate:force")
+		})
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func OpenAPISuppressedForcedResultTypeDSL(svcName, metName string) func() {
+	return func() {
+		var _ = ResultType("Forced", func() {
+			Attributes(func() {
+				Attribute("foo")
+			})
+			Meta("type:generate:force")
+			Meta("openapi:generate", "false")
+		})
+		var _ = Service(svcName, func() {
+			Method(metName, func() {
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapIntKeyBodyDSL(svcName, metName string) func() {
+	return func() {
+		_ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("intmap", MapOf(Int, ArrayOf(String)))
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapIntKeyObjectBodyDSL(svcName, metName string) func() {
+	return func() {
+		MapData := Type("MapData", func() {
+			Attribute("id", String)
+			Attribute("value", String)
+		})
+
+		_ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("intmap", MapOf(Int, ArrayOf(MapData)))
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapIntKeyStringBodyDSL(svcName, metName string) func() {
+	return func() {
+		_ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("intmap", MapOf(Int, String))
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapIntKeyObjectDirectBodyDSL(svcName, metName string) func() {
+	return func() {
+		MapData := Type("MapData", func() {
+			Attribute("id", String)
+			Attribute("value", String)
+		})
+
+		_ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("intmap", MapOf(Int, MapData))
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapStringKeyIntBodyDSL(svcName, metName string) func() {
+	return func() {
+		_ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("stringmap", MapOf(String, Int))
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapStringKeyObjectDirectBodyDSL(svcName, metName string) func() {
+	return func() {
+		MapData := Type("MapData", func() {
+			Attribute("id", String)
+			Attribute("value", String)
+		})
+
+		_ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("stringmap", MapOf(String, MapData))
+				})
+				HTTP(func() {
+					POST("/")
+				})
+			})
+		})
+	}
+}
+
+func MapStringKeyArrayObjectBodyDSL(svcName, metName string) func() {
+	return func() {
+		MapData := Type("MapData", func() {
+			Attribute("id", String)
+			Attribute("value", String)
+		})
+
+		_ = Service(svcName, func() {
+			Method(metName, func() {
+				Payload(func() {
+					Attribute("stringmap", MapOf(String, ArrayOf(MapData)))
+				})
+				HTTP(func() {
+					POST("/")
 				})
 			})
 		})

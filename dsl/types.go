@@ -36,7 +36,10 @@ const (
 	// Bytes is the type for binary data.
 	Bytes = expr.Bytes
 
-	// Any is the type for an arbitrary JSON value (interface{} in Go).
+	// Any is the type for an arbitrary JSON value (any in Go).
+	// In gRPC, Any is mapped to google.protobuf.Value which natively supports
+	// dynamic JSON-like values. Conversion uses structpb.NewValue() for Go to
+	// protobuf and AsInterface() for protobuf to Go.
 	Any = expr.Any
 )
 

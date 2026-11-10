@@ -1,0 +1,66 @@
+package codegen
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"goa.design/goa/v3/codegen"
+	"goa.design/goa/v3/expr"
+	"goa.design/goa/v3/jsonrpc/codegen/testdata"
+)
+
+func TestJSONRPCSSEIntegration(t *testing.T) {
+	// Skip if not in CI or explicitly requested
+	if os.Getenv("GOA_INTEGRATION_TEST") == "" {
+		t.Skip("Skipping integration test. Set GOA_INTEGRATION_TEST=1 to run.")
+	}
+
+	// Run the DSL
+	root := expr.RunDSL(t, testdata.JSONRPCSSEObjectDSL)
+	plan := CreateJSONRPCPlan(root)
+
+	// Generate all files
+	serverFiles := plan.ServerFiles()
+	clientFiles := plan.ClientFiles()
+
+	// Combine all files
+	allFiles := make([]*codegen.File, 0, len(serverFiles)+len(clientFiles))
+	allFiles = append(allFiles, serverFiles...)
+	allFiles = append(allFiles, clientFiles...)
+
+	// Create temp directory
+	tmpDir := t.TempDir()
+
+	// Write all files
+	for _, f := range allFiles {
+		_, err := f.Render(tmpDir)
+		require.NoError(t, err)
+	}
+
+	// Try to compile the generated code
+	// This would require setting up go.mod, etc. so we'll just verify
+	// that files were generated with expected content
+
+	// Check key files exist
+	serverStreamPath := filepath.Join(tmpDir, "gen/jsonrpc/jsonrpcsse_object_service/server/sse.go")
+	require.FileExists(t, serverStreamPath)
+
+	clientStreamPath := filepath.Join(tmpDir, "gen/jsonrpc/jsonrpcsse_object_service/client/stream.go")
+	require.FileExists(t, clientStreamPath)
+
+	// Read and verify server stream has JSON-RPC notification code
+	serverContent, err := os.ReadFile(serverStreamPath)
+	require.NoError(t, err)
+	require.Contains(t, string(serverContent), "JSON-RPC notification")
+	require.Contains(t, string(serverContent), `"jsonrpc": "2.0"`)
+	require.Contains(t, string(serverContent), "text/event-stream")
+
+	// Read and verify client stream has JSON-RPC decoding
+	clientContent, err := os.ReadFile(clientStreamPath)
+	require.NoError(t, err)
+	require.Contains(t, string(clientContent), "decodeResult")
+	require.Contains(t, string(clientContent), "JSON-RPC notification")
+}

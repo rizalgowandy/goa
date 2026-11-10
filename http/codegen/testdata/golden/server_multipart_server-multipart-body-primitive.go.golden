@@ -1,0 +1,18 @@
+// NewServiceMultipartPrimitiveMethodMultipartPrimitiveDecoder returns a
+// decoder to decode the multipart request for the "ServiceMultipartPrimitive"
+// service "MethodMultipartPrimitive" endpoint.
+func NewServiceMultipartPrimitiveMethodMultipartPrimitiveDecoder(_ goahttp.Muxer, serviceMultipartPrimitiveMethodMultipartPrimitiveDecoderFn ServiceMultipartPrimitiveMethodMultipartPrimitiveDecoderFunc) func(r *http.Request) goahttp.Decoder {
+	return func(r *http.Request) goahttp.Decoder {
+		return goahttp.EncodingFunc(func(v any) error {
+			mr, merr := r.MultipartReader()
+			if merr != nil {
+				return merr
+			}
+			body := v.(*string)
+			if err := serviceMultipartPrimitiveMethodMultipartPrimitiveDecoderFn(mr, body); err != nil {
+				return err
+			}
+			return nil
+		})
+	}
+}

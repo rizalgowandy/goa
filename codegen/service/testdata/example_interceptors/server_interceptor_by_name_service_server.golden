@@ -1,0 +1,33 @@
+//
+// ServerInterceptorByNameService example server interceptors
+//
+// Command:
+// goa
+
+package interceptors
+
+import (
+	"context"
+	"goa.design/clue/log"
+	serverinterceptorbynameservice "goa.design/goa/example/server_interceptor_by_name_service"
+	goa "goa.design/goa/v3/pkg"
+)
+
+// ServerInterceptorByNameServiceServerInterceptors implements the server interceptor for the ServerInterceptorByNameService service.
+type ServerInterceptorByNameServiceServerInterceptors struct {
+}
+
+// NewServerInterceptorByNameServiceServerInterceptors creates a new server interceptor for the ServerInterceptorByNameService service.
+func NewServerInterceptorByNameServiceServerInterceptors() *ServerInterceptorByNameServiceServerInterceptors {
+	return &ServerInterceptorByNameServiceServerInterceptors{}
+}
+func (i *ServerInterceptorByNameServiceServerInterceptors) Test(ctx context.Context, info serverinterceptorbynameservice.TestInfo, next goa.Endpoint) (any, error) {
+	log.Printf(ctx, "[Test] Processing request: %v", info.RawPayload())
+	resp, err := next(ctx, info.RawPayload())
+	if err != nil {
+		log.Printf(ctx, "[Test] Error: %v", err)
+		return nil, err
+	}
+	log.Printf(ctx, "[Test] Response: %v", resp)
+	return resp, nil
+}

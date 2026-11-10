@@ -37,7 +37,7 @@ func ValidateResultType(result *ResultType) (err error) {
 	case "tiny":
 		err = ValidateResultTypeViewTiny(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default", "tiny"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default", "tiny"})
 	}
 	return
 }
@@ -116,7 +116,7 @@ func ValidateResultTypeCollection(result ResultTypeCollection) (err error) {
 	case "tiny":
 		err = ValidateResultTypeCollectionViewTiny(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default", "tiny"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default", "tiny"})
 	}
 	return
 }
@@ -207,7 +207,7 @@ func ValidateResultType(result *ResultType) (err error) {
 	case "tiny":
 		err = ValidateResultTypeViewTiny(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default", "tiny"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default", "tiny"})
 	}
 	return
 }
@@ -227,12 +227,6 @@ func ValidateResultTypeViewTiny(result *ResultTypeView) (err error) {
 	if result.A == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("a", "result"))
 	}
-	return
-}
-
-// ValidateUserTypeView runs the validations defined on UserTypeView.
-func ValidateUserTypeView(result *UserTypeView) (err error) {
-
 	return
 }
 `
@@ -319,7 +313,7 @@ func ValidateRT(result *RT) (err error) {
 	case "tiny":
 		err = ValidateRTViewTiny(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default", "tiny"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default", "tiny"})
 	}
 	return
 }
@@ -328,10 +322,16 @@ func ValidateRT(result *RT) (err error) {
 // view.
 func ValidateRTView(result *RTView) (err error) {
 
+	if result.B == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("b", "result"))
+	}
 	if result.B != nil {
 		if err2 := ValidateRT2ViewExtended(result.B); err2 != nil {
 			err = goa.MergeErrors(err, err2)
 		}
+	}
+	if result.C == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("c", "result"))
 	}
 	if result.C != nil {
 		if err2 := ValidateRT3View(result.C); err2 != nil {
@@ -345,10 +345,16 @@ func ValidateRTView(result *RTView) (err error) {
 // view.
 func ValidateRTViewTiny(result *RTView) (err error) {
 
+	if result.B == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("b", "result"))
+	}
 	if result.B != nil {
 		if err2 := ValidateRT2ViewTiny(result.B); err2 != nil {
 			err = goa.MergeErrors(err, err2)
 		}
+	}
+	if result.C == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("c", "result"))
 	}
 	if result.C != nil {
 		if err2 := ValidateRT3View(result.C); err2 != nil {
@@ -388,12 +394,6 @@ func ValidateRT2ViewTiny(result *RT2View) (err error) {
 	if result.D == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("d", "result"))
 	}
-	return
-}
-
-// ValidateUserTypeView runs the validations defined on UserTypeView.
-func ValidateUserTypeView(result *UserTypeView) (err error) {
-
 	return
 }
 
@@ -452,7 +452,7 @@ func ValidateRT(result *RT) (err error) {
 	case "tiny":
 		err = ValidateRTViewTiny(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default", "tiny"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default", "tiny"})
 	}
 	return
 }
@@ -460,6 +460,7 @@ func ValidateRT(result *RT) (err error) {
 // ValidateRTView runs the validations defined on RTView using the "default"
 // view.
 func ValidateRTView(result *RTView) (err error) {
+
 	if result.A == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("a", "result"))
 	}
@@ -474,6 +475,7 @@ func ValidateRTView(result *RTView) (err error) {
 // ValidateRTViewTiny runs the validations defined on RTView using the "tiny"
 // view.
 func ValidateRTViewTiny(result *RTView) (err error) {
+
 	if result.A == nil {
 		err = goa.MergeErrors(err, goa.MissingFieldError("a", "result"))
 	}
@@ -521,7 +523,7 @@ func ValidateRT(result *RT) (err error) {
 	case "tiny":
 		err = ValidateRTViewTiny(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default", "tiny"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default", "tiny"})
 	}
 	return
 }
@@ -625,7 +627,7 @@ func ValidateSomeRT(result *SomeRT) (err error) {
 	case "tiny":
 		err = ValidateSomeRTViewTiny(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default", "tiny"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default", "tiny"})
 	}
 	return
 }
@@ -637,7 +639,7 @@ func ValidateAnotherResult(result *AnotherResult) (err error) {
 	case "default", "":
 		err = ValidateAnotherResultView(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default"})
 	}
 	return
 }
@@ -646,6 +648,9 @@ func ValidateAnotherResult(result *AnotherResult) (err error) {
 // "default" view.
 func ValidateSomeRTView(result *SomeRTView) (err error) {
 
+	if result.A == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("a", "result"))
+	}
 	if result.A != nil {
 		if err2 := ValidateSomeRTCollectionViewTiny(result.A); err2 != nil {
 			err = goa.MergeErrors(err, err2)
@@ -658,6 +663,9 @@ func ValidateSomeRTView(result *SomeRTView) (err error) {
 // "tiny" view.
 func ValidateSomeRTViewTiny(result *SomeRTView) (err error) {
 
+	if result.A == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("a", "result"))
+	}
 	if result.A != nil {
 		if err2 := ValidateSomeRTCollectionView(result.A); err2 != nil {
 			err = goa.MergeErrors(err, err2)
@@ -692,6 +700,9 @@ func ValidateSomeRTCollectionViewTiny(result SomeRTCollectionView) (err error) {
 // using the "default" view.
 func ValidateAnotherResultView(result *AnotherResultView) (err error) {
 
+	if result.A == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("a", "result"))
+	}
 	if result.A != nil {
 		if err2 := ValidateAnotherResultCollectionView(result.A); err2 != nil {
 			err = goa.MergeErrors(err, err2)
@@ -738,17 +749,9 @@ var (
 func ValidateRT(result *RT) (err error) {
 	switch result.View {
 	case "default", "":
-		err = ValidateRTView(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default"})
 	}
-	return
-}
-
-// ValidateRTView runs the validations defined on RTView using the "default"
-// view.
-func ValidateRTView(result *RTView) (err error) {
-
 	return
 }
 `
@@ -784,7 +787,7 @@ func ValidateResult(result *Result) (err error) {
 	case "default", "":
 		err = ValidateResultView(result.Projected)
 	default:
-		err = goa.InvalidEnumValueError("view", result.View, []interface{}{"default"})
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default"})
 	}
 	return
 }
@@ -793,8 +796,8 @@ func ValidateResult(result *Result) (err error) {
 // "default" view.
 func ValidateResultView(result *ResultView) (err error) {
 	for _, e := range result.T {
-		if !(e == "a" || e == "b") {
-			err = goa.MergeErrors(err, goa.InvalidEnumValueError("result.t[*]", e, []interface{}{"a", "b"}))
+		if !(string(e) == "a" || string(e) == "b") {
+			err = goa.MergeErrors(err, goa.InvalidEnumValueError("result.t[*]", string(e), []any{"a", "b"}))
 		}
 	}
 	return
@@ -802,9 +805,49 @@ func ValidateResultView(result *ResultView) (err error) {
 
 // ValidateUserTypeView runs the validations defined on UserTypeView.
 func ValidateUserTypeView(result UserTypeView) (err error) {
-	if !(result == "a" || result == "b") {
-		err = goa.MergeErrors(err, goa.InvalidEnumValueError("result", result, []interface{}{"a", "b"}))
+	if !(string(result) == "a" || string(result) == "b") {
+		err = goa.MergeErrors(err, goa.InvalidEnumValueError("result", string(result), []any{"a", "b"}))
 	}
 	return
 }
 `
+
+const ResultWithPkgPathCode = `// RT is the viewed result type that is projected based on a view.
+type RT struct {
+	// Type to project
+	Projected *RTView
+	// View to render
+	View string
+}
+
+// RTView is a type that runs validations on a projected type.
+type RTView struct {
+	A *UserTypeView
+}
+
+// UserTypeView is a type that runs validations on a projected type.
+type UserTypeView struct {
+	A *string
+}
+
+var (
+	// RTMap is a map indexing the attribute names of RT by view name.
+	RTMap = map[string][]string{
+		"default": {
+			"a",
+		},
+	}
+)
+
+// ValidateRT runs the validations defined on the viewed result type RT.
+func ValidateRT(result *RT) (err error) {
+	switch result.View {
+	case "default", "":
+	default:
+		err = goa.InvalidEnumValueError("view", result.View, []any{"default"})
+	}
+	return
+}
+`
+
+const ResultWithOneOfInResultTypeCode = "// OneOfResource is the viewed result type that is projected based on a view.\ntype OneOfResource struct {\n\t// Type to project\n\tProjected *OneOfResourceView\n\t// View to render\n\tView string\n}\n\n// OneOfResourceView is a type that runs validations on a projected type.\ntype OneOfResourceView struct {\n\t// Data (type depends on flag)\n\tData *OneOfValueView\n}\n\n// OneOfValueView is a type that runs validations on a projected type.\ntype OneOfValueView struct {\n\tFlag Flag\n}\n\n// FlagAstringView is a type that runs validations on a projected type.\ntype FlagAstringView string\n\n// FlagAintView is a type that runs validations on a projected type.\ntype FlagAintView int64\n\n// Flag holds exactly one of its branch values.\ntype Flag struct {\n\tkind    FlagKind\n\tastring FlagAstringView\n\taint    FlagAintView\n}\n\n// FlagKind records which Flag branch is selected.\ntype FlagKind string\n\nconst (\n\t// FlagKindAstring identifies the astring branch.\n\tFlagKindAstring FlagKind = \"astring\"\n\t// FlagKindAint identifies the aint branch.\n\tFlagKindAint FlagKind = \"aint\"\n)\n\n// Kind returns the selected branch.\nfunc (u Flag) Kind() FlagKind {\n\treturn u.kind\n}\n\n// NewFlagAstring constructs Flag with the astring branch set.\nfunc NewFlagAstring(v FlagAstringView) Flag {\n\treturn Flag{\n\t\tkind:    FlagKindAstring,\n\t\tastring: v,\n\t}\n}\n\n// AsAstring returns the value when the astring branch is selected.\nfunc (u Flag) AsAstring() (_ FlagAstringView, ok bool) {\n\tif u.kind != FlagKindAstring {\n\t\treturn\n\t}\n\treturn u.astring, true\n}\n\n// SetAstring selects the astring branch and stores v.\nfunc (u *Flag) SetAstring(v FlagAstringView) {\n\t*u = Flag{\n\t\tkind:    FlagKindAstring,\n\t\tastring: v,\n\t}\n}\n\n// NewFlagAint constructs Flag with the aint branch set.\nfunc NewFlagAint(v FlagAintView) Flag {\n\treturn Flag{\n\t\tkind: FlagKindAint,\n\t\taint: v,\n\t}\n}\n\n// AsAint returns the value when the aint branch is selected.\nfunc (u Flag) AsAint() (_ FlagAintView, ok bool) {\n\tif u.kind != FlagKindAint {\n\t\treturn\n\t}\n\treturn u.aint, true\n}\n\n// SetAint selects the aint branch and stores v.\nfunc (u *Flag) SetAint(v FlagAintView) {\n\t*u = Flag{\n\t\tkind: FlagKindAint,\n\t\taint: v,\n\t}\n}\n\n// Validate ensures exactly one valid branch is selected.\nfunc (u Flag) Validate() error {\n\t_, err := u.Value()\n\treturn err\n}\n\n// Value returns the selected branch value, or the same selection error as Validate.\n// Go templates can read this method directly; an invalid selection stops execution.\nfunc (u Flag) Value() (any, error) {\n\tswitch u.kind {\n\tcase \"\":\n\t\treturn nil, goa.InvalidEnumValueError(\"type\", \"\", []any{\n\t\t\tstring(FlagKindAstring),\n\t\t\tstring(FlagKindAint),\n\t\t})\n\tcase FlagKindAstring:\n\t\treturn u.astring, nil\n\tcase FlagKindAint:\n\t\treturn u.aint, nil\n\tdefault:\n\t\treturn nil, goa.InvalidEnumValueError(\"type\", u.kind, []any{\n\t\t\tstring(FlagKindAstring),\n\t\t\tstring(FlagKindAint),\n\t\t})\n\t}\n}\n\n// MarshalJSON marshals the union into the canonical {type,value} JSON shape.\nfunc (u Flag) MarshalJSON() ([]byte, error) {\n\tvalue, err := u.Value()\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn json.Marshal(struct {\n\t\tType  string `json:\"type\"`\n\t\tValue any    `json:\"value\"`\n\t}{\n\t\tType:  string(u.kind),\n\t\tValue: value,\n\t})\n}\n\n// UnmarshalJSON unmarshals the union from the canonical {type,value} JSON shape.\nfunc (u *Flag) UnmarshalJSON(data []byte) error {\n\tvar raw struct {\n\t\tType  string          `json:\"type\"`\n\t\tValue json.RawMessage `json:\"value\"`\n\t}\n\tif err := json.Unmarshal(data, &raw); err != nil {\n\t\treturn err\n\t}\n\tif len(raw.Value) == 0 {\n\t\treturn goa.MissingFieldError(\"value\", \"Flag\")\n\t}\n\tif bytes.Equal(bytes.TrimSpace(raw.Value), []byte(\"null\")) {\n\t\treturn goa.InvalidFieldTypeError(\"value\", nil, \"non-null JSON value\")\n\t}\n\tswitch raw.Type {\n\tcase string(FlagKindAstring):\n\t\tvar v FlagAstringView\n\t\tif err := json.Unmarshal(raw.Value, &v); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tu.SetAstring(v)\n\tcase string(FlagKindAint):\n\t\tvar v FlagAintView\n\t\tif err := json.Unmarshal(raw.Value, &v); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tu.SetAint(v)\n\tdefault:\n\t\tif raw.Type == \"\" {\n\t\t\treturn goa.MissingFieldError(\"type\", \"Flag\")\n\t\t}\n\t\treturn goa.InvalidEnumValueError(\"type\", raw.Type, []any{\n\t\t\tstring(FlagKindAstring),\n\t\t\tstring(FlagKindAint),\n\t\t})\n\t}\n\treturn nil\n}\n\nvar (\n\t// OneOfResourceMap is a map indexing the attribute names of OneOfResource by\n\t// view name.\n\tOneOfResourceMap = map[string][]string{\n\t\t\"default\": {\n\t\t\t\"data\",\n\t\t},\n\t}\n)\n\n// ValidateOneOfResource runs the validations defined on the viewed result type\n// OneOfResource.\nfunc ValidateOneOfResource(result *OneOfResource) (err error) {\n\tswitch result.View {\n\tcase \"default\", \"\":\n\t\terr = ValidateOneOfResourceView(result.Projected)\n\tdefault:\n\t\terr = goa.InvalidEnumValueError(\"view\", result.View, []any{\"default\"})\n\t}\n\treturn\n}\n\n// ValidateOneOfResourceView runs the validations defined on OneOfResourceView\n// using the \"default\" view.\nfunc ValidateOneOfResourceView(result *OneOfResourceView) (err error) {\n\tif result.Data == nil {\n\t\terr = goa.MergeErrors(err, goa.MissingFieldError(\"data\", \"result\"))\n\t}\n\tif result.Data != nil {\n\t\tif err2 := ValidateOneOfValueView(result.Data); err2 != nil {\n\t\t\terr = goa.MergeErrors(err, err2)\n\t\t}\n\t}\n\treturn\n}\n\n// ValidateOneOfValueView runs the validations defined on OneOfValueView.\nfunc ValidateOneOfValueView(result *OneOfValueView) (err error) {\n\n\tif result.Flag.Kind() != \"\" {\n\t\tif err2 := result.Flag.Validate(); err2 != nil {\n\t\t\terr = goa.MergeErrors(err, err2)\n\t\t}\n\t}\n\n\treturn\n}\n"

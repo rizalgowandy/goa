@@ -1,0 +1,29 @@
+// DecodeMethodBodyStringValidateRequest returns a decoder for requests sent to
+// the ServiceBodyStringValidate MethodBodyStringValidate endpoint.
+func DecodeMethodBodyStringValidateRequest(mux goahttp.Muxer, decoder func(*http.Request) goahttp.Decoder) func(*http.Request) (*servicebodystringvalidate.MethodBodyStringValidatePayload, error) {
+	return func(r *http.Request) (*servicebodystringvalidate.MethodBodyStringValidatePayload, error) {
+		var payload *servicebodystringvalidate.MethodBodyStringValidatePayload
+		var (
+			body MethodBodyStringValidateRequestBody
+			err  error
+		)
+		err = decoder(r).Decode(&body)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return payload, goa.MissingPayloadError()
+			}
+			var gerr *goa.ServiceError
+			if errors.As(err, &gerr) {
+				return payload, gerr
+			}
+			return payload, goa.DecodePayloadError(err.Error())
+		}
+		err = ValidateMethodBodyStringValidateRequestBody(&body)
+		if err != nil {
+			return payload, err
+		}
+		payload = NewMethodBodyStringValidatePayload(&body)
+
+		return payload, nil
+	}
+}

@@ -1,15 +1,26 @@
+// This file defines the evaluated design root and validates relationships
+// between its API, services, and types. Complete service planning checks the
+// generated package placement before any source files are emitted.
 package expr
 
 import (
+	"cmp"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
 	"sort"
+	"strings"
 
 	"goa.design/goa/v3/eval"
 	goa "goa.design/goa/v3/pkg"
 )
 
 // Root is the root object built by the DSL.
-var Root = &RootExpr{GeneratedTypes: &GeneratedRoot{}}
+var Root = new(RootExpr)
+
+// DefaultProtoc is the default command to be invoked for generating code from protobuf schemas.
+const DefaultProtoc = "protoc"
 
 type (
 	// RootExpr is the struct built by the DSL on process start.
@@ -18,16 +29,16 @@ type (
 		API *APIExpr
 		// Services contains the list of services exposed by the API.
 		Services []*ServiceExpr
-		// Errors contains the list of errors returned by all the API
-		// methods.
+		// Interceptors contains the list of interceptors.
+		Interceptors []*InterceptorExpr
+		// Errors contains reusable error definitions. Services and methods
+		// select these errors by naming them in their own Error DSL.
 		Errors []*ErrorExpr
 		// Types contains the user types described in the DSL.
 		Types []UserType
-		// ResultTypes contains the result types described in the DSL.
-		ResultTypes []UserType
-		// GeneratedTypes contains the types generated during DSL
+		// ResultTypes contains the result types generated during DSL
 		// execution.
-		GeneratedTypes *GeneratedRoot
+		ResultTypes []*ResultTypeExpr
 		// Conversions list the user type to external type mappings.
 		Conversions []*TypeMap
 		// Creations list the external type to user type mappings.
@@ -45,7 +56,14 @@ type (
 		User UserType
 
 		// External is an instance of the type being converted from or to.
-		External interface{}
+		External any
+	}
+
+	// mountedHTTPRoute identifies one final route and the service that owns it.
+	mountedHTTPRoute struct {
+		service string
+		route   *RouteExpr
+		path    string
 	}
 )
 
@@ -72,14 +90,19 @@ func (r *RootExpr) WalkSets(walk eval.SetWalker) {
 	}
 	walk(types)
 
-	// Result types
-	mtypes := make(eval.ExpressionSet, len(r.ResultTypes))
-	for i, mt := range r.ResultTypes {
-		mtypes[i] = mt.(*ResultTypeExpr)
+	// Result types, note: initialized when the generated result types are
+	// walked so empty the first time around (in the first pass DSL
+	// execution). See ResultTypesRoot.WalkSets for details.
+	rtypes := make(eval.ExpressionSet, len(r.ResultTypes))
+	for i, rt := range r.ResultTypes {
+		rtypes[i] = rt
 	}
-	walk(mtypes)
+	walk(rtypes)
 
 	// Services
+	for _, service := range r.Services {
+		service.design = r
+	}
 	walk(eval.ToExpressionSet(r.Services))
 
 	// Methods (must be done after services)
@@ -92,25 +115,10 @@ func (r *RootExpr) WalkSets(walk eval.SetWalker) {
 	walk(methods)
 
 	// HTTP services and endpoints
-	httpsvcs := make(eval.ExpressionSet, len(r.API.HTTP.Services))
-	sort.SliceStable(r.API.HTTP.Services, func(i, j int) bool {
-		return r.API.HTTP.Services[j].ParentName == r.API.HTTP.Services[i].Name()
-	})
-	var httpepts eval.ExpressionSet
-	var httpsvrs eval.ExpressionSet
-	for i, svc := range r.API.HTTP.Services {
-		httpsvcs[i] = svc
-		for _, e := range svc.HTTPEndpoints {
-			httpepts = append(httpepts, e)
-		}
-		for _, s := range svc.FileServers {
-			httpsvrs = append(httpsvrs, s)
-		}
-	}
-	walk(eval.ExpressionSet{r.API.HTTP})
-	walk(httpsvcs)
-	walk(httpepts)
-	walk(httpsvrs)
+	r.walkHTTPServices(r.API.HTTP, r.API.HTTP.Services, walk)
+
+	// JSON-RPC services and endpoints
+	r.walkHTTPServices(r.API.JSONRPC, r.API.JSONRPC.Services, walk)
 
 	// GRPC services and endpoints
 	grpcsvcs := make(eval.ExpressionSet, len(r.API.GRPC.Services))
@@ -130,10 +138,10 @@ func (r *RootExpr) WalkSets(walk eval.SetWalker) {
 }
 
 // DependsOn returns nil, the core DSL has no dependency.
-func (r *RootExpr) DependsOn() []eval.Root { return nil }
+func (*RootExpr) DependsOn() []eval.Root { return nil }
 
 // Packages returns the Go import path to this and the dsl packages.
-func (r *RootExpr) Packages() []string {
+func (*RootExpr) Packages() []string {
 	return []string{
 		"goa.design/goa/v3/expr",
 		"goa.design/goa/v3/dsl",
@@ -152,18 +160,6 @@ func (r *RootExpr) UserType(name string) UserType {
 	for _, t := range r.ResultTypes {
 		if t.Name() == name {
 			return t
-		}
-	}
-	return nil
-}
-
-// GeneratedResultType returns the generated result type expression with the given
-// id, nil if there isn't one.
-func (r *RootExpr) GeneratedResultType(id string) *ResultTypeExpr {
-	for _, t := range *r.GeneratedTypes {
-		mt := t.(*ResultTypeExpr)
-		if mt.Identifier == id {
-			return mt
 		}
 	}
 	return nil
@@ -189,31 +185,8 @@ func (r *RootExpr) Error(name string) *ErrorExpr {
 	return nil
 }
 
-// HTTPService returns the HTTP service with the given name if any.
-func (r *RootExpr) HTTPService(name string) *HTTPServiceExpr {
-	for _, res := range r.API.HTTP.Services {
-		if res.Name() == name {
-			return res
-		}
-	}
-	return nil
-}
-
-// HTTPServiceFor creates a new or returns the existing HTTP service definition
-// for the given service.
-func (r *RootExpr) HTTPServiceFor(s *ServiceExpr) *HTTPServiceExpr {
-	if res := r.HTTPService(s.Name); res != nil {
-		return res
-	}
-	res := &HTTPServiceExpr{
-		ServiceExpr: s,
-	}
-	r.API.HTTP.Services = append(r.API.HTTP.Services, res)
-	return res
-}
-
 // EvalName is the name of the DSL.
-func (r *RootExpr) EvalName() string {
+func (*RootExpr) EvalName() string {
 	return "design"
 }
 
@@ -222,6 +195,284 @@ func (r *RootExpr) Validate() error {
 	var verr eval.ValidationErrors
 	if r.API == nil {
 		verr.Add(r, "Missing API declaration")
+	}
+	// Ensure user type Go type names are unique across the design. Duplicate
+	// user type names (e.g., via TypeName) can lead to conflicting generated
+	// code. The Type DSL checks for duplicate declared names; this check
+	// covers collisions introduced by renaming.
+	useen := make(map[string]struct{})
+	for _, ut := range r.Types {
+		name := ut.Name()
+		if _, ok := useen[name]; ok {
+			verr.Add(r, "type %#v defined twice", name)
+		} else {
+			useen[name] = struct{}{}
+		}
+	}
+	// Ensure result type Go type names are unique across declared result types
+	// (exclude generated collection/result types). Generated types (e.g.,
+	// CollectionOf) do not set the openapi:typename meta, whereas declared
+	// result types do (set when calling dsl.ResultType). This prevents
+	// collisions like two declared ResultType blocks both using TypeName("A"),
+	// while allowing declared types to coexist with generated collection types
+	// that may share a name like "XCollection".
+	seen := make(map[string]struct{})
+	for _, rt := range r.ResultTypes {
+		if _, declared := rt.Meta["openapi:typename"]; !declared {
+			continue // skip generated result types
+		}
+		name := rt.Name()
+		if _, ok := seen[name]; ok {
+			verr.Add(r, "result type %#v defined twice", name)
+		} else {
+			seen[name] = struct{}{}
+		}
+	}
+	for _, userType := range r.Types {
+		verr.Merge(userType.Attribute().validateDefaultValues(fmt.Sprintf("type %q", userType.Name()), userType))
+	}
+	for _, resultType := range r.ResultTypes {
+		verr.Merge(resultType.Attribute().validateDefaultValues(fmt.Sprintf("result type %q", resultType.Name()), resultType))
+	}
+	verr.Merge(r.validateErrorDefaults())
+	verr.Merge(ValidateSharedErrorNames(r))
+
+	verr.Merge(validateTypeMappings("conversion", r.Conversions))
+	verr.Merge(validateTypeMappings("creation", r.Creations))
+	if r.API != nil {
+		verr.Merge(r.validateSharedHTTPRoutes())
+	}
+
+	return &verr
+}
+
+// ValidateSharedErrorNames rejects an authored type with several static error
+// names unless each value carries its selected name in an ErrorName field. The
+// roots must include every design linked by one generation command.
+func ValidateSharedErrorNames(roots ...*RootExpr) *eval.ValidationErrors {
+	type errorUse struct {
+		expression  *ErrorExpr
+		userType    UserType
+		names       map[string]struct{}
+		carriesName bool
+	}
+	verr := new(eval.ValidationErrors)
+	uses := make(map[UserType]*errorUse)
+	collect := func(designError *ErrorExpr) {
+		userType, ok := designError.Type.(UserType)
+		if !ok {
+			return
+		}
+		use := uses[userType.Origin()]
+		if use == nil {
+			use = &errorUse{
+				expression: designError,
+				userType:   userType,
+				names:      make(map[string]struct{}),
+			}
+			uses[userType.Origin()] = use
+		}
+		use.names[designError.Name] = struct{}{}
+		use.carriesName = use.carriesName || hasErrorNameAttribute(userType.Attribute())
+	}
+	for _, root := range roots {
+		for _, designError := range root.Errors {
+			collect(designError)
+		}
+		for _, service := range root.Services {
+			for _, designError := range service.Errors {
+				collect(designError)
+			}
+			for _, method := range service.Methods {
+				for _, designError := range method.Errors {
+					collect(designError)
+				}
+			}
+		}
+	}
+	ordered := slices.Collect(maps.Values(uses))
+	slices.SortFunc(ordered, func(left, right *errorUse) int {
+		if compared := cmp.Compare(left.userType.Name(), right.userType.Name()); compared != 0 {
+			return compared
+		}
+		leftNames := strings.Join(slices.Sorted(maps.Keys(left.names)), "\x00")
+		rightNames := strings.Join(slices.Sorted(maps.Keys(right.names)), "\x00")
+		return cmp.Compare(leftNames, rightNames)
+	})
+	for _, use := range ordered {
+		if len(use.names) < 2 || use.carriesName {
+			continue
+		}
+		names := slices.Sorted(maps.Keys(use.names))
+		verr.Add(
+			use.expression,
+			"type %q defines errors %s and must identify the attribute containing the error name with ErrorName",
+			use.userType.Name(),
+			strings.Join(names, ", "),
+		)
+	}
+	return verr
+}
+
+// hasErrorNameAttribute reports whether the type stores its error name in one
+// generated field.
+func hasErrorNameAttribute(attribute *AttributeExpr) bool {
+	found := false
+	walkAttribute(attribute, func(_ string, nested *AttributeExpr) error { // nolint: errcheck
+		if _, ok := nested.Meta["struct:error:name"]; ok {
+			found = true
+		}
+		return nil
+	})
+	return found
+}
+
+// validateErrorDefaults checks each declared error once. Services and methods
+// may reuse the same error expression, so pointer identity prevents repeated
+// diagnostics for one declaration.
+func (r *RootExpr) validateErrorDefaults() *eval.ValidationErrors {
+	errors := new(eval.ValidationErrors)
+	seen := make(map[*ErrorExpr]struct{})
+	validate := func(designError *ErrorExpr) {
+		if _, ok := seen[designError]; ok {
+			return
+		}
+		seen[designError] = struct{}{}
+		errors.Merge(designError.AttributeExpr.validateDefaultValues(
+			fmt.Sprintf("error %q", designError.Name), designError,
+		))
+	}
+	for _, designError := range r.Errors {
+		validate(designError)
+	}
+	for _, service := range r.Services {
+		for _, designError := range service.Errors {
+			validate(designError)
+		}
+		for _, method := range service.Methods {
+			for _, designError := range method.Errors {
+				validate(designError)
+			}
+		}
+	}
+	return errors
+}
+
+// validateSharedHTTPRoutes rejects ordinary HTTP and JSON-RPC routes that
+// would replace one another when mounted on the same server.
+func (r *RootExpr) validateSharedHTTPRoutes() *eval.ValidationErrors {
+	var verr eval.ValidationErrors
+	if r.API.HTTP == nil || r.API.JSONRPC == nil {
+		return &verr
+	}
+
+	servers := r.API.Servers
+	if len(servers) == 0 {
+		// Goa creates this server after validation when the design does not
+		// declare one. It hosts every service.
+		servers = []*ServerExpr{{Name: r.API.Name}}
+	}
+
+	for _, server := range servers {
+		httpRoutes := routesMountedOnServer(server, r.API.HTTP.Services)
+		jsonrpcRoutes := routesMountedOnServer(server, r.API.JSONRPC.Services)
+		for _, httpRoute := range httpRoutes {
+			for _, jsonrpcRoute := range jsonrpcRoutes {
+				if httpRoute.route.Method != jsonrpcRoute.route.Method ||
+					routePatternWithoutParameterNames(httpRoute.path) !=
+						routePatternWithoutParameterNames(jsonrpcRoute.path) {
+					continue
+				}
+				verr.Add(
+					jsonrpcRoute.route,
+					"server %q mounts ordinary HTTP route %s %q from service %q "+
+						"and JSON-RPC route %s %q from service %q; both routes match the same requests",
+					server.Name,
+					httpRoute.route.Method,
+					httpRoute.path,
+					httpRoute.service,
+					jsonrpcRoute.route.Method,
+					jsonrpcRoute.path,
+					jsonrpcRoute.service,
+				)
+			}
+		}
+	}
+	return &verr
+}
+
+// routesMountedOnServer returns every final route owned by services mounted on
+// server.
+func routesMountedOnServer(server *ServerExpr, services []*HTTPServiceExpr) []mountedHTTPRoute {
+	var routes []mountedHTTPRoute
+	for _, service := range services {
+		if !serverHostsService(server, service.Name()) {
+			continue
+		}
+		for _, endpoint := range service.HTTPEndpoints {
+			for _, route := range endpoint.Routes {
+				for _, routePath := range route.FullPaths() {
+					routes = append(routes, mountedHTTPRoute{
+						service: service.Name(),
+						route:   route,
+						path:    routePath,
+					})
+				}
+			}
+		}
+	}
+	return routes
+}
+
+// serverHostsService reports whether server mounts service. An empty service
+// list means that the server mounts every service in the design.
+func serverHostsService(server *ServerExpr, service string) bool {
+	return len(server.Services) == 0 || slices.Contains(server.Services, service)
+}
+
+// routePatternWithoutParameterNames returns the path form used to detect
+// router replacement. Parameter names do not change which requests match.
+func routePatternWithoutParameterNames(routePath string) string {
+	return HTTPWildcardRegex.ReplaceAllStringFunc(routePath, func(wildcard string) string {
+		if strings.HasPrefix(wildcard, "{*") {
+			return "{*wildcard}"
+		}
+		return "{parameter}"
+	})
+}
+
+// validateTypeMappings rejects repeated declarations that would generate the
+// same method on one user type. A reflected type includes its package path, so
+// equally named external types from different packages remain distinct.
+func validateTypeMappings(direction string, mappings []*TypeMap) *eval.ValidationErrors {
+	type mappingIdentity struct {
+		user     UserType
+		external reflect.Type
+	}
+	var verr eval.ValidationErrors
+	seen := make(map[mappingIdentity]struct{}, len(mappings))
+	for _, mapping := range mappings {
+		identity := mappingIdentity{
+			user:     mapping.User.Origin(),
+			external: reflect.TypeOf(mapping.External),
+		}
+		if _, ok := seen[identity]; ok {
+			if direction == "conversion" {
+				verr.Add(
+					mapping.User,
+					"conversion from user type %q to external type %q defined twice",
+					mapping.User.Name(), identity.external,
+				)
+			} else {
+				verr.Add(
+					mapping.User,
+					"creation from external type %q to user type %q defined twice",
+					identity.external, mapping.User.Name(),
+				)
+			}
+			continue
+		}
+		seen[identity] = struct{}{}
 	}
 	return &verr
 }
@@ -242,12 +493,33 @@ func (r *RootExpr) Finalize() {
 	}
 }
 
+// walkHTTPServices walks the HTTP services and endpoints.
+func (r *RootExpr) walkHTTPServices(root eval.Expression, svcs []*HTTPServiceExpr, walk eval.SetWalker) {
+	sort.SliceStable(svcs, func(i, j int) bool {
+		return svcs[j].ParentName == svcs[i].Name()
+	})
+	var httpepts eval.ExpressionSet
+	var httpsvrs eval.ExpressionSet
+	httpsvcs := make(eval.ExpressionSet, len(svcs))
+	for i, svc := range svcs {
+		httpsvcs[i] = svc
+		for _, e := range svc.HTTPEndpoints {
+			httpepts = append(httpepts, e)
+		}
+		for _, s := range svc.FileServers {
+			httpsvrs = append(httpsvrs, s)
+		}
+	}
+	walk(eval.ExpressionSet{root})
+	walk(httpsvcs)
+	walk(httpepts)
+	walk(httpsvrs)
+}
+
 // Dup creates a new map from the given expression.
 func (m MetaExpr) Dup() MetaExpr {
 	d := make(MetaExpr, len(m))
-	for k, v := range m {
-		d[k] = v
-	}
+	maps.Copy(d, m)
 	return d
 }
 
@@ -259,13 +531,7 @@ func (m MetaExpr) Merge(src MetaExpr) {
 		if mvals, ok := m[k]; ok {
 			var found bool
 			for _, v := range vals {
-				found = false
-				for _, mv := range mvals {
-					if mv == v {
-						found = true
-						break
-					}
-				}
+				found = slices.Contains(mvals, v)
 				if !found {
 					mvals = append(mvals, v)
 				}

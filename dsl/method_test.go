@@ -29,6 +29,9 @@ func TestMethod(t *testing.T) {
 				if method.Name != "a" {
 					t.Fatalf("a: expected method name to be %s, got %s", "a", method.Name)
 				}
+				if method.Stream != expr.NoStreamKind {
+					t.Errorf("a: expected no stream kind, got %d", method.Stream)
+				}
 			},
 		},
 		"b": {
@@ -45,15 +48,14 @@ func TestMethod(t *testing.T) {
 					t.Fatalf("b: expected 1 method, got %d", len(methods))
 				}
 				method := methods[0]
-				doc := method.Docs
-				if doc == nil {
+				if method.Docs == nil {
 					t.Fatalf("b: method docs is nil")
 				}
-				if doc.Description != desc {
-					t.Errorf("b: expected docs description '%s' to match '%s' ", desc, doc.Description)
+				if method.Docs.Description != desc {
+					t.Errorf("b: expected docs description '%s' to match '%s' ", desc, method.Docs.Description)
 				}
-				if doc.URL != url {
-					t.Errorf("b: expected docs url '%s' to match '%s' ", url, doc.URL)
+				if method.Docs.URL != url {
+					t.Errorf("b: expected docs url '%s' to match '%s' ", url, method.Docs.URL)
 				}
 			},
 		},
@@ -74,25 +76,41 @@ func TestMethod(t *testing.T) {
 				method := methods[0]
 				if method == nil {
 					t.Fatalf("c: method is nil")
+					return // Make linter happy
 				}
-				payload := method.Payload
-				if payload == nil {
+				if method.Payload == nil {
 					t.Fatalf("c: method payload is nil")
+					return // Make linter happy
 				}
-				if payload.Description != desc {
-					t.Errorf("c: expected payload description '%s' to match '%s' ", desc, payload.Description)
+				if method.Payload.Description != desc {
+					t.Errorf("c: expected payload description '%s' to match '%s' ", desc, method.Payload.Description)
 				}
-				obj := expr.AsObject(payload.Type)
+				obj := expr.AsObject(method.Payload.Type)
 				if att := obj.Attribute("required"); att == nil {
 					t.Errorf("c: expected a payload field with key required")
 				}
-				if !payload.IsRequired("required") {
+				if !method.Payload.IsRequired("required") {
 					t.Errorf("c: expected the required field to be required")
 				}
 			},
 		},
+		"idempotent": {
+			func() {
+				Method("idempotent", func() {
+					Idempotent()
+				})
+			},
+			func(t *testing.T, methods []*expr.MethodExpr) {
+				if len(methods) != 1 {
+					t.Fatalf("idempotent: expected 1 method, got %d", len(methods))
+				}
+				if !methods[0].Idempotent {
+					t.Error("idempotent: expected method to be idempotent")
+				}
+			},
+		},
 	}
-	//Run our tests
+	// Run our tests
 	for k, tc := range cases {
 		t.Run(k, func(t *testing.T) {
 			eval.Context = &eval.DSLContext{}

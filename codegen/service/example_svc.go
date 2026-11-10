@@ -1,9 +1,9 @@
+// This file renders starter service implementations and imports only the
+// generated types referenced by each implementation's service methods.
 package service
 
 import (
-	"os"
 	"path"
-	"strings"
 
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/expr"
@@ -30,65 +30,65 @@ type (
 		// StreamInterface is the stream interface in the service package used
 		// by the endpoint implementation.
 		StreamInterface string
+		// ExampleStructDeclaration is the starter implementation receiver.
+		ExampleStructDeclaration *codegen.NameDeclaration
+	}
+
+	// exampleServiceData separates the generated service package declaration
+	// name from the qualifier used by this example file.
+	exampleServiceData struct {
+		*Data
+		// ServicePkg is the import name used for the generated service package in
+		// this example file.
+		ServicePkg string
 	}
 )
 
-// ExampleServiceFiles returns a basic service implementation for every
-// service expression.
-func ExampleServiceFiles(genpkg string, root *expr.RootExpr) []*codegen.File {
-
-	// determine the unique API package name different from the service names
-	scope := codegen.NewNameScope()
-	for _, svc := range root.Services {
-		s := Services.Get(svc.Name)
-		if s == nil {
-			panic("unknown service, " + svc.Name) // bug
-		}
-		scope.Unique(s.PkgName)
-	}
-	apipkg := scope.Unique(strings.ToLower(codegen.Goify(root.API.Name, false)), "api")
-
+// ExampleServiceFiles returns a basic implementation for every service
+// copied into plan.
+func ExampleServiceFiles(plan *Plan) []*codegen.File {
 	var fw []*codegen.File
-	for _, svc := range root.Services {
-		if f := exampleServiceFile(genpkg, root, svc, apipkg); f != nil {
+	for _, facts := range plan.facts.services {
+		if f := exampleServiceFile(plan, facts, plan.facts.examplePackageName); f != nil {
 			fw = append(fw, f)
 		}
 	}
 	return fw
 }
 
-// exampleServiceFile returns a basic implementation of the given service.
-func exampleServiceFile(genpkg string, root *expr.RootExpr, svc *expr.ServiceExpr, apipkg string) *codegen.File {
-	data := Services.Get(svc.Name)
-	svcName := codegen.SnakeCase(data.VarName)
+// exampleServiceFile renders a basic implementation from one service copied
+// into plan.
+func exampleServiceFile(plan *Plan, facts *serviceFacts, apipkg string) *codegen.File {
+	genpkg := plan.generation.GenPkg()
+	services := plan.Services()
+	data := services.Get(facts.name)
+	svcName := data.PathName
+	servicePath := path.Join(genpkg, svcName)
+	servicePkg := services.aliases.name(path.Dir(genpkg), servicePath)
+	renderData := &exampleServiceData{Data: data, ServicePkg: servicePkg}
 	fpath := svcName + ".go"
-	if _, err := os.Stat(fpath); !os.IsNotExist(err) {
-		return nil // file already exists, skip it.
-	}
-	specs := []*codegen.ImportSpec{
-		{Path: "io"},
-		{Path: "io/ioutil"},
-		{Path: "context"},
-		{Path: "log"},
-		{Path: "fmt"},
-		{Path: "strings"},
-		{Path: path.Join(genpkg, codegen.SnakeCase(svcName)), Name: data.PkgName},
-		{Path: "goa.design/goa/v3/security"},
-	}
 	sections := []*codegen.SectionTemplate{
-		codegen.Header("", apipkg, specs),
-		{Name: "basic-service-struct", Source: svcStructT, Data: data},
-		{Name: "basic-service-init", Source: svcInitT, Data: data},
+		codegen.Header("", apipkg, facts.imports.exampleService.Imports()),
+		{
+			Name:   "basic-service-struct",
+			Source: serviceTemplates.Read(exampleServiceStructT),
+			Data:   renderData,
+		}, {
+			Name:   "basic-service-init",
+			Source: serviceTemplates.Read(exampleServiceInitT),
+			Data:   renderData,
+		},
 	}
 	if len(data.Schemes) > 0 {
 		sections = append(sections, &codegen.SectionTemplate{
 			Name:   "security-authfuncs",
-			Source: dummyAuthFuncsT,
-			Data:   data,
+			Source: serviceTemplates.Read(exampleSecurityAuthfuncsT),
+			Data:   renderData,
 		})
 	}
-	for _, m := range svc.Methods {
-		sections = append(sections, basicEndpointSection(m, data))
+	outputPath := path.Dir(genpkg)
+	for _, method := range facts.orderedMethods {
+		sections = append(sections, basicEndpointSection(method, data, outputPath, services.aliases, servicePkg))
 	}
 
 	return &codegen.File{
@@ -98,83 +98,37 @@ func exampleServiceFile(genpkg string, root *expr.RootExpr, svc *expr.ServiceExp
 	}
 }
 
-// basicEndpointSection returns a section with a basic implementation for the
-// given method.
-func basicEndpointSection(m *expr.MethodExpr, svcData *Data) *codegen.SectionTemplate {
-	md := svcData.Method(m.Name)
+// basicEndpointSection returns a starter implementation whose payload and
+// result references come from the method records after all generated package
+// and declaration names have been chosen.
+func basicEndpointSection(facts *methodFacts, svcData *Data, outputPath string, aliases *importAliases, servicePkg string) *codegen.SectionTemplate {
+	md := svcData.Method(facts.name)
 	ed := &basicEndpointData{
-		MethodData:     md,
-		ServiceVarName: svcData.VarName,
+		MethodData:               md,
+		ServiceVarName:           svcData.VarName,
+		ExampleStructDeclaration: svcData.ExampleStructDeclaration,
 	}
-	if m.Payload.Type != expr.Empty {
-		ed.PayloadFullRef = svcData.Scope.GoFullTypeRef(m.Payload, svcData.PkgName)
+	if facts.payload != nil && facts.payload.layout.Kind() != codegen.GoEmpty {
+		ed.PayloadFullRef = facts.payload.layout.Link(outputPath, retainedTypeQualifier(aliases, outputPath)).Ref()
 	}
-	if m.Result.Type != expr.Empty {
-		ed.ResultFullName = svcData.Scope.GoFullTypeName(m.Result, svcData.PkgName)
-		ed.ResultFullRef = svcData.Scope.GoFullTypeRef(m.Result, svcData.PkgName)
-		ed.ResultIsStruct = expr.IsObject(m.Result.Type)
+	if facts.result != nil && facts.result.layout.Kind() != codegen.GoEmpty {
+		linked := facts.result.layout.Link(outputPath, retainedTypeQualifier(aliases, outputPath))
+		ed.ResultFullName = linked.Name()
+		ed.ResultFullRef = linked.Ref()
+		ed.ResultIsStruct = facts.result.isObject
 		if md.ViewedResult != nil {
-			view := "default"
-			if v, ok := m.Result.Meta["view"]; ok {
-				view = v[0]
+			ed.ResultView = facts.viewedResult.viewName
+			if ed.ResultView == "" {
+				ed.ResultView = expr.DefaultView
 			}
-			ed.ResultView = view
 		}
 	}
 	if md.ServerStream != nil {
-		ed.StreamInterface = svcData.PkgName + "." + md.ServerStream.Interface
+		ed.StreamInterface = servicePkg + "." + md.ServerStreamDeclaration.Name()
 	}
 	return &codegen.SectionTemplate{
 		Name:   "basic-endpoint",
-		Source: endpointT,
+		Source: serviceTemplates.Read(endpointT),
 		Data:   ed,
 	}
 }
-
-const (
-	// input: service.Data
-	svcStructT = `{{ printf "%s service example implementation.\nThe example methods log the requests and return zero values." .Name | comment }}
-type {{ .VarName }}srvc struct {
-	logger *log.Logger
-}
-`
-
-	// input: service.Data
-	svcInitT = `{{ printf "New%s returns the %s service implementation." .StructName .Name | comment }}
-func New{{ .StructName }}(logger *log.Logger) {{ .PkgName }}.Service {
-	return &{{ .VarName }}srvc{logger}
-}
-`
-
-	// input: basicEndpointData
-	endpointT = `{{ comment .Description }}
-{{- if .ServerStream }}
-func (s *{{ .ServiceVarName }}srvc) {{ .VarName }}(ctx context.Context{{ if .PayloadFullRef }}, p {{ .PayloadFullRef }}{{ end }}, stream {{ .StreamInterface }}) (err error) {
-{{- else }}
-func (s *{{ .ServiceVarName }}srvc) {{ .VarName }}(ctx context.Context{{ if .PayloadFullRef }}, p {{ .PayloadFullRef }}{{ end }}{{ if .SkipRequestBodyEncodeDecode }}, req io.ReadCloser{{ end }}) ({{ if .ResultFullRef }}res {{ .ResultFullRef }}, {{ end }}{{ if .SkipResponseBodyEncodeDecode }}resp io.ReadCloser, {{ end }}{{ if .ViewedResult }}{{ if not .ViewedResult.ViewName }}view string, {{ end }}{{ end }}err error) {
-{{- end }}
-{{- if .SkipRequestBodyEncodeDecode }}
-	// req is the HTTP request body stream.
-	defer req.Close()
-{{- end }}
-{{- if and (and .ResultFullRef .ResultIsStruct) (not .ServerStream) }}
-	res = &{{ .ResultFullName }}{}
-{{- end }}
-{{- if .SkipResponseBodyEncodeDecode }}
-	// resp is the HTTP response body stream.
-	resp = ioutil.NopCloser(strings.NewReader("{{ .Name }}"))
-{{- end }}
-{{- if .ViewedResult }}
-	{{- if not .ViewedResult.ViewName }}
-		{{- if .ServerStream }}
-			stream.SetView({{ printf "%q" .ResultView }})
-		{{- else }}
-			view = {{ printf "%q" .ResultView }}
-		{{- end }}
-	{{- end }}
-{{- end }}
-	s.logger.Print("{{ .ServiceVarName }}.{{ .Name }}")
-	return
-}
-`
-)

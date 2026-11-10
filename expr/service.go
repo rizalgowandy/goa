@@ -1,7 +1,11 @@
+// This file defines services and their errors. It also distinguishes errors
+// named in the design from errors created for one method.
 package expr
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"goa.design/goa/v3/eval"
 )
@@ -26,9 +30,15 @@ type (
 		// potentially multiple schemes. Incoming requests must validate
 		// at least one requirement to be authorized.
 		Requirements []*SecurityExpr
+		// ClientInterceptors is the list of client interceptors.
+		ClientInterceptors []*InterceptorExpr
+		// ServerInterceptors is the list of server interceptors.
+		ServerInterceptors []*InterceptorExpr
 		// Meta is a set of key/value pairs with semantic that is
 		// specific to each generator.
 		Meta MetaExpr
+		// design points to the root containing this service.
+		design *RootExpr
 	}
 
 	// ErrorExpr defines an error response. It consists of a named
@@ -60,14 +70,14 @@ func (s *ServiceExpr) EvalName() string {
 	return fmt.Sprintf("service %#v", s.Name)
 }
 
-// Error returns the error with the given name if any.
+// Error returns the error with the given name declared by the service, if any.
 func (s *ServiceExpr) Error(name string) *ErrorExpr {
 	for _, erro := range s.Errors {
 		if erro.Name == name {
 			return erro
 		}
 	}
-	return Root.Error(name)
+	return nil
 }
 
 // Hash returns a unique hash value for s.
@@ -80,12 +90,63 @@ func (s *ServiceExpr) Validate() error {
 	verr := new(eval.ValidationErrors)
 	for _, e := range s.Errors {
 		if err := e.Validate(); err != nil {
-			if verrs, ok := err.(*eval.ValidationErrors); ok {
+			var verrs *eval.ValidationErrors
+			if errors.As(err, &verrs) {
 				verr.Merge(verrs)
 			}
 		}
 	}
+	verr.Merge(s.validateInlineMethodErrors())
 	return verr
+}
+
+// validateInlineMethodErrors rejects two inline errors that request one public
+// Go error name but define different values.
+func (s *ServiceExpr) validateInlineMethodErrors() *eval.ValidationErrors {
+	verr := new(eval.ValidationErrors)
+	seen := make(map[string]*ErrorExpr)
+	for _, serviceError := range s.Errors {
+		if standardErrorUsesGeneratedConstructor(serviceError) {
+			seen[serviceError.Name] = serviceError
+		}
+	}
+	for _, method := range s.Methods {
+		for _, methodError := range method.Errors {
+			if !standardErrorUsesGeneratedConstructor(methodError) {
+				continue
+			}
+			if previous := seen[methodError.Name]; previous != nil {
+				if !equivalentErrorAttributes(previous.AttributeExpr, methodError.AttributeExpr) {
+					if settings := differingErrorQualifierSettings(previous.AttributeExpr, methodError.AttributeExpr); len(settings) > 0 {
+						verr.Add(
+							methodError,
+							"error %q cannot use one generated constructor because its %s setting differs in service %q",
+							methodError.Name,
+							strings.Join(settings, ", "),
+							s.Name,
+						)
+					} else {
+						verr.Add(
+							methodError,
+							"inline error %q must define the same value contract in every method of service %q",
+							methodError.Name,
+							s.Name,
+						)
+					}
+				}
+				continue
+			}
+			seen[methodError.Name] = methodError
+		}
+	}
+	return verr
+}
+
+// standardErrorUsesGeneratedConstructor reports whether Goa generates the
+// shared Make<Name> function whose behavior repeated declarations could change.
+func standardErrorUsesGeneratedConstructor(errorExpression *ErrorExpr) bool {
+	userType, authored := errorExpression.Type.(UserType)
+	return !authored || IsErrorResult(userType)
 }
 
 // Finalize finalizes all the service methods and errors.
@@ -100,17 +161,17 @@ func (s *ServiceExpr) Finalize() {
 func (e *ErrorExpr) Validate() error {
 	verr := new(eval.ValidationErrors)
 	var errField string
-	walkAttribute(e.AttributeExpr, func(name string, att *AttributeExpr) error {
+	walkAttribute(e.AttributeExpr, func(name string, att *AttributeExpr) error { // nolint: errcheck
 		if _, ok := att.Meta["struct:error:name"]; ok {
 			if errField != "" {
-				verr.Add(e, "attribute %q has 'struct:error:name' meta which is already set for attribute %q in %q type", name, errField, e.AttributeExpr.Type.Name())
+				verr.Add(e, "duplicate error names in type %q", e.Type.Name())
 			}
 			errField = name
 			if att.Type != String {
-				verr.Add(e, "attribute %q with 'struct:error:name' in the meta must be a string in %q type", name, e.AttributeExpr.Type.Name())
+				verr.Add(e, "error name %q must be a string in type %q", name, e.Type.Name())
 			}
-			if !e.AttributeExpr.IsRequired(name) {
-				verr.Add(e, "attribute %q with 'struct:error:name' in the meta must be required in %q type", name, e.AttributeExpr.Type.Name())
+			if !e.IsRequired(name) {
+				verr.Add(e, "error name %q must be required in type %q", name, e.Type.Name())
 			}
 		}
 		return nil
@@ -128,12 +189,14 @@ func (e *ErrorExpr) Finalize() {
 	att := e.AttributeExpr
 	switch dt := att.Type.(type) {
 	case UserType:
-		if dt != ErrorResult {
+		if !IsErrorResult(dt) {
 			// If this type contains an attribute with "struct:error:name" meta
 			// then no need to do anything.
-			for _, nat := range *AsObject(dt) {
-				if _, ok := nat.Attribute.Meta["struct:error:name"]; ok {
-					return
+			if IsObject(dt) {
+				for _, nat := range *AsObject(dt) {
+					if _, ok := nat.Attribute.Meta["struct:error:name"]; ok {
+						return
+					}
 				}
 			}
 
@@ -149,4 +212,38 @@ func (e *ErrorExpr) Finalize() {
 		}
 		e.AttributeExpr = &AttributeExpr{Type: ut}
 	}
+}
+
+// finalizeMethodType wraps an inline method error and assigns the repeatable
+// example key used by service and transport generators for that method error.
+func (e *ErrorExpr) finalizeMethodType(method *MethodExpr) {
+	e.AttributeExpr = &AttributeExpr{Type: newGeneratedUserType(
+		e.Name,
+		e.AttributeExpr,
+		MethodErrorExampleIdentity(method, e),
+		previousInlineMethodErrorOrigin(method, e.Name),
+	)}
+}
+
+// previousInlineMethodErrorOrigin returns the declaration already created for
+// the same inline error by an earlier method in this service.
+func previousInlineMethodErrorOrigin(method *MethodExpr, name string) UserType {
+	for _, previousMethod := range method.Service.Methods {
+		if previousMethod == method {
+			return nil
+		}
+		for _, previousError := range previousMethod.Errors {
+			if previousError.Name != name {
+				continue
+			}
+			userType, ok := previousError.Type.(UserType)
+			if !ok {
+				continue
+			}
+			if _, generated := GeneratedUserTypeExampleIdentity(userType); generated {
+				return userType.Origin()
+			}
+		}
+	}
+	return nil
 }

@@ -1,3 +1,5 @@
+// This file builds gRPC response messages from method results and errors,
+// while keeping fields sent in headers or trailers out of the message.
 package expr
 
 import (
@@ -186,22 +188,18 @@ func (r *GRPCResponseExpr) Finalize(a *GRPCEndpointExpr, svcAtt *AttributeExpr) 
 				nat.Attribute.Meta.Merge(svcAtt.Meta)
 			}
 		}
+		inheritGRPCMessageMeta(r.Message, svcAtt)
 	} else {
 		// method result is not an object type. Initialize response header or
 		// trailer metadata if defined or else initialize response message.
-		if !r.Headers.IsEmpty() {
+		switch {
+		case !r.Headers.IsEmpty():
 			initAttrFromDesign(r.Headers.AttributeExpr, svcAtt)
-		} else if !r.Trailers.IsEmpty() {
+		case !r.Trailers.IsEmpty():
 			initAttrFromDesign(r.Trailers.AttributeExpr, svcAtt)
-		} else {
+		default:
 			initAttrFromDesign(r.Message, svcAtt)
 		}
-	}
-
-	// Set zero value for optional attributes in messages and metadata if not set
-	// already
-	if IsObject(r.Message.Type) {
-		setZero(r.Message)
 	}
 }
 

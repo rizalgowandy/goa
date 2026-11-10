@@ -30,14 +30,22 @@ func TestTransportExample(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(
 		func(rw http.ResponseWriter, req *http.Request) {
 			rw.WriteHeader(http.StatusOK)
-			rw.Write([]byte(responseBody))
+			if _, err := rw.Write([]byte(responseBody)); err != nil {
+				t.Fatalf("failed to write response body - %s", err)
+			}
 		}))
 	defer server.Close()
 
-	conn, err := net.Dial("udp", udplisten)
+	daemon := xraytest.NewDaemon(t)
+	conn, err := net.Dial("udp", daemon.Addr)
 	if err != nil {
 		t.Fatalf("failed to connect to daemon - %s", err)
 	}
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("close connection: %v", closeErr)
+		}
+	}()
 
 	// Wrap http client's Transport with xray tracing
 	httpClient := &http.Client{
@@ -57,11 +65,12 @@ func TestTransportExample(t *testing.T) {
 	// Setting context on request
 	req = req.WithContext(ctx)
 
-	messages := xraytest.ReadUDP(t, udplisten, 2, func() {
+	messages := daemon.Read(t, 2, func() {
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			t.Fatalf("failed to make request - %s", err)
 		}
+		defer resp.Body.Close() //nolint:errcheck
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("HTTP Response Status is invalid, expected %d got %d", http.StatusOK, resp.StatusCode)
 		}
@@ -101,6 +110,9 @@ func TestTransportNoSegmentInContext(t *testing.T) {
 	resp, err := WrapTransport(rt).RoundTrip(req)
 	if err != nil {
 		t.Errorf("expected no error got %s", err)
+	}
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("response status is invalid, expected %d got %d", http.StatusOK, resp.StatusCode)
@@ -170,10 +182,16 @@ func TestTransport(t *testing.T) {
 	}
 	for k, c := range cases {
 		t.Run(k, func(t *testing.T) {
-			conn, err := net.Dial("udp", udplisten)
+			daemon := xraytest.NewDaemon(t)
+			conn, err := net.Dial("udp", daemon.Addr)
 			if err != nil {
 				t.Fatalf("failed to connect to daemon - %s", err)
 			}
+			defer func() {
+				if closeErr := conn.Close(); closeErr != nil {
+					t.Errorf("close connection: %v", closeErr)
+				}
+			}()
 
 			var (
 				parent = xray.NewSegment(k, c.Trace.TraceID, c.Trace.SpanID, conn)
@@ -216,8 +234,11 @@ func TestTransport(t *testing.T) {
 				req.Host = c.Request.Host
 			}
 
-			messages := xraytest.ReadUDP(t, udplisten, 2, func() {
+			messages := daemon.Read(t, 2, func() {
 				resp, err := WrapTransport(rt).RoundTrip(req)
+				if resp != nil && resp.Body != nil {
+					defer func() { _ = resp.Body.Close() }()
+				}
 				if c.Segment.Exception == "" && err != nil {
 					t.Errorf("expected no error got %s", err)
 				}

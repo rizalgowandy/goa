@@ -1,3 +1,5 @@
+// This file defines reusable endpoint designs that exercise HTTP and gRPC
+// preparation, validation, inheritance, streaming, and metadata behavior.
 package testdata
 
 import (
@@ -22,7 +24,7 @@ var ValidRouteDSL = func() {
 }
 
 var DuplicateWCRouteDSL = func() {
-	Service("InvalidRoute", func() {
+	Service("DuplicateWCRoute", func() {
 		HTTP(func() {
 			Path("/{id}")
 		})
@@ -32,6 +34,51 @@ var DuplicateWCRouteDSL = func() {
 			})
 			HTTP(func() {
 				POST("/{id}")
+			})
+		})
+	})
+}
+
+var ValidMidSegmentRouteDSL = func() {
+	Service("ValidMidSegmentRoute", func() {
+		HTTP(func() {
+			Path("/user/@{username}")
+		})
+		Method("Method", func() {
+			Payload(func() {
+				Attribute("username", String)
+				Attribute("year", String)
+				Attribute("month", String)
+				Attribute("day", String)
+			})
+			HTTP(func() {
+				POST("/{year}-{month}-{day}")
+			})
+		})
+	})
+}
+
+var MissingMidSegmentRouteParamDSL = func() {
+	Service("MissingMidSegmentRouteParam", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Attribute("year", String)
+			})
+			HTTP(func() {
+				POST("/{year}-{month}-{day}")
+			})
+		})
+	})
+}
+
+var DuplicateMidSegmentWCRouteDSL = func() {
+	Service("DuplicateMidSegmentWCRoute", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Attribute("year", String)
+			})
+			HTTP(func() {
+				POST("/{year}-{year}")
 			})
 		})
 	})
@@ -48,6 +95,14 @@ var DisallowResponseBodyHeadDSL = func() {
 				HEAD("/")
 				Response("not_found", StatusNotFound)
 			})
+		})
+	})
+}
+
+var InvalidRouteDSL = func() {
+	Service("InvalidRoute", func() {
+		HTTP(func() {
+			POST("/{id}")
 		})
 	})
 }
@@ -452,6 +507,20 @@ var EndpointPayloadMissingRequired = func() {
 	})
 }
 
+var EndpointMultipartWithoutBody = func() {
+	Service("Service", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Attribute("id", String)
+			})
+			HTTP(func() {
+				POST("/{id}")
+				MultipartRequest()
+			})
+		})
+	})
+}
+
 var StreamingEndpointRequestBody = func() {
 	var PT = Type("Payload", func() {
 		Attribute("foo", String)
@@ -617,6 +686,35 @@ var GRPCEndpointWithAnyType = func() {
 	})
 }
 
+var GRPCEndpointWithMixedResults = func() {
+	Service("Service", func() {
+		Method("Method", func() {
+			Result(String)
+			StreamingResult(Int)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointWithMatchingMixedResults = func() {
+	Service("Service", func() {
+		Method("Method", func() {
+			Result(String)
+			StreamingResult(String)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointWithStreamingResult = func() {
+	Service("Service", func() {
+		Method("Method", func() {
+			StreamingResult(String)
+			GRPC(func() {})
+		})
+	})
+}
+
 var GRPCEndpointWithUntaggedFields = func() {
 	var Req = Type("Req", func() {
 		Attribute("req_not_field", String)
@@ -702,6 +800,177 @@ var GRPCEndpointWithExtendedTypes = func() {
 					})
 				})
 			})
+		})
+	})
+}
+
+var GRPCEndpointWithCompositeMetadata = func() {
+	objectValue := Type("MetadataObject", func() {
+		Attribute("name", String)
+	})
+	Service("Service", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Attribute("object", objectValue)
+				Attribute("mapping", MapOf(String, String))
+				OneOf("choice", func() {
+					Attribute("text", String)
+					Attribute("count", Int)
+				})
+			})
+			Result(func() {
+				Attribute("object", objectValue)
+				Attribute("mapping", MapOf(String, String))
+				OneOf("choice", func() {
+					Attribute("text", String)
+					Attribute("count", Int)
+				})
+			})
+			GRPC(func() {
+				Metadata(func() {
+					Attribute("object")
+					Attribute("mapping")
+					Attribute("choice")
+				})
+				Response(func() {
+					Headers(func() { Attribute("object") })
+					Trailers(func() {
+						Attribute("mapping")
+						Attribute("choice")
+					})
+				})
+			})
+		})
+	})
+}
+
+var GRPCEndpointWithInheritErrorDSL = func() {
+	API("API", func() {
+		Error("not_found")
+		GRPC(func() {
+			Response("not_found", CodeNotFound)
+		})
+	})
+	Service("Service", func() {
+		Error("not_found")
+		Method("Method", func() {
+			GRPC(func() {
+				Response(CodeOK)
+			})
+		})
+	})
+}
+
+var GRPCEndpointWithUnionContainingAny = func() {
+	var AnyAlias = Type("AnyAlias", func() {
+		Attribute("value", Any)
+	})
+
+	var U = Type("U", func() {
+		OneOf("choice", func() {
+			Field(1, "plain_any", Any)
+			Field(2, "array_any", ArrayOf(AnyAlias))
+			Field(3, "map_any", MapOf(String, AnyAlias))
+		})
+	})
+
+	Service("Service", func() {
+		Method("MethodUnion", func() {
+			Payload(U)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointWithStreamingPayloadInitialRequest = func() {
+	var VersionRef = Type("VersionRef", func() {
+		OneOf("ref_type", func() {
+			Field(1, "version_id", String)
+			Field(2, "ref_name", String)
+		})
+		Required("ref_type")
+	})
+	var UploadChunk = Type("UploadChunk", func() {
+		Field(1, "chunk", Bytes)
+		Required("chunk")
+	})
+	Service("Service", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Field(1, "repository_id", String)
+				Field(2, "version_ref", VersionRef)
+				Required("repository_id", "version_ref")
+			})
+			StreamingPayload(UploadChunk)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointStreamCompat = func() {
+	Service("Service", func() {
+		Method("Method", func() {
+			Meta("grpc:stream:compat", "v1")
+			Payload(func() {
+				Field(1, "a", Int)
+				Field(2, "b", ArrayOf(String))
+			})
+			StreamingPayload(Int)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointStreamCompatServiceLevel = func() {
+	Service("Service", func() {
+		Meta("grpc:stream:compat", "v1")
+		Method("Method", func() {
+			Payload(Int)
+			StreamingPayload(Int)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointStreamCompatBadValue = func() {
+	Service("Service", func() {
+		Method("Method", func() {
+			Meta("grpc:stream:compat", "v2")
+			Payload(Int)
+			StreamingPayload(Int)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointStreamCompatNoStreamingPayload = func() {
+	Service("Service", func() {
+		Method("Method", func() {
+			Meta("grpc:stream:compat", "v1")
+			Payload(Int)
+			GRPC(func() {})
+		})
+	})
+}
+
+var GRPCEndpointStreamCompatUnionPayload = func() {
+	var VersionRef = Type("VersionRef", func() {
+		OneOf("ref_type", func() {
+			Field(1, "version_id", String)
+			Field(2, "ref_name", String)
+		})
+		Required("ref_type")
+	})
+	Service("Service", func() {
+		Method("Method", func() {
+			Meta("grpc:stream:compat", "v1")
+			Payload(func() {
+				Field(1, "repository_id", String)
+				Field(2, "version_ref", VersionRef)
+				Required("repository_id", "version_ref")
+			})
+			StreamingPayload(Int)
+			GRPC(func() {})
 		})
 	})
 }

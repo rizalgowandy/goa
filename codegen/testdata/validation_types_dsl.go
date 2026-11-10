@@ -15,6 +15,10 @@ var ValidationTypesDSL = func() {
 			Attribute("integer", Int64, func() {
 				Maximum(100)
 			})
+			Attribute("exclusive_integer", Int64, func() {
+				ExclusiveMinimum(1)
+				ExclusiveMaximum(100)
+			})
 			Required("required_integer")
 		})
 
@@ -28,6 +32,10 @@ var ValidationTypesDSL = func() {
 			})
 			Attribute("float64", Float64, func() {
 				Maximum(100.1)
+			})
+			Attribute("exclusive_float64", Float64, func() {
+				ExclusiveMinimum(1.0)
+				ExclusiveMaximum(100.1)
 			})
 			Required("required_float")
 		})
@@ -46,6 +54,18 @@ var ValidationTypesDSL = func() {
 				Format(FormatDateTime)
 			})
 			Required("required_string")
+		})
+
+		Alias = Type("Alias", String, func() {
+			MinLength(1)
+			MaxLength(10)
+			Pattern("^[A-z].*[a-z]$")
+		})
+
+		_ = Type("AliasType", func() {
+			Attribute("required_alias", Alias)
+			Attribute("alias", Alias)
+			Required("required_alias")
 		})
 
 		_ = Type("UserType", func() {
@@ -77,6 +97,13 @@ var ValidationTypesDSL = func() {
 			Required("required_array")
 		})
 
+		_ = Type("ArrayRequired", func() {
+			Attribute("required_array", ArrayOfRequired(IntegerT), func() {
+				MinLength(1)
+			})
+			Required("required_array")
+		})
+
 		_ = Type("Map", func() {
 			Attribute("required_map", MapOf(Int, String), func() {
 				MinLength(5)
@@ -96,6 +123,20 @@ var ValidationTypesDSL = func() {
 			Required("required_map")
 		})
 
+		_ = Type("Union", func() {
+			OneOf("required_union", func() {
+				Attribute("int", IntegerT)
+				Attribute("float", FloatT)
+				Attribute("string", StringT)
+			})
+			OneOf("union", func() {
+				Attribute("int", IntegerT)
+				Attribute("float", FloatT)
+				Attribute("string", StringT)
+			})
+			Required("required_union")
+		})
+
 		Result = ResultType("application/vnd.goa.result", func() {
 			TypeName("Result")
 			Attributes(func() {
@@ -111,6 +152,12 @@ var ValidationTypesDSL = func() {
 			TypeName("TypeWithCollection")
 			Attributes(func() {
 				Attribute("collection", CollectionOf(Result))
+			})
+		})
+
+		_ = Type("Deep", func() {
+			Attribute("deep", func() {
+				Attribute("integer", IntegerT)
 			})
 		})
 	)

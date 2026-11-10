@@ -1,0 +1,25 @@
+// EncodeMethodMessageWithSecurityRequest encodes requests sent to
+// ServiceMessageWithSecurity MethodMessageWithSecurity endpoint.
+func EncodeMethodMessageWithSecurityRequest(ctx context.Context, v any, md *metadata.MD) (any, error) {
+	payload, ok := v.(*servicemessagewithsecurity.RequestUT)
+	if !ok {
+		return nil, goagrpc.ErrInvalidType("ServiceMessageWithSecurity", "MethodMessageWithSecurity", "*servicemessagewithsecurity.RequestUT", v)
+	}
+	if payload.Token != nil {
+		tokenWire := string(*payload.Token)
+		(*md).Append("authorization", tokenWire)
+	}
+	if payload.Key != nil {
+		keyWire := *payload.Key
+		(*md).Append("authorization", keyWire)
+	}
+	if payload.Username != nil {
+		usernameWire := *payload.Username
+		(*md).Append("username", usernameWire)
+	}
+	if payload.Password != nil {
+		passwordWire := *payload.Password
+		(*md).Append("password", passwordWire)
+	}
+	return NewProtoMethodMessageWithSecurityRequest(payload), nil
+}

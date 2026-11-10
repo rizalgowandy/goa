@@ -1,8 +1,11 @@
 package expr_test
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
+	"goa.design/goa/v3/dsl"
 	"goa.design/goa/v3/eval"
 	"goa.design/goa/v3/expr"
 	"goa.design/goa/v3/expr/testdata"
@@ -15,10 +18,18 @@ func TestHTTPRouteValidation(t *testing.T) {
 		Error string
 	}{
 		{"valid", testdata.ValidRouteDSL, ""},
-		{"invalid", testdata.DuplicateWCRouteDSL, `route POST "/{id}" of service "InvalidRoute" HTTP endpoint "Method": Wildcard "id" appears multiple times in full path "/{id}/{id}"`},
+		{"valid-mid-segment", testdata.ValidMidSegmentRouteDSL, ""},
+		{"missing-mid-segment-route-param", testdata.MissingMidSegmentRouteParamDSL, `route POST "/{year}-{month}-{day}" of service "MissingMidSegmentRouteParam" HTTP endpoint "Method": Route param "month" not found in method payload
+route POST "/{year}-{month}-{day}" of service "MissingMidSegmentRouteParam" HTTP endpoint "Method": Route param "day" not found in method payload
+service "MissingMidSegmentRouteParam" HTTP endpoint "Method": Path parameter "month" not found in payload.
+service "MissingMidSegmentRouteParam" HTTP endpoint "Method": Path parameter "day" not found in payload.`,
+		},
+		{"duplicate-mid-segment-wc-route", testdata.DuplicateMidSegmentWCRouteDSL, `route POST "/{year}-{year}" of service "DuplicateMidSegmentWCRoute" HTTP endpoint "Method": Wildcard "year" appears multiple times in full path "/{year}-{year}"`},
+		{"duplicate-wc-route", testdata.DuplicateWCRouteDSL, `route POST "/{id}" of service "DuplicateWCRoute" HTTP endpoint "Method": Wildcard "id" appears multiple times in full path "/{id}/{id}"`},
 		{"disallow-response-body", testdata.DisallowResponseBodyHeadDSL, `route HEAD "/" of service "DisallowResponseBody" HTTP endpoint "Method": HTTP status 200: Response body defined for HEAD method which does not allow response body.
 route HEAD "/" of service "DisallowResponseBody" HTTP endpoint "Method": HTTP status 404: Response body defined for HEAD method which does not allow response body.`,
 		},
+		{"invalid", testdata.InvalidRouteDSL, "routes at the service level are only allowed for JSON-RPC services. Use method-level routes instead. in service \"InvalidRoute\""},
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
@@ -26,8 +37,9 @@ route HEAD "/" of service "DisallowResponseBody" HTTP endpoint "Method": HTTP st
 				expr.RunDSL(t, c.DSL)
 			} else {
 				err := expr.RunInvalidDSL(t, c.DSL)
-				if err.Error() != c.Error {
-					t.Errorf("got error %q\nexpected %q", err.Error(), c.Error)
+				got := stripValidationLocations(err.Error())
+				if !strings.HasSuffix(got, c.Error) {
+					t.Errorf("got error %q\nexpected %q", got, c.Error)
 				}
 			}
 		})
@@ -69,7 +81,7 @@ func TestHTTPEndpointPrepare(t *testing.T) {
 				root := expr.RunDSL(t, c.DSL)
 				e := root.API.HTTP.Services[len(root.API.HTTP.Services)-1].HTTPEndpoints[0]
 
-				ht := expr.AsObject(e.Headers.AttributeExpr.Type)
+				ht := expr.AsObject(e.Headers.Type)
 				if len(*ht) != len(c.Headers) {
 					t.Errorf("got %d headers, expected %d", len(*ht), len(c.Headers))
 				} else {
@@ -80,7 +92,7 @@ func TestHTTPEndpointPrepare(t *testing.T) {
 					}
 				}
 
-				ct := expr.AsObject(e.Cookies.AttributeExpr.Type)
+				ct := expr.AsObject(e.Cookies.Type)
 				if len(*ct) != len(c.Cookies) {
 					t.Errorf("got %d cookies, expected %d", len(*ct), len(c.Cookies))
 				} else {
@@ -91,7 +103,7 @@ func TestHTTPEndpointPrepare(t *testing.T) {
 					}
 				}
 
-				pt := expr.AsObject(e.Params.AttributeExpr.Type)
+				pt := expr.AsObject(e.Params.Type)
 				if len(*pt) != len(c.Params) {
 					t.Errorf("got %d params, expected %d", len(*pt), len(c.Params))
 				} else {
@@ -103,8 +115,9 @@ func TestHTTPEndpointPrepare(t *testing.T) {
 				}
 			} else {
 				err := expr.RunInvalidDSL(t, c.DSL)
-				if err.Error() != c.Error {
-					t.Errorf("got error %q, expected %q", err.Error(), c.Error)
+				got := stripValidationLocations(err.Error())
+				if got != c.Error {
+					t.Errorf("got error %q, expected %q", got, c.Error)
 				}
 			}
 		})
@@ -171,6 +184,43 @@ service "Service" HTTP endpoint "Method": HTTP endpoint response body must be em
 			DSL:   testdata.EndpointPayloadMissingRequired,
 			Error: `service "Service" HTTP endpoint "Method": The following HTTP request body attribute is required but the corresponding method payload attribute is not: nonreq. Use 'Required' to make the attribute required in the method payload as well.`,
 		},
+		"endpoint-multipart-without-body": {
+			DSL:   testdata.EndpointMultipartWithoutBody,
+			Error: `service "Service" HTTP endpoint "Method": MultipartRequest requires a request body.`,
+		},
+		"two untagged success responses": {
+			DSL: func() {
+				dsl.Service("Service", func() {
+					dsl.Method("Method", func() {
+						dsl.Result(dsl.String)
+						dsl.HTTP(func() {
+							dsl.GET("/")
+							dsl.Response(dsl.StatusOK)
+							dsl.Response(dsl.StatusAccepted)
+						})
+					})
+				})
+			},
+			Error: `HTTP response of service "Service" HTTP endpoint "Method": Multiple response definitions without a Tag`,
+		},
+		"tagged response and default response": {
+			DSL: func() {
+				dsl.Service("Service", func() {
+					dsl.Method("Method", func() {
+						dsl.Result(func() {
+							dsl.Attribute("outcome", dsl.String)
+						})
+						dsl.HTTP(func() {
+							dsl.GET("/")
+							dsl.Response(dsl.StatusAccepted, func() {
+								dsl.Tag("outcome", "accepted")
+							})
+							dsl.Response(dsl.StatusOK)
+						})
+					})
+				})
+			},
+		},
 		"streaming-endpoint-has-request-body": {
 			DSL: testdata.StreamingEndpointRequestBody,
 			Error: `service "Service" HTTP endpoint "MethodA": HTTP endpoint request body must be empty when the endpoint uses streaming. Payload attributes must be mapped to headers and/or params.
@@ -183,25 +233,161 @@ service "Service" HTTP endpoint "MethodC": HTTP endpoint request body must be em
 			if c.Error == "" {
 				expr.RunDSL(t, c.DSL)
 			} else {
-				var errors []error
+				var errs []error
 				err := expr.RunInvalidDSL(t, c.DSL)
 				if err != nil {
-					if merr, ok := err.(eval.MultiError); ok {
+					var merr eval.MultiError
+					if errors.As(err, &merr) {
 						for _, e := range merr {
-							errors = append(errors, e.GoError)
+							errs = append(errs, e.GoError)
 						}
 					} else {
-						errors = append(errors, err)
+						errs = append(errs, err)
 					}
 				}
-				if len(errors) > 1 || len(errors) == 0 {
-					t.Errorf("got %d errors, expected 1", len(errors))
-				} else {
-					if errors[0].Error() != c.Error {
-						t.Errorf("got `%s`, expected `%s`", err.Error(), c.Error)
-					}
+				if len(errs) > 1 || len(errs) == 0 {
+					t.Errorf("got %d errors, expected 1", len(errs))
+				} else if got := stripValidationLocations(errs[0].Error()); got != c.Error {
+					t.Errorf("got `%s`, expected `%s`", got, c.Error)
 				}
 			}
+		})
+	}
+}
+
+func TestHTTPWebSocketViewedResultValidation(t *testing.T) {
+	tests := []struct {
+		name           string
+		collection     bool
+		collectionView string
+		method         func(*expr.ResultTypeExpr)
+		err            string
+	}{
+		{
+			name: "client stream with caller-selected view",
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.Result(result)
+			},
+			err: `service "Service" HTTP endpoint "Method": Endpoint cannot choose a result view at runtime when the method defines StreamingPayload because the WebSocket connection starts before the result view is known. Select a view in Result or StreamingResult.`,
+		},
+		{
+			name: "bidirectional stream with caller-selected view",
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.StreamingResult(result)
+			},
+			err: `service "Service" HTTP endpoint "Method": Endpoint cannot choose a result view at runtime when the method defines StreamingPayload because the WebSocket connection starts before the result view is known. Select a view in Result or StreamingResult.`,
+		},
+		{
+			name:       "client stream with caller-selected collection view",
+			collection: true,
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.Result(result)
+			},
+			err: `service "Service" HTTP endpoint "Method": Endpoint cannot choose a result view at runtime when the method defines StreamingPayload because the WebSocket connection starts before the result view is known. Select a view in Result or StreamingResult.`,
+		},
+		{
+			name: "client stream with fixed view",
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.Result(result, func() {
+					dsl.View("tiny")
+				})
+			},
+		},
+		{
+			name: "bidirectional stream with fixed view",
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.StreamingResult(result, func() {
+					dsl.View("tiny")
+				})
+			},
+		},
+		{
+			name:       "client stream with fixed collection view",
+			collection: true,
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.Result(result, func() {
+					dsl.View("tiny")
+				})
+			},
+		},
+		{
+			name:           "client stream with view fixed by collection type",
+			collection:     true,
+			collectionView: "tiny",
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.Result(result)
+			},
+		},
+		{
+			name: "server stream with caller-selected view",
+			method: func(result *expr.ResultTypeExpr) {
+				dsl.StreamingResult(result)
+			},
+		},
+		{
+			name: "client stream without views",
+			method: func(*expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.Result(dsl.String)
+			},
+		},
+		{
+			name: "bidirectional stream without views",
+			method: func(*expr.ResultTypeExpr) {
+				dsl.StreamingPayload(dsl.String)
+				dsl.StreamingResult(dsl.String)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			design := httpWebSocketViewedResultDSL(test.collection, test.collectionView, test.method)
+			if test.err == "" {
+				expr.RunDSL(t, design)
+				return
+			}
+			err := expr.RunInvalidDSL(t, design)
+			if got := stripValidationLocations(err.Error()); got != test.err {
+				t.Errorf("got %q, expected %q", got, test.err)
+			}
+		})
+	}
+}
+
+// httpWebSocketViewedResultDSL defines a result with two response shapes and
+// lets each test choose how the method streams it.
+func httpWebSocketViewedResultDSL(collection bool, collectionView string, method func(*expr.ResultTypeExpr)) func() {
+	return func() {
+		result := dsl.ResultType("application/vnd.websocket-view", func() {
+			dsl.Attribute("name", dsl.String)
+			dsl.View("tiny", func() {
+				dsl.Attribute("name")
+			})
+		})
+		if collection {
+			if collectionView == "" {
+				result = dsl.CollectionOf(result)
+			} else {
+				result = dsl.CollectionOf(result, func() {
+					dsl.View(collectionView)
+				})
+			}
+		}
+		dsl.Service("Service", func() {
+			dsl.Method("Method", func() {
+				method(result)
+				dsl.HTTP(func() {
+					dsl.GET("/")
+				})
+			})
 		})
 	}
 }
@@ -213,8 +399,8 @@ func TestHTTPEndpointParentRequired(t *testing.T) {
 		t.Fatal(`unexpected error, service "Child" not found`)
 	}
 	m := svc.Method("Method")
-	if m == nil {
-		t.Fatal(`unexpected error, method "Method" not found`)
+	if m == nil || m.Payload == nil {
+		t.Fatal(`unexpected error, method "Method" or its payload not found`)
 	}
 	if !m.Payload.IsRequired("ancestor_id") {
 		t.Errorf(`expected "ancestor_id" is required, but not so`)
@@ -253,7 +439,7 @@ func TestHTTPEndpointFinalization(t *testing.T) {
 				if len(bodyObj) != len(expectedBodyObj) {
 					t.Errorf("got %d, expected %d attribute(s) in endpoint body", len(bodyObj), len(expectedBodyObj))
 				} else {
-					for i := 0; i < len(expectedBodyObj); i++ {
+					for i := range expectedBodyObj {
 						if bodyObj[i].Name != expectedBodyObj[i].Name {
 							t.Errorf("got %q, expected %q attribute in endpoint body", bodyObj[i].Name, expectedBodyObj[i].Name)
 						}

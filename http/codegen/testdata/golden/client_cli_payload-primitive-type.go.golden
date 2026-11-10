@@ -1,0 +1,120 @@
+// cliStringFlag keeps an omitted command-line flag distinct from an explicitly empty flag.
+type cliStringFlag struct {
+	value *string
+}
+
+// String returns the flag text shown by the standard flag package.
+func (f *cliStringFlag) String() string {
+	if f.value == nil {
+		return ""
+	}
+	return *f.value
+}
+
+// Set records that the user supplied the flag, even when value is empty.
+func (f *cliStringFlag) Set(value string) error {
+	f.value = &value
+	return nil
+}
+
+// ParseEndpoint returns the endpoint and payload as specified on the command
+// line.
+func ParseEndpoint(
+	scheme, host string,
+	doer goahttp.Doer,
+	enc func(*http.Request) goahttp.Encoder,
+	dec func(*http.Response) goahttp.Decoder,
+	restore bool,
+) (goa.Endpoint, any, error) {
+	var (
+		serviceBodyPrimitiveBoolValidateFlags = flag.NewFlagSet("service-body-primitive-bool-validate", flag.ContinueOnError)
+
+		serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidateFlags = flag.NewFlagSet("method-body-primitive-bool-validate", flag.ExitOnError)
+		serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidatePFlag = new(cliStringFlag)
+	)
+	serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidateFlags.Var(serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidatePFlag, "p", "bool is the payload type of the ServiceBodyPrimitiveBoolValidate service MethodBodyPrimitiveBoolValidate method.")
+
+	serviceBodyPrimitiveBoolValidateFlags.Usage = serviceBodyPrimitiveBoolValidateUsage
+	serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidateFlags.Usage = serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidateUsage
+
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		return nil, nil, err
+	}
+
+	if flag.NArg() < 2 { // two non flag args are required: SERVICE and ENDPOINT (aka COMMAND)
+		return nil, nil, fmt.Errorf("not enough arguments")
+	}
+
+	var (
+		svcn string
+		svcf *flag.FlagSet
+	)
+	{
+		svcn = flag.Arg(0)
+		switch svcn {
+		case "service-body-primitive-bool-validate":
+			svcf = serviceBodyPrimitiveBoolValidateFlags
+		default:
+			return nil, nil, fmt.Errorf("unknown service %q", svcn)
+		}
+	}
+	if err := svcf.Parse(flag.Args()[1:]); err != nil {
+		return nil, nil, err
+	}
+
+	var (
+		epn string
+		epf *flag.FlagSet
+	)
+	{
+		epn = svcf.Arg(0)
+		switch svcn {
+		case "service-body-primitive-bool-validate":
+			switch epn {
+			case "method-body-primitive-bool-validate":
+				epf = serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidateFlags
+
+			}
+
+		}
+	}
+	if epf == nil {
+		return nil, nil, fmt.Errorf("unknown %q endpoint %q", svcn, epn)
+	}
+
+	// Parse endpoint flags if any
+	if svcf.NArg() > 1 {
+		if err := epf.Parse(svcf.Args()[1:]); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	var (
+		data     any
+		endpoint goa.Endpoint
+		err      error
+	)
+	{
+		switch svcn {
+		case "service-body-primitive-bool-validate":
+			c := servicebodyprimitiveboolvalidatec.NewClient(scheme, host, doer, enc, dec, restore)
+			switch epn {
+			case "method-body-primitive-bool-validate":
+				endpoint = c.MethodBodyPrimitiveBoolValidate()
+				var err error
+				if serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidatePFlag.value == nil {
+					return nil, nil, fmt.Errorf("missing required flag --p")
+				}
+				data, err = strconv.ParseBool(*serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidatePFlag.value)
+				if err != nil {
+					return nil, nil, fmt.Errorf("invalid value for serviceBodyPrimitiveBoolValidateMethodBodyPrimitiveBoolValidatePFlag, must be BOOL")
+				}
+			}
+		}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return endpoint, data, nil
+}

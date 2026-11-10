@@ -1,0 +1,19 @@
+
+syntax = "proto3";
+
+package service_unary_rpc_no_payload;
+
+option go_package = "/service_unary_rpc_no_payloadpb";
+
+// Service is the ServiceUnaryRPCNoPayload service interface.
+service ServiceUnaryRPCNoPayload {
+	// MethodUnaryRPCNoPayload implements MethodUnaryRPCNoPayload.
+	rpc MethodUnaryRPCNoPayload (.service_unary_rpc_no_payload.MethodUnaryRPCNoPayloadRequest) returns (.service_unary_rpc_no_payload.MethodUnaryRPCNoPayloadResponse);
+}
+
+message MethodUnaryRPCNoPayloadRequest {
+}
+
+message MethodUnaryRPCNoPayloadResponse {
+	optional string field = 1;
+}

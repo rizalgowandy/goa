@@ -16,16 +16,15 @@ type Val expr.Val
 //
 // Example:
 //
-//    Example("A simple bottle", func() {
-//        Description("This bottle has an ID set to 1")
-//        Value(Val{"ID": 1})
-//    })
-//
-func Value(val interface{}) {
+//	Example("A simple bottle", func() {
+//	    Description("This bottle has an ID set to 1")
+//	    Value(Val{"ID": 1})
+//	})
+func Value(val any) {
 	switch e := eval.Current().(type) {
 	case *expr.ExampleExpr:
 		if v, ok := val.(expr.Val); ok {
-			val = map[string]interface{}(v)
+			val = map[string]any(v)
 		}
 		e.Value = val
 	default:

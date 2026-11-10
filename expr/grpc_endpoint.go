@@ -1,7 +1,10 @@
+// This file prepares, validates, and finalizes the gRPC transport contract for
+// one service method.
 package expr
 
 import (
 	"fmt"
+	"slices"
 
 	"goa.design/goa/v3/eval"
 )
@@ -32,6 +35,16 @@ type (
 		// specific to each generator, see dsl.Meta.
 		Meta MetaExpr
 	}
+)
+
+const (
+	// streamCompatMetaKey is the meta key that makes generated servers also
+	// accept clients speaking the legacy stream protocol which predates the
+	// typed stream envelope.
+	streamCompatMetaKey = "grpc:stream:compat"
+	// streamCompatLegacy is the only supported value of the stream
+	// compatibility meta and selects the legacy metadata-based protocol.
+	streamCompatLegacy = "v1"
 )
 
 // Name of gRPC endpoint
@@ -107,7 +120,7 @@ func (e *GRPCEndpointExpr) Prepare() {
 			continue
 		}
 		// Lookup undefined GRPC errors in API.
-		for _, v := range Root.API.GRPC.Errors {
+		for _, v := range e.MethodExpr.Service.design.API.GRPC.Errors {
 			if me.Name == v.Name {
 				e.GRPCErrors = append(e.GRPCErrors, v.Dup())
 			}
@@ -127,7 +140,7 @@ func (e *GRPCEndpointExpr) Prepare() {
 			}
 		}
 		if !found {
-			for _, ae := range Root.API.GRPC.Errors {
+			for _, ae := range e.MethodExpr.Service.design.API.GRPC.Errors {
 				if se.Name == ae.Name {
 					e.GRPCErrors = append(e.GRPCErrors, ae.Dup())
 					break
@@ -142,6 +155,16 @@ func (e *GRPCEndpointExpr) Prepare() {
 	}
 }
 
+// LegacyStreamCompat reports whether the generated server must also accept
+// clients that speak the legacy stream protocol which carries the one-shot
+// method payload in gRPC request metadata instead of a typed initial stream
+// frame. It is enabled by setting Meta("grpc:stream:compat", "v1") on the
+// method, the service or the API.
+func (e *GRPCEndpointExpr) LegacyStreamCompat() bool {
+	v, ok := e.streamCompatValue()
+	return ok && v == streamCompatLegacy
+}
+
 // Validate validates the endpoint expression by checking if the request
 // and responses contains the "rpc:tag" in the meta. It also makes sure
 // that there is only one response per status code.
@@ -150,14 +173,10 @@ func (e *GRPCEndpointExpr) Validate() error {
 	if e.Name() == "" {
 		verr.Add(e, "Endpoint name cannot be empty")
 	}
-
-	// error if payload, result, and error type define attribute of Any type
-	// which is unsupported.
-	verr.Merge(e.hasAnyType(e.MethodExpr.Payload, "Payload"))
-	verr.Merge(e.hasAnyType(e.MethodExpr.Result, "Result"))
-	for _, er := range e.MethodExpr.Errors {
-		verr.Merge(e.hasAnyType(er.AttributeExpr, fmt.Sprintf("Error %q", er.Name)))
+	if e.MethodExpr.HasMixedResults() {
+		verr.Add(e, "gRPC method %q cannot define both Result and StreamingResult because one gRPC call cannot return a separate result after its response stream", e.MethodExpr.Name)
 	}
+	verr.Merge(e.validateStreamCompat())
 
 	var hasMessage, hasMetadata bool
 	// Validate request
@@ -197,13 +216,7 @@ func (e *GRPCEndpointExpr) Validate() error {
 				// security attributes
 				var found bool
 				for _, nat := range *pobj {
-					found = false
-					for _, n := range secAttrs {
-						if n == nat.Name {
-							found = true
-							break
-						}
-					}
+					found = slices.Contains(secAttrs, nat.Name)
 					if !found {
 						msgFields.Set(nat.Name, nat.Attribute)
 					}
@@ -215,10 +228,8 @@ func (e *GRPCEndpointExpr) Validate() error {
 				verr.Merge(validateRPCTags(msgFields, e))
 			}
 		}
-	} else {
-		if hasMessage && hasMetadata {
-			verr.Add(e, "Both request message and metadata are defined, but payload is not an object. Define either metadata or message or make payload an object type.")
-		}
+	} else if hasMessage && hasMetadata {
+		verr.Add(e, "Both request message and metadata are defined, but payload is not an object. Define either metadata or message or make payload an object type.")
 	}
 
 	// Validate response
@@ -227,6 +238,39 @@ func (e *GRPCEndpointExpr) Validate() error {
 	// Validate errors
 	for _, er := range e.GRPCErrors {
 		verr.Merge(er.Validate())
+		// Custom object error types are rendered as protobuf messages so
+		// their fields must define field numbers, mirroring the payload and
+		// result checks above. Default ErrorResult errors travel in the gRPC
+		// status and need no tags.
+		if ee := e.MethodExpr.Error(er.Name); ee != nil && !IsErrorResult(ee.Type) && IsObject(ee.Type) {
+			verr.Merge(validateRPCTags(AsObject(ee.Type), e))
+		}
+	}
+	verr.Merge(e.validateErrorMappings())
+	return verr
+}
+
+// validateErrorMappings ensures inherited gRPC response policy describes the
+// same concrete error value returned by the endpoint method.
+func (e *GRPCEndpointExpr) validateErrorMappings() *eval.ValidationErrors {
+	verr := new(eval.ValidationErrors)
+	for _, mapping := range e.GRPCErrors {
+		mapped, owner := mapping.mappedError(e.MethodExpr.Service.design)
+		method := e.MethodExpr.Error(mapping.Name)
+		if mapped == nil || method == nil || equivalentErrorAttributes(mapped.AttributeExpr, method.AttributeExpr) {
+			continue
+		}
+		verr.Add(
+			mapping.Response,
+			`gRPC error mapping %q inherited from the %s uses error type %q, but method %q of service %q uses %q; both definitions must define the same error attribute; %s`,
+			mapping.Name,
+			owner,
+			mapped.Type.Name(),
+			e.MethodExpr.Name,
+			e.MethodExpr.Service.Name,
+			method.Type.Name(),
+			errorAttributeDifference(mapped.AttributeExpr, method.AttributeExpr),
+		)
 	}
 	return verr
 }
@@ -249,9 +293,10 @@ func (e *GRPCEndpointExpr) Finalize() {
 
 		// Initialize any security attributes in request metadata unless it is
 		// specified explicitly in the request message via the DSL.
-		if reqLen := len(e.MethodExpr.Requirements); reqLen > 0 {
+		requirements := EffectiveSecurityRequirements(e.MethodExpr.Requirements)
+		if reqLen := len(requirements); reqLen > 0 {
 			e.Requirements = make([]*SecurityExpr, 0, reqLen)
-			for _, req := range e.MethodExpr.Requirements {
+			for _, req := range requirements {
 				dupReq := DupRequirement(req)
 				for _, sch := range dupReq.Schemes {
 					var field string
@@ -272,6 +317,8 @@ func (e *GRPCEndpointExpr) Finalize() {
 						continue
 					case APIKeyKind:
 						field = TaggedAttribute(e.MethodExpr.Payload, "security:apikey:"+sch.SchemeName)
+					case BearerKind:
+						field = TaggedAttribute(e.MethodExpr.Payload, "security:bearer")
 					case JWTKind:
 						field = TaggedAttribute(e.MethodExpr.Payload, "security:token")
 					case OAuth2Kind:
@@ -284,14 +331,6 @@ func (e *GRPCEndpointExpr) Finalize() {
 					}
 				}
 				e.Requirements = append(e.Requirements, dupReq)
-			}
-		}
-
-		// If endpoint defines streaming payload, then add the attributes in method
-		// payload type to request metadata.
-		if e.MethodExpr.StreamingPayload.Type != Empty {
-			for _, nat := range *pobj {
-				addToMetadata(nat.Name, "")
 			}
 		}
 
@@ -334,16 +373,10 @@ func (e *GRPCEndpointExpr) Finalize() {
 				nat.Attribute.Meta.Merge(patt.Meta)
 			}
 		}
+		inheritGRPCMessageMeta(e.Request, e.MethodExpr.Payload)
 	} else {
 		// method payload is not an object type.
-		if e.MethodExpr.StreamingPayload.Type != Empty {
-			// endpoint defines streaming payload. So add the method payload to
-			// request metadata under "goa-payload" field
-			e.Metadata.Type.(*Object).Set("goa_payload", e.MethodExpr.Payload)
-			e.Metadata.Validation.AddRequired("goa_payload")
-		} else {
-			initAttrFromDesign(e.Request, e.MethodExpr.Payload)
-		}
+		initAttrFromDesign(e.Request, e.MethodExpr.Payload)
 	}
 
 	// Finalize streaming payload type if defined
@@ -356,6 +389,7 @@ func (e *GRPCEndpointExpr) Finalize() {
 			attr = ut.Attribute()
 		}
 		initAttrFromDesign(e.StreamingRequest, attr)
+		inheritGRPCMessageMeta(e.StreamingRequest, e.MethodExpr.StreamingPayload)
 		if msgObj := AsObject(e.StreamingRequest.Type); msgObj != nil {
 			for _, nat := range *msgObj {
 				if e.MethodExpr.StreamingPayload.IsRequired(nat.Name) {
@@ -372,14 +406,43 @@ func (e *GRPCEndpointExpr) Finalize() {
 	for _, gerr := range e.GRPCErrors {
 		gerr.Finalize(e)
 	}
+}
 
-	// Set zero value for optional attributes in messages and metadata if not set
-	// already
-	if IsObject(e.Request.Type) {
-		setZero(e.Request)
+// inheritGRPCMessageMeta copies the authored protobuf name and merges retired
+// field numbers and names into the transport message. The message owns its
+// metadata map and reservation slices, so using the same type in another method
+// cannot change an earlier message. Explicit Message metadata keeps its own
+// reservations, so generated schemas protect both declarations.
+func inheritGRPCMessageMeta(message, source *AttributeExpr) {
+	if message.Meta != nil {
+		message.Meta = message.Meta.Dup()
 	}
-	if IsObject(e.StreamingRequest.Type) {
-		setZero(e.StreamingRequest)
+	attributes := []*AttributeExpr{source}
+	if ut, ok := source.Type.(UserType); ok {
+		source = ut.Attribute()
+		attributes = append(attributes, source)
+		if proto, ok := source.Meta.Last("struct:name:proto"); ok {
+			if message.Meta == nil {
+				message.Meta = source.Meta.Dup()
+			} else {
+				message.Meta["struct:name:proto"] = []string{proto}
+			}
+		}
+	}
+	for _, key := range []string{"rpc:reserved:number", "rpc:reserved:name"} {
+		if values := message.Meta[key]; len(values) > 0 {
+			message.Meta[key] = slices.Clone(values)
+		}
+	}
+	for _, attribute := range attributes {
+		for _, key := range []string{"rpc:reserved:number", "rpc:reserved:name"} {
+			if values := attribute.Meta[key]; len(values) > 0 {
+				if message.Meta == nil {
+					message.Meta = make(MetaExpr)
+				}
+				message.Meta.Merge(MetaExpr{key: slices.Clone(values)})
+			}
+		}
 	}
 }
 
@@ -430,7 +493,7 @@ func validateMessage(msgAtt, serviceAtt *AttributeExpr, e *GRPCEndpointExpr, req
 		for _, nat := range *AsObject(msgAtt.Type) {
 			if a := serviceAtt.Find(nat.Name); a != nil {
 				msgFields.Set(nat.Name, a)
-				break
+				continue
 			}
 			verr.Add(e, "%s message attribute %q is not found in %s", msgKind, nat.Name, serviceKind)
 		}
@@ -446,6 +509,9 @@ func validateRPCTags(fields *Object, e *GRPCEndpointExpr) *eval.ValidationErrors
 	verr := new(eval.ValidationErrors)
 	foundRPC := make(map[string]string)
 	for _, nat := range *fields {
+		if IsUnion(nat.Attribute.Type) {
+			continue
+		}
 		if tag, ok := nat.Attribute.FieldTag(); !ok {
 			verr.Add(e, "attribute %q does not have \"rpc:tag\" defined in the meta, use \"Field\" to define the attribute of a type used in a gRPC method", nat.Name)
 		} else if a, ok := foundRPC[tag]; ok {
@@ -484,6 +550,8 @@ func validateMetadata(metAtt *MappedAttributeExpr, serviceAtt *AttributeExpr, e 
 		for _, nat := range *AsObject(metAtt.Type) {
 			if a := serviceAtt.Find(nat.Name); a == nil {
 				verr.Add(e, "%s metadata attribute %q is not found in %s", metKind, nat.Name, serviceKind)
+			} else if !isMetadataEncodable(a.Type) {
+				verr.Add(e, "%s metadata attribute %q must be a primitive or an array of primitives, got %s", metKind, nat.Name, a.Type.Name())
 			}
 		}
 	} else {
@@ -495,7 +563,8 @@ func validateMetadata(metAtt *MappedAttributeExpr, serviceAtt *AttributeExpr, e 
 // getSecurityAttributes returns the attributes that describes a security
 // scheme from a method expression.
 func getSecurityAttributes(m *MethodExpr) []string {
-	secAttrs := []string{}
+	var secAttrs []string
+
 	for _, req := range m.Requirements {
 		for _, sch := range req.Schemes {
 			switch sch.Kind {
@@ -508,6 +577,10 @@ func getSecurityAttributes(m *MethodExpr) []string {
 				}
 			case APIKeyKind:
 				if field := TaggedAttribute(m.Payload, "security:apikey:"+sch.SchemeName); field != "" {
+					secAttrs = append(secAttrs, field)
+				}
+			case BearerKind:
+				if field := TaggedAttribute(m.Payload, "security:bearer"); field != "" {
 					secAttrs = append(secAttrs, field)
 				}
 			case JWTKind:
@@ -524,108 +597,74 @@ func getSecurityAttributes(m *MethodExpr) []string {
 	return secAttrs
 }
 
-// hasAnyType recurses through the given attribute and returns validation error
-// if any attribute is of Any type.
-func (e *GRPCEndpointExpr) hasAnyType(a *AttributeExpr, typ string, seen ...map[string]struct{}) *eval.ValidationErrors {
-	verr := new(eval.ValidationErrors)
-	if a.Type == Any {
-		verr.Add(e, "%s type is Any type which is not supported in gRPC", typ)
+// streamCompatValue returns the value of the stream compatibility meta by
+// looking up the endpoint, method, service and API expressions in that order.
+func (e *GRPCEndpointExpr) streamCompatValue() (string, bool) {
+	if v, ok := e.Meta.Last(streamCompatMetaKey); ok {
+		return v, true
 	}
-	switch actual := a.Type.(type) {
-	case UserType:
-		var s map[string]struct{}
-		if len(seen) > 0 {
-			s = seen[0]
-		} else {
-			s = make(map[string]struct{})
-			seen = append(seen, s)
+	if v, ok := e.MethodExpr.Meta.Last(streamCompatMetaKey); ok {
+		return v, true
+	}
+	if v, ok := e.Service.ServiceExpr.Meta.Last(streamCompatMetaKey); ok {
+		return v, true
+	}
+	if v, ok := e.MethodExpr.Service.design.API.Meta.Last(streamCompatMetaKey); ok {
+		return v, true
+	}
+	return "", false
+}
+
+// validateStreamCompat validates the stream compatibility meta if set. The
+// legacy stream protocol carries the one-shot method payload in gRPC metadata
+// which can only encode primitive values and arrays of primitive values.
+func (e *GRPCEndpointExpr) validateStreamCompat() *eval.ValidationErrors {
+	verr := new(eval.ValidationErrors)
+	value, ok := e.streamCompatValue()
+	if !ok {
+		return verr
+	}
+	if value != streamCompatLegacy {
+		verr.Add(e, "invalid %q meta value %q: only %q is supported", streamCompatMetaKey, value, streamCompatLegacy)
+		return verr
+	}
+	if !e.MethodExpr.IsPayloadStreaming() || e.MethodExpr.Payload.Type == Empty {
+		// The meta only affects methods that combine a one-shot payload with
+		// a streaming payload. Only report a missing effect when the meta is
+		// set on the endpoint or method directly; service and API level metas
+		// legitimately apply to a subset of the methods they cover.
+		_, endpointLevel := e.Meta.Last(streamCompatMetaKey)
+		_, methodLevel := e.MethodExpr.Meta.Last(streamCompatMetaKey)
+		if endpointLevel || methodLevel {
+			verr.Add(e, "%q meta requires the method to define both Payload and StreamingPayload", streamCompatMetaKey)
 		}
-		if _, ok := s[actual.ID()]; ok {
-			return verr
-		}
-		s[actual.ID()] = struct{}{}
-		verr.Merge(e.hasAnyType(actual.Attribute(), typ, seen...))
-	case *Array:
-		if IsPrimitive(actual.ElemType.Type) {
-			if actual.ElemType.Type == Any {
-				verr.Add(e, "Array element type is Any type which is not supported in gRPC")
-			}
-			return verr
-		}
-		verr.Merge(e.hasAnyType(actual.ElemType, typ, seen...))
-	case *Map:
-		if IsPrimitive(actual.KeyType.Type) {
-			if actual.KeyType.Type == Any {
-				verr.Add(e, "Map key type is Any type which is not supported in gRPC")
-			}
-		} else {
-			verr.Merge(e.hasAnyType(actual.KeyType, typ, seen...))
-		}
-		if IsPrimitive(actual.ElemType.Type) {
-			if actual.ElemType.Type == Any {
-				verr.Add(e, "Map element type is Any type which is not supported in gRPC")
-			}
-			return verr
-		}
-		verr.Merge(e.hasAnyType(actual.ElemType, typ, seen...))
-	case *Object:
-		for _, nat := range *actual {
-			if IsPrimitive(nat.Attribute.Type) {
-				if nat.Attribute.Type == Any {
-					verr.Add(e, "Attribute %q is Any type which is not supported in gRPC", nat.Name)
-				}
+		return verr
+	}
+	if obj := AsObject(e.MethodExpr.Payload.Type); obj != nil {
+		metObj := AsObject(e.Metadata.Type)
+		for _, nat := range *obj {
+			if metObj.Attribute(nat.Name) != nil {
+				// Attributes explicitly mapped to metadata travel in metadata
+				// under both protocols and are validated separately.
 				continue
 			}
-			verr.Merge(e.hasAnyType(nat.Attribute, typ, seen...))
+			if !isMetadataEncodable(nat.Attribute.Type) {
+				verr.Add(e, "attribute %q of the method payload must be a primitive or an array of primitives to satisfy the %q meta", nat.Name, streamCompatMetaKey)
+			}
 		}
+	} else if !isMetadataEncodable(e.MethodExpr.Payload.Type) {
+		verr.Add(e, "the method payload must be a primitive, an array of primitives or an object to satisfy the %q meta", streamCompatMetaKey)
 	}
 	return verr
 }
 
-func setZero(att *AttributeExpr, seen ...map[string]struct{}) {
-	if att.Type == Empty {
-		return
+// isMetadataEncodable reports whether values of the given type can be carried
+// in gRPC metadata, that is whether they can be encoded to and decoded from
+// header strings.
+func isMetadataEncodable(dt DataType) bool {
+	if IsPrimitive(dt) {
+		return true
 	}
-	switch dt := att.Type.(type) {
-	case UserType:
-		var s map[string]struct{}
-		if len(seen) > 0 {
-			s = seen[0]
-		} else {
-			s = make(map[string]struct{})
-			seen = append(seen, s)
-		}
-		if _, ok := s[dt.ID()]; ok {
-			return
-		}
-		s[dt.ID()] = struct{}{}
-		setZero(dt.Attribute(), seen...)
-	case *Array:
-		setZero(dt.ElemType, seen...)
-	case *Map:
-		setZero(dt.KeyType, seen...)
-		setZero(dt.ElemType, seen...)
-	case *Object:
-		for _, nat := range *dt {
-			if !att.IsRequired(nat.Name) && nat.Attribute.ZeroValue == nil {
-				nat.Attribute.ZeroValue = zeroValue(nat.Attribute.Type)
-			}
-			setZero(nat.Attribute, seen...)
-		}
-	}
-}
-
-func zeroValue(dt DataType) interface{} {
-	switch dt.Kind() {
-	case BooleanKind:
-		return false
-	case IntKind, Int32Kind, Int64Kind,
-		UIntKind, UInt32Kind, UInt64Kind,
-		Float32Kind, Float64Kind:
-		return 0
-	case StringKind:
-		return ""
-	default:
-		return nil
-	}
+	arr := AsArray(dt)
+	return arr != nil && IsPrimitive(arr.ElemType.Type)
 }

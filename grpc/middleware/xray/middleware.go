@@ -2,6 +2,7 @@ package xray
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -39,16 +40,16 @@ type xrayStreamClientWrapper struct {
 // the Close method once the request completes. The middleware takes care of
 // closing the top level segment. Typical usage:
 //
-//     if s := ctx.Value(SegKey); s != nil {
-//       segment := s.(*xray.Segment)
-//     }
-//     sub := segment.NewSubsegment("external-service")
-//     defer sub.Close()
-//     err := client.MakeRequest()
-//     if err != nil {
-//         sub.Error = xray.Wrap(err)
-//     }
-//     return
+//	if s := ctx.Value(SegKey); s != nil {
+//	  segment := s.(*xray.Segment)
+//	}
+//	sub := segment.NewSubsegment("external-service")
+//	defer sub.Close()
+//	err := client.MakeRequest()
+//	if err != nil {
+//	    sub.Error = xray.Wrap(err)
+//	}
+//	return
 //
 // An X-Ray trace is limited to 500 KB of segment data (JSON) being submitted
 // for it. See: https://aws.amazon.com/xray/pricing/
@@ -71,9 +72,9 @@ func NewUnaryServer(service, daemon string) (grpc.UnaryServerInterceptor, error)
 		return net.Dial("udp", daemon)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("xray: failed to connect to daemon - %s", err)
+		return nil, fmt.Errorf("xray: failed to connect to daemon - %w", err)
 	}
-	return grpc.UnaryServerInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+	return grpc.UnaryServerInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 		var (
 			spanID   = ctx.Value(middleware.TraceSpanIDKey)
 			traceID  = ctx.Value(middleware.TraceIDKey)
@@ -108,9 +109,9 @@ func NewStreamServer(service, daemon string) (grpc.StreamServerInterceptor, erro
 		return net.Dial("udp", daemon)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("xray: failed to connect to daemon - %s", err)
+		return nil, fmt.Errorf("xray: failed to connect to daemon - %w", err)
 	}
-	return grpc.StreamServerInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	return grpc.StreamServerInterceptor(func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		var (
 			ctx      = ss.Context()
 			spanID   = ctx.Value(middleware.TraceSpanIDKey)
@@ -145,7 +146,7 @@ func NewStreamServer(service, daemon string) (grpc.StreamServerInterceptor, erro
 // trace information in the context which is used by the tracing middleware.
 // This middleware must be mounted before the tracing middleware.
 func UnaryClient(host string) grpc.UnaryClientInterceptor {
-	return grpc.UnaryClientInterceptor(func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	return grpc.UnaryClientInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		seg := ctx.Value(xray.SegKey)
 		if seg == nil {
 			return invoker(ctx, method, req, reply, cc, opts...)
@@ -194,7 +195,7 @@ func StreamClient(host string) grpc.StreamClientInterceptor {
 	})
 }
 
-func (c *xrayStreamClientWrapper) SendMsg(m interface{}) error {
+func (c *xrayStreamClientWrapper) SendMsg(m any) error {
 	if err := c.ClientStream.SendMsg(m); err != nil {
 		c.recordErrorAndClose(err)
 		return err
@@ -202,7 +203,7 @@ func (c *xrayStreamClientWrapper) SendMsg(m interface{}) error {
 	return nil
 }
 
-func (c *xrayStreamClientWrapper) RecvMsg(m interface{}) error {
+func (c *xrayStreamClientWrapper) RecvMsg(m any) error {
 	if err := c.ClientStream.RecvMsg(m); err != nil {
 		c.recordErrorAndClose(err)
 		return err
@@ -232,7 +233,7 @@ func (c *xrayStreamClientWrapper) recordErrorAndClose(err error) {
 	defer c.mu.Unlock()
 	if !c.finished {
 		// io.EOF is normal grpc stream close, not error.
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			c.s.RecordResponse(nil)
 		} else {
 			c.s.RecordError(err)

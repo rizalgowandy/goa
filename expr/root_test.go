@@ -1,11 +1,37 @@
+// This file verifies root validation, including shared HTTP routes and
+// deferral of full-generation package placement to service planning.
 package expr
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"goa.design/goa/v3/eval"
 )
+
+type rootExternalType struct {
+	Value string
+}
+
+// TestRootValidationDefersPackagePlacement verifies schema validation accepts
+// package constraints without deciding their full-generation ownership.
+func TestRootValidationDefersPackagePlacement(t *testing.T) {
+	dependency := &UserTypeExpr{TypeName: "Dependency", AttributeExpr: &AttributeExpr{Type: String}}
+	parent := &UserTypeExpr{TypeName: "Parent", AttributeExpr: &AttributeExpr{
+		Meta: MetaExpr{"struct:pkg:path": {"types"}},
+		Type: &Object{&NamedAttributeExpr{Name: "child", Attribute: &AttributeExpr{Type: dependency}}},
+	}}
+	root := &RootExpr{API: &APIExpr{Name: "test"}, Types: []UserType{parent, dependency}}
+	var validation *eval.ValidationErrors
+	if errors.As(root.Validate(), &validation) && len(validation.Errors) != 0 {
+		t.Errorf("schema validation decided generated package placement: %v", validation)
+	}
+	if _, exists := dependency.Attribute().Meta["struct:pkg:path"]; exists {
+		t.Error("schema validation assigned a package to the dependency")
+	}
+}
 
 func TestRootExprValidate(t *testing.T) {
 	cases := map[string]struct {
@@ -32,7 +58,8 @@ func TestRootExprValidate(t *testing.T) {
 		e := RootExpr{
 			API: tc.api,
 		}
-		if actual := e.Validate().(*eval.ValidationErrors); len(tc.expected.Errors) != len(actual.Errors) {
+		var actual *eval.ValidationErrors
+		if errors.As(e.Validate(), &actual); len(tc.expected.Errors) != len(actual.Errors) {
 			t.Errorf("%s: expected the number of error values to match %d got %d ", k, len(tc.expected.Errors), len(actual.Errors))
 		} else {
 			for i, err := range actual.Errors {
@@ -41,6 +68,154 @@ func TestRootExprValidate(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestRootExprValidateMixedHTTPRoutes(t *testing.T) {
+	tests := []struct {
+		name          string
+		httpMethod    string
+		httpPath      string
+		jsonrpcMethod string
+		jsonrpcPath   string
+		servers       []*ServerExpr
+		wantError     bool
+	}{
+		{
+			name:          "same route on the default server",
+			httpMethod:    "POST",
+			httpPath:      "/tasks",
+			jsonrpcMethod: "POST",
+			jsonrpcPath:   "/tasks",
+			wantError:     true,
+		},
+		{
+			name:          "wildcards with different names",
+			httpMethod:    "POST",
+			httpPath:      "/tasks/{taskID}",
+			jsonrpcMethod: "POST",
+			jsonrpcPath:   "/tasks/{id}",
+			wantError:     true,
+		},
+		{
+			name:          "catch-all wildcards with different names",
+			httpMethod:    "POST",
+			httpPath:      "/assets/{*assetPath}",
+			jsonrpcMethod: "POST",
+			jsonrpcPath:   "/assets/{*path}",
+			wantError:     true,
+		},
+		{
+			name:          "different wildcard kinds",
+			httpMethod:    "POST",
+			httpPath:      "/assets/{asset}",
+			jsonrpcMethod: "POST",
+			jsonrpcPath:   "/assets/{*path}",
+		},
+		{
+			name:          "different methods",
+			httpMethod:    "GET",
+			httpPath:      "/tasks",
+			jsonrpcMethod: "POST",
+			jsonrpcPath:   "/tasks",
+		},
+		{
+			name:          "different paths",
+			httpMethod:    "POST",
+			httpPath:      "/tasks",
+			jsonrpcMethod: "POST",
+			jsonrpcPath:   "/rpc",
+		},
+		{
+			name:          "same route on different servers",
+			httpMethod:    "POST",
+			httpPath:      "/tasks",
+			jsonrpcMethod: "POST",
+			jsonrpcPath:   "/tasks",
+			servers: []*ServerExpr{
+				{Name: "http", Services: []string{"http_service"}},
+				{Name: "jsonrpc", Services: []string{"jsonrpc_service"}},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := mixedHTTPRoot(
+				test.httpMethod,
+				test.httpPath,
+				test.jsonrpcMethod,
+				test.jsonrpcPath,
+				test.servers,
+			)
+			err := root.Validate()
+			var validationErrors *eval.ValidationErrors
+			errors.As(err, &validationErrors)
+			if !test.wantError {
+				if len(validationErrors.Errors) > 0 {
+					t.Errorf("expected routes to coexist, got %v", err)
+				}
+				return
+			}
+			if len(validationErrors.Errors) == 0 {
+				t.Errorf("expected conflicting routes to be rejected")
+				return
+			}
+			for _, text := range []string{
+				"server \"test\"",
+				"ordinary HTTP route " + test.httpMethod,
+				test.httpPath,
+				"JSON-RPC route " + test.jsonrpcMethod,
+				test.jsonrpcPath,
+			} {
+				if !strings.Contains(err.Error(), text) {
+					t.Errorf("expected error to contain %q, got %v", text, err)
+				}
+			}
+		})
+	}
+}
+
+// TestRootExprValidateRejectsDuplicateTypeMappings catches two identical
+// conversion or creation declarations that would emit the same receiver method.
+func TestRootExprValidateRejectsDuplicateTypeMappings(t *testing.T) {
+	user := &UserTypeExpr{
+		TypeName:      "Value",
+		UID:           "value",
+		AttributeExpr: &AttributeExpr{Type: String},
+	}
+	for _, test := range []struct {
+		name        string
+		conversions []*TypeMap
+		creations   []*TypeMap
+	}{
+		{
+			name: "conversion",
+			conversions: []*TypeMap{
+				{User: user, External: rootExternalType{}},
+				{User: user, External: rootExternalType{}},
+			},
+		},
+		{
+			name: "creation",
+			creations: []*TypeMap{
+				{User: user, External: rootExternalType{}},
+				{User: user, External: rootExternalType{}},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := &RootExpr{
+				API:         &APIExpr{Name: "test"},
+				Types:       []UserType{user},
+				Conversions: test.conversions,
+				Creations:   test.creations,
+			}
+			err := root.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.name+" from") || !strings.Contains(err.Error(), "defined twice") {
+				t.Fatalf("expected precise duplicate %s error, got %v", test.name, err)
+			}
+		})
 	}
 }
 
@@ -95,4 +270,40 @@ func TestMetaExpr_Last(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mixedHTTPRoot returns a design with one ordinary HTTP route and one
+// JSON-RPC route.
+func mixedHTTPRoot(
+	httpMethod, httpPath, jsonrpcMethod, jsonrpcPath string,
+	servers []*ServerExpr,
+) *RootExpr {
+	api := NewAPIExpr("test", func() {})
+	api.Servers = servers
+	root := &RootExpr{API: api}
+
+	addMixedHTTPRoute(root, api.HTTP, "http_service", httpMethod, httpPath)
+	addMixedHTTPRoute(root, &api.JSONRPC.HTTPExpr, "jsonrpc_service", jsonrpcMethod, jsonrpcPath)
+	return root
+}
+
+// addMixedHTTPRoute adds one service method to transport for route validation.
+func addMixedHTTPRoute(root *RootExpr, transport *HTTPExpr, serviceName, method, routePath string) {
+	service := &ServiceExpr{Name: serviceName}
+	methodExpr := &MethodExpr{
+		Name:    "run",
+		Payload: &AttributeExpr{Type: Empty},
+		Result:  &AttributeExpr{Type: Empty},
+		Service: service,
+		Stream:  NoStreamKind,
+	}
+	service.Methods = []*MethodExpr{methodExpr}
+	root.Services = append(root.Services, service)
+	httpService := transport.ServiceFor(service, transport)
+	endpoint := httpService.EndpointFor(methodExpr)
+	endpoint.Routes = []*RouteExpr{{
+		Method:   method,
+		Path:     routePath,
+		Endpoint: endpoint,
+	}}
 }

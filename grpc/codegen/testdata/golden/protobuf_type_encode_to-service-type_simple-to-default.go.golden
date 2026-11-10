@@ -1,0 +1,17 @@
+func transform() {
+	target := &proto.Default{
+		RequiredString: *source.RequiredString,
+	}
+	if source.DefaultBool != nil {
+		target.DefaultBool = *source.DefaultBool
+	}
+	if source.Integer != nil {
+		target.Integer = int(*source.Integer)
+	}
+	if source.DefaultBool == nil {
+		target.DefaultBool = true
+	}
+	if source.Integer == nil {
+		target.Integer = 1
+	}
+}

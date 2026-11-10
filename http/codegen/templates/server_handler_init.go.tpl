@@ -1,0 +1,347 @@
+{{ printf "%s creates a HTTP handler which loads the HTTP request and calls the %q service %q endpoint." .HandlerInit .ServiceName .Method.Name | comment }}
+func {{ .HandlerInit }}(
+	endpoint goa.Endpoint,
+	mux goahttp.Muxer,
+	decoder func(*http.Request) goahttp.Decoder,
+	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
+	errhandler func(context.Context, http.ResponseWriter, error),
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
+	{{- if isWebSocketEndpoint . }}
+	upgrader goahttp.Upgrader,
+	configurer goahttp.ConnConfigureFunc,
+	{{- end }}
+) http.Handler {
+	{{- if (or (mustDecodeRequest .) (not (or .Redirect (isWebSocketEndpoint .) (and (isSSEEndpoint .) (not .HasMixedResults)))) (not .Redirect) .Method.SkipResponseBodyEncodeDecode) }}
+	var (
+	{{- end }}
+		{{- if mustDecodeRequest . }}
+		decodeRequest  = {{ .RequestDecoderDeclaration.Name }}(mux, decoder)
+		{{- end }}
+		{{- if not (or .Redirect (isWebSocketEndpoint .) (and (isSSEEndpoint .) (not .HasMixedResults))) }}
+		encodeResponse = {{ .ResponseEncoderDeclaration.Name }}(encoder)
+		{{- end }}
+		{{- if (or (mustDecodeRequest .) (not .Redirect) .Method.SkipResponseBodyEncodeDecode) }}
+		encodeError    = {{ if .Errors }}{{ .ErrorEncoderDeclaration.Name }}{{ else }}goahttp.ErrorEncoder{{ end }}(encoder, formatter)
+		{{- end }}
+	{{- if (or (mustDecodeRequest .) (not (or .Redirect (isWebSocketEndpoint .) (and (isSSEEndpoint .) (not .HasMixedResults)))) (not .Redirect) .Method.SkipResponseBodyEncodeDecode) }}
+	)
+	{{- end }}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), goahttp.AcceptTypeKey, r.Header.Get("Accept"))
+		ctx = context.WithValue(ctx, goa.MethodKey, {{ printf "%q" .Method.Name }})
+		ctx = context.WithValue(ctx, goa.ServiceKey, {{ printf "%q" .ServiceName }})
+	{{- if .HasMixedResults }}
+
+		// Content negotiation for mixed results (standard HTTP vs SSE)
+		acceptHeader := r.Header.Get("Accept")
+		if strings.Contains(acceptHeader, "text/event-stream") {
+			// Handle SSE request
+		{{- if mustDecodeRequest . }}
+			payload, err := decodeRequest(r)
+			if err != nil {
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+		{{- else }}
+			var err error
+		{{- end }}
+		{{- if .SSE.RequestIDField }}
+			// Set Last-Event-ID header if present
+			if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
+				ctx = context.WithValue(ctx, "last-event-id", lastEventID)
+			{{- if .Payload.Ref }}
+			{{- if isObject .Payload.Request.PayloadType }}
+				{{- if .SSE.RequestIDPointer }}
+				payload.{{ .SSE.RequestIDField }} = &lastEventID
+				{{- else }}
+				payload.{{ .SSE.RequestIDField }} = lastEventID
+				{{- end }}
+			{{- end }}
+			{{- end }}
+			}
+		{{- end }}
+			v := &{{ .ServicePkgName }}.{{ .Method.ServerStream.EndpointStruct }}{
+				Stream: &{{ .SSE.StructDeclaration.Name }}{
+					w: w,
+					r: r,
+				},
+			{{- if .Payload.Ref }}
+				Payload: payload,
+			{{- end }}
+			}
+			_, err = endpoint(ctx, v)
+			stream := v.Stream.(*{{ .SSE.StructDeclaration.Name }})
+			if err == nil {
+				err = stream.finish()
+			}
+			if err != nil {
+				if stream.attempted {
+					if errhandler != nil {
+						errhandler(ctx, w, err)
+					}
+					return
+				}
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+			}
+		} else {
+			// Handle standard HTTP request
+		{{- if mustDecodeRequest . }}
+			payload, err := decodeRequest(r)
+			if err != nil {
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+		{{- else }}
+			var err error
+		{{- end }}
+		{{- if .Method.SkipRequestBodyEncodeDecode }}
+			data := &{{ .ServicePkgName }}.{{ .Method.RequestStruct }}{ {{ if .Payload.Ref }}Payload: payload, {{ end }}Body: r.Body }
+			res, err := endpoint(ctx, data)
+		{{- else }}
+			// Mixed results endpoints always use the generated endpoint input struct.
+			// In the standard (non-SSE) mode, Stream discards events and the service
+			// must return the synchronous result.
+			v := &{{ .ServicePkgName }}.{{ .Method.ServerStream.EndpointStruct }}{
+				Stream: &{{ .DiscardStreamDeclaration.Name }}{},
+			{{- if .Payload.Ref }}
+				Payload: payload,
+			{{- end }}
+			}
+			res, err := endpoint(ctx, v)
+		{{- end }}
+			if err != nil {
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+		{{- if .Method.SkipResponseBodyEncodeDecode }}
+			o := res.(*{{ .ServicePkgName }}.{{ .Method.ResponseStruct }})
+			defer o.Body.Close()
+			if wt, ok := o.Body.(io.WriterTo); ok {
+				if err := encodeResponse(ctx, w, {{ if and .Method.SkipResponseBodyEncodeDecode .Result.Ref }}o.Result{{ else }}res{{ end }}); err != nil {
+					if errhandler != nil {
+						errhandler(ctx, w, err)
+					}
+					return
+				}
+				n, err := wt.WriteTo(w)
+				if err != nil {
+					if n == 0 {
+						if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+							errhandler(ctx, w, err)
+						}
+					} else {
+						http.NewResponseController(w).Flush()
+						panic(http.ErrAbortHandler) // too late to write an error
+					}
+				}
+				return
+			}
+			// handle immediate read error like a returned error
+			buf := bufio.NewReader(o.Body)
+			if _, err := buf.Peek(1); err != nil && err != io.EOF {
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			if err := encodeResponse(ctx, w, {{ if and .Method.SkipResponseBodyEncodeDecode .Result.Ref }}o.Result{{ else }}res{{ end }}); err != nil {
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			if _, err := io.Copy(w, buf); err != nil {
+				http.NewResponseController(w).Flush()
+				panic(http.ErrAbortHandler) // too late to write an error
+			}
+		{{- else }}
+			if err := encodeResponse(ctx, w, res); err != nil {
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+			}
+		{{- end }}
+		}
+	{{- else }}
+	{{- if mustDecodeRequest . }}
+		{{ if .Redirect }}_{{ else }}payload{{ end }}, err := decodeRequest(r)
+		if err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			return
+		}
+	{{- else if not .Redirect }}
+		var err error
+	{{- end }}
+	{{- if isWebSocketEndpoint . }}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		v := &{{ .ServicePkgName }}.{{ .Method.ServerStream.EndpointStruct }}{
+			Stream: &{{ .ServerWebSocket.VarDeclaration.Name }}{
+				upgrader: upgrader,
+				configurer: configurer,
+				cancel: cancel,
+				w: w,
+				r: r,
+			},
+		{{- if .Payload.Ref }}
+			Payload: payload,
+		{{- end }}
+		}
+		_, err = endpoint(ctx, v)
+	{{- else if and (isSSEEndpoint .) (not .HasMixedResults) }}
+		{{- if .SSE.RequestIDField }}
+		// Set Last-Event-ID header if present
+		if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
+			ctx = context.WithValue(ctx, "last-event-id", lastEventID)
+			{{- if .Payload.Ref }}
+			{{- if isObject .Payload.Request.PayloadType }}
+				{{- if .SSE.RequestIDPointer }}
+				payload.{{ .SSE.RequestIDField }} = &lastEventID
+				{{- else }}
+				payload.{{ .SSE.RequestIDField }} = lastEventID
+				{{- end }}
+			{{- end }}
+			{{- end }}
+		}
+		{{- end }}
+		v := &{{ .ServicePkgName }}.{{ .Method.ServerStream.EndpointStruct }}{
+			Stream: &{{ .SSE.StructDeclaration.Name }}{
+				w: w,
+				r: r,
+			},
+		{{- if .Payload.Ref }}
+			Payload: payload,
+		{{- end }}
+		}
+		_, err = endpoint(ctx, v)
+		if err == nil {
+			stream := v.Stream.(*{{ .SSE.StructDeclaration.Name }})
+			err = stream.finish()
+		}
+	{{- else if .Method.SkipRequestBodyEncodeDecode }}
+		data := &{{ .ServicePkgName }}.{{ .Method.RequestStruct }}{ {{ if .Payload.Ref }}Payload: payload, {{ end }}Body: r.Body }
+		res, err := endpoint(ctx, data)
+	{{- else if .Redirect }}
+		http.Redirect(w, r, "{{ .Redirect.URL }}", {{ .Redirect.StatusCode }})
+	{{- else }}
+		res, err := endpoint(ctx, {{ if .Payload.Ref }}payload{{ else }}nil{{ end }})
+	{{- end }}
+	{{- if not .Redirect }}
+		if err != nil {
+			{{- if isWebSocketEndpoint . }}
+			var stream *{{ .ServerWebSocket.VarDeclaration.Name }}
+			if wrapper, ok := v.Stream.(interface{ Unwrap() any }); ok {
+				stream = wrapper.Unwrap().(*{{ .ServerWebSocket.VarDeclaration.Name }})
+			} else {
+				stream = v.Stream.(*{{ .ServerWebSocket.VarDeclaration.Name }})
+			}
+			if stream != nil && stream.conn != nil {
+				// Response writer has been hijacked, do not encode the error
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			{{- end }}
+			{{- if isSSEEndpoint . }}
+			stream := v.Stream.(*{{ .SSE.StructDeclaration.Name }})
+			if stream.attempted {
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			{{- end }}
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			return
+		}
+	{{- end }}
+	{{- if .Method.SkipResponseBodyEncodeDecode }}
+		o := res.(*{{ .ServicePkgName }}.{{ .Method.ResponseStruct }})
+		defer o.Body.Close()
+		if wt, ok := o.Body.(io.WriterTo); ok {
+			{{- if not (or .Redirect (isWebSocketEndpoint .)) }}
+			if err := encodeResponse(ctx, w, {{ if and .Method.SkipResponseBodyEncodeDecode .Result.Ref }}o.Result{{ else }}res{{ end }}); err != nil {
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			{{- end }}
+			n, err := wt.WriteTo(w)
+			if err != nil {
+				if n == 0 {
+					if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+						errhandler(ctx, w, err)
+					}
+				} else {
+					http.NewResponseController(w).Flush()
+					panic(http.ErrAbortHandler) // too late to write an error
+				}
+			}
+			return
+		}
+		// handle immediate read error like a returned error
+		buf := bufio.NewReader(o.Body)
+		if _, err := buf.Peek(1); err != nil && err != io.EOF {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			return
+		}
+	{{- end }}
+	{{- if not (or .Redirect (isWebSocketEndpoint .) (isSSEEndpoint .)) }}
+		if err := encodeResponse(ctx, w, {{ if and .Method.SkipResponseBodyEncodeDecode .Result.Ref }}o.Result{{ else }}res{{ end }}); err != nil {
+			if errhandler != nil {
+				errhandler(ctx, w, err)
+			}
+			{{- if .Method.SkipResponseBodyEncodeDecode }}
+			return
+			{{- end }}
+		}
+	{{- end }}
+	{{- if .Method.SkipResponseBodyEncodeDecode }}
+		if _, err := io.Copy(w, buf); err != nil {
+			http.NewResponseController(w).Flush()
+			panic(http.ErrAbortHandler) // too late to write an error
+		}
+	{{- end }}
+	{{- end }}{{/* end of not .HasMixedResults */}}
+	})
+}
+
+{{- if .HasMixedResults }}
+
+// {{ .DiscardStreamDeclaration.Name }} implements the {{ .SSE.Interface }}
+// interface and drops all events. It is used for mixed results endpoints in
+// regular HTTP requests so service implementations can use the stream
+// parameter without nil checks.
+type {{ .DiscardStreamDeclaration.Name }} struct{}
+
+// {{ .SSE.SendName }} discards the event.
+func (s *{{ .DiscardStreamDeclaration.Name }}) {{ .SSE.SendName }}(v {{ .SSE.EventTypeRef }}) error {
+	return nil
+}
+
+// {{ .SSE.SendWithContextName }} discards the event.
+func (s *{{ .DiscardStreamDeclaration.Name }}) {{ .SSE.SendWithContextName }}(ctx context.Context, v {{ .SSE.EventTypeRef }}) error {
+	return nil
+}
+
+// Close is a no-op.
+func (s *{{ .DiscardStreamDeclaration.Name }}) Close() error {
+	return nil
+}
+{{- end }}

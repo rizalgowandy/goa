@@ -1,0 +1,1386 @@
+# Upgrading to Goa v3.35.0
+
+Select the exact versions below only after their tags are available. Publication
+of the Goa tag does not itself publish the plugins or examples tags.
+
+Goa's root and nested JSON-RPC module files require **Go 1.27.3**, without a
+toolchain directive. Because Go modules select the maximum required `go`
+version across the dependency graph, upgrading to Goa v3.35.0 ensures
+downstream services build with Go 1.27.3 or later, incorporating:
+
+- **Go 1.27.3 (`CVE-2026-111943` in `crypto/x509`):** blocks trust in eight
+  distrusted intermediate certificate authority (CA) SubjectPublicKeyInfo
+  (SPKI) hashes during X.509 certificate chain verification across Linux/Unix,
+  macOS, and Windows—critical for static and distroless container images where
+  operating-system or browser revocation lists are not consulted.
+- **Go 1.27.2 (15 standard-library and toolchain security fixes):** addresses
+  HTTP/2 server crashes and HPACK encoder races (`CVE-2026-97032`), HTTP/2
+  memory and CPU exhaustion (`CVE-2026-78659`, `CVE-2026-78660`,
+  `CVE-2026-78667`, `CVE-2026-78669`), double flow-control refunds
+  (`CVE-2026-78663`), HTTP/1 `CONNECT` desynchronization (`CVE-2026-56866`,
+  `CVE-2026-94439`), `net/textproto` and `mime/multipart` header limit bypasses
+  (`CVE-2026-94440`), `crypto/tls` malformed ECH extension handling
+  (`CVE-2026-97031`), `html/template` escaping (`CVE-2026-94448`,
+  `CVE-2026-97030`), `os.Root` junction traversal (`CVE-2026-56857`), and
+  `cmd/go` checksum database checks (`CVE-2026-94444`, `CVE-2026-94447`).
+
+The code changes merged for v3.35.0 passed CI on Go 1.27.3 on Ubuntu and
+Windows; Windows does not run the nested JSON-RPC suite. A declared minimum is
+not a claim that every dependency graph was tested on that version.
+
+The v3.35.0 sections below describe the current upgrade. The v3.34.0 and
+v3.33.0 sections and the earlier v3.31/v3.32 migrations are retained as
+historical guidance; the installation and regeneration sections select the
+current target after publication.
+
+## v3.35.0: forwarding existing gRPC errors
+
+A generated server now forwards an existing gRPC error's code and ordered
+details without appending a generic permanent fault when no Goa service error
+owns the result. For example, forwarding a wrapped `DeadlineExceeded` response
+keeps it a native deadline. Previously the appended fault detail made a
+generated client treat that response as a permanent service failure. Existing
+service errors still supply their declared fields, and independent joined
+failures keep their complete-error handling.
+
+Rebuild servers with the updated runtime. Clients generated with the native
+cancellation and deadline handling in v3.34.0 already preserve these responses;
+older clients need regeneration before or with the server update. Native
+`Unavailable` responses may now retry on idempotent methods under the generated
+client's existing transport policy. A service requiring an explicit permanent
+failure should return a Goa service error with its declared traits. There is no
+protobuf or stored-data change. Rolling back the server
+runtime restores the previous appended fault details.
+
+## v3.35.0: HTTP path parameter identity
+
+Generated HTTP clients now keep a slash inside a single path parameter instead
+of treating it as another route segment. The HTTP router also preserves literal
+percent sequences: a string value such as `literal%2Fpercent` reaches the service
+unchanged instead of becoming `literal/percent`. The request builder change also
+applies to WebSocket connections.
+
+**Regenerate HTTP server code when upgrading the Goa runtime, and deploy the
+regenerated code with that runtime.** Existing generated array path decoders
+relied on an additional decode performed by the old router. That decode now
+belongs to the generated array decoder, where the parameter type is known.
+Updating only the runtime while retaining old generated servers can deliver
+percent-encoded array values to the service; for example, `équipe` becomes
+`%C3%A9quipe`. Regeneration is required even when no design files changed.
+
+Regenerate HTTP clients to obtain single-segment escaping. Upgrade servers
+before enabling clients that depend on corrected path identities. Existing
+array clients remain compatible with regenerated servers: array request URLs
+and the public path helpers retain their existing behavior. Public path helpers
+still return the path representation intended for `url.URL.Path`; they do not
+become escaped URI constructors. Query parameters and request bodies are
+unchanged. No stored-data migration is required.
+
+Roll back the runtime and its generated server code together. Do not retain
+regenerated array decoders with the old runtime, which can decode array values
+twice. A rollback also restores the old scalar path behavior, so stop depending
+on corrected slash and literal-percent handling before rolling back.
+
+## v3.35.0: reading union values in Go templates
+
+Generated unions now provide `Value() (any, error)`. It returns the selected
+branch's original typed value, including an empty string, zero, or false. An
+unselected union or a selected nil branch returns the same error as `Validate`.
+Validation and JSON encoding use this same selection check.
+
+Go templates can use `{{.Value}}` or select a branch with `Kind` and read its
+fields with `{{with .Value}}{{.Reference}}{{end}}`. A selection error stops
+template execution. Use the existing typed `AsX` accessors in Go code.
+
+Regenerate to obtain the method. Existing methods, JSON mappings, stored data,
+and client/server wire contracts are unchanged. No coordinated deployment or
+data migration is required. Rolling back removes `Value`, so regenerate and
+update templates that use it before rolling back.
+
+## v3.35.0: unions with distinct JSON kinds
+
+Inside a `OneOf` declaration, add `Meta("oneof:json:untagged")` to write the
+selected value directly. An array branch becomes `[{"uri":"file://record"}]`,
+and a string branch becomes `"dynamic"`, without a discriminator or value
+envelope. The generated service keeps its typed constructors, accessors, and
+branch validation.
+
+Goa rejects ambiguous declarations during DSL expression validation. Each
+branch must have a different JSON kind: string, number, boolean, array, or
+object. Integers and floats share the number kind; byte slices and strings share
+the string kind; objects and maps share the object kind. Open JSON, nested union
+branches, custom Go representations, and combinations with flattening or
+discriminator/value-field metadata are rejected. The flag takes no arguments.
+Defaults and examples use raw values and must identify exactly one branch;
+Goa checks that branch's type and validation rules during DSL evaluation.
+Byte slices select the string branch because JSON writes them as base64;
+use an integer array or slice to author a numeric array value.
+
+The mapping applies to service JSON, HTTP, JSON-RPC, result views, defaults,
+examples, and OpenAPI. Protobuf retains its typed `oneof` representation.
+Applications that do not select the metadata keep their existing behavior.
+
+Regenerate after opting in. Update JSON clients and servers together because
+the tagged and untagged wire values differ; roll back both peers together.
+Migrate persisted service JSON before changing its mapping. New APIs can use
+the mapping without a data migration. Goa does not migrate application storage.
+
+## v3.35.0: selected result views inside union branches
+
+A result type used in a `OneOf` branch now respects its declared `View`.
+For example, a receipt branch with `View("public")` sends only the receipt's
+public fields. Previously the generated response could send fields from the
+receipt's default view, including fields the public view excluded. The same
+selection applies to nested objects, array elements, and map values.
+
+Goa's shared service conversion, view validation, and transport projection
+use the selected fields. Tagged and flattened JSON union mappings keep their
+existing discriminators and envelopes. Service signatures and union accessors
+are unchanged.
+
+Regenerate affected services and transports, and deploy generated clients and
+servers together. Older clients may reject a corrected response if their default-
+view validators required the excluded fields. A client expecting only the authored
+public fields works with the corrected server. There is no stored-data migration.
+Rolling back server code can expose excluded fields again; prefer correcting the
+authored view if the API intentionally includes them.
+
+Generators that reuse a conversion already owned by their output package can call
+`TransformPlan.UseExistingHelperDefinition` before binding contexts. The existing
+function must accept the planned source Go type and return the planned target Go
+type. The transform plan writes its calls and excludes its body and children that
+have no other caller. Existing `BindHelperDefinition` behavior is unchanged.
+
+## v3.35.0: object unions with a flat JSON discriminator
+
+Inside a `OneOf` declaration, add `Meta("oneof:json:flatten")` to encode the
+selected object's fields beside the discriminator. For example, selecting a
+`complete` branch with a `reference` field produces
+`{"type":"complete","reference":"123"}` instead of
+`{"type":"complete","value":{"reference":"123"}}`. Use
+`Meta("oneof:type:field", "resultType")` to select another discriminator name.
+The flag takes no arguments. Every branch must be an object and must leave the
+discriminator's JSON name unused. It cannot be combined with
+`oneof:value:field`. Goa rejects invalid declarations before generation.
+
+This mapping applies to generated service JSON, HTTP and JSON-RPC bodies,
+defaults, examples, result views and OpenAPI. The typed branch constructors and
+accessors are unchanged. Protobuf keeps its native `oneof` representation.
+Ordinary unions without this metadata keep their existing JSON envelopes.
+
+Regenerate after opting in. Update JSON clients and servers together: the old
+and flat mappings cannot read each other's branch values. Roll back both peers
+together. If service JSON is persisted, migrate that data before enabling the
+new mapping; Goa does not migrate application storage. Applications that do
+not select the metadata need no wire or stored-data migration.
+
+Required union fields selected with `Body("name")` now use the same native
+union conversion as ordinary object fields and optional selected bodies.
+Generated HTTP and JSON-RPC clients, servers and command builders compile with
+both union mappings. Regenerate affected transports; service interfaces and
+wire data for existing tagged unions remain unchanged.
+
+## v3.35.0: service-specific HTTP body field names
+
+Several methods in one service can now reuse nested types with `BodyFieldName`
+mappings without generation failing to order duplicate preferred type names.
+Generated request and response bodies share the mapped nested declarations,
+while methods that select different body fields retain separate body types.
+Regenerate to obtain the corrected declarations; HTTP property names and
+service values are unchanged.
+
+`BodyFieldName(existingType, "field_name:fieldName")` in a service's `HTTP`
+block selects the JSON property name for that exact named declaration wherever
+it occurs in that service's request, response, or error bodies. Nested objects,
+array elements, map values and union branches retain their complete values and
+validation rules. Map keys and strings or bytes containing JSON are not renamed.
+Types created with `Extend` need their own explicit mappings; a base type's
+mapping does not automatically apply to its derived types.
+
+The service type, its direct JSON serialization, protobuf fields and other
+services keep their original names. Explicit mappings take precedence over the
+name in a complete `struct:tag:json` tag only in the HTTP copy; tag options such
+as `omitempty` and `string` remain intact. An identity mapping such as
+`BodyFieldName(record, "label:label")` also replaces a legacy JSON tag name,
+for example `Label,omitempty`, with `label,omitempty` in HTTP bodies. Types
+that contain no mapped declarations retain their schema and example identities.
+Unknown fields, duplicate declarations and collisions with mapped or unmapped
+sibling fields fail design evaluation. Flattened union branches also reject
+names reserved for their discriminator.
+
+This feature is opt-in. Regenerate and deploy clients and servers together when
+adding a mapping to an existing HTTP API, since its JSON property names change.
+Rollback requires restoring the matching generated clients and servers. Existing
+designs without mappings need no changes.
+
+## v3.35.0: upgrade order and rollback
+
+1. Ensure your build environment has **Go 1.27.3 or later** installed. After
+   publication, install the same exact version of the Goa module and command as
+   shown in the installation section below, update official plugins in the same
+   application change when used, and regenerate the complete design.
+2. Regenerate HTTP server code and deploy it together with the upgraded Goa
+   runtime, even when no design files changed, so generated array path decoders
+   own their percent-decoding pass alongside the updated router. Roll back the
+   runtime and generated HTTP server code together.
+3. Regenerate and deploy clients and servers together when:
+   - a `OneOf` branch uses a non-default `View` whose excluded fields an older
+     client validator previously required;
+   - an endpoint opts into `Meta("oneof:json:flatten")`,
+     `Meta("oneof:json:untagged")`, or `BodyFieldName(...)`, because those
+     options change the JSON wire representation.
+   Roll back both peers together for any of these wire changes.
+4. Rebuilding gRPC servers preserves existing upstream gRPC status codes and
+   details when forwarding unhandled errors. Clients generated with v3.34.0 or
+   later already preserve native cancellation and deadline responses; regenerate
+   older gRPC clients before or with the server update.
+5. Union `Value()` template accessors, gRPC collection union branches, raw JSON
+   preservation in named types and tagged unions, protobuf inline object and
+   qualified message fixes, and code generation performance improvements
+   require only regeneration and a normal build; no stored-data migration
+   applies.
+
+## v3.34.0: generated URL-encoded form requests
+
+Add `FormRequest()` inside an endpoint's `HTTP` block to generate clients and
+servers for `application/x-www-form-urlencoded` request bodies. The remaining
+body after path, query, header and cookie mappings must be a nonempty object
+whose fields are primitives or arrays of primitives. Nested objects, maps,
+`Any`, custom Go field types, JSON-RPC and alternate body codecs are rejected
+during design evaluation. Existing JSON and multipart endpoints keep their
+selected media types. Explicit object bodies now use the generated transport
+types described below.
+
+Body mappings such as `Attribute("clientId:client_id")` select the form key;
+`struct:field:name` selects the Go field independently. Generated codecs retain
+Goa's body constructors, default handling, aliases and validation. Repeated
+keys encode arrays. A scalar key must occur once. Byte values use standard
+base64. Present empty strings remain distinct from omitted fields. Required
+arrays need at least one transmitted value; forms cannot represent a present
+array with zero values. Use `MinLength(1)` to state that constraint explicitly.
+
+The server reads only the body and never supplies body values from the query
+string. It rejects malformed URL escapes, invalid UTF-8, invalid typed values,
+duplicate scalar values and an incorrect body media type before invoking the
+service. The application continues to own request body size limits.
+
+An optional field selected with `Body("name")` may be absent. OpenAPI 3 now
+records that existing behavior for both JSON and forms. OpenAPI 2 marks an
+optional form's individual fields optional because that format cannot express
+fields that become required only when the body is present; generated server
+validation still enforces their authored constraints.
+
+Regenerate after adding `FormRequest()` and update both peers together: a form
+endpoint accepts forms rather than JSON. Roll back the generated clients and
+servers together. Existing compiled applications retain their old codecs;
+there is no stored-data migration. Applications that do not select forms need
+no runtime migration. Regenerated OpenAPI may now correctly describe their
+existing optional selected bodies as optional.
+
+## v3.34.0: explicit object request bodies
+
+An explicit `Body(func() { ... })` now receives a generated HTTP body type and
+client constructor, just like a computed object body. Previously, a body with
+only primitive fields could bypass construction; a form client then referenced
+transport field selectors on the service payload and failed to compile.
+
+Mapped fields such as `Attribute("label:display_name", String)` now retain their
+logical names for validation and transport names for generated selectors.
+Required scalar and array fields are checked before the server constructs the
+service payload. Valid requests retain their declared wire names. Present empty
+strings remain valid, and a required JSON array may still contain zero elements.
+
+Regenerate and rebuild when upgrading. Generated HTTP payload constructors that
+previously accepted an inline body struct now accept the generated body type;
+update handwritten calls to these transport helpers if any exist. Generated
+service interfaces do not change. There is no stored-data migration or required
+client/server deployment order for valid requests. Requests missing a designed
+required mapped field are now rejected instead of reaching construction with a
+missing value. Rollback restores the previous generated helpers and validation.
+
+## v3.34.0: internal JSON names and HTTP bodies
+
+`Meta("struct:tag:json:name", "stored_name")` now affects only JSON tags on
+non-transport Go types, as documented. Previously, HTTP and JSON-RPC body
+structs and HTTP command-line defaults also used that name, while OpenAPI
+described the attribute's designed name. For example, an attribute named
+`displayName` with this metadata now sends `displayName` over HTTP; directly
+marshaling the service value still writes `stored_name`. Required fields,
+optional-field omission, and complete `struct:tag:json` overrides keep their
+existing behavior.
+
+Regenerate clients and servers that use this metadata. If existing peers rely
+on the old transmitted name, declare that name as the attribute name before
+regenerating; `struct:field:name` can retain the Go field name. For example,
+an attribute named `stored_name` with `Meta("struct:field:name", "DisplayName")`
+keeps the public JSON name and the Go selector independently. Update design
+references such as `Required` when renaming an attribute.
+
+Changing the transmitted names requires coordinating independently deployed
+clients and servers; roll back their generated code together. Existing
+compiled programs do not change until regenerated and rebuilt. Direct service
+JSON and stored data retain their names, so this correction requires no
+stored-data migration.
+
+## v3.34.0: plugin-declared server dependencies
+
+HTTP and JSON-RPC generator plugins can declare a required typed dependency
+before generation freezes. Generated server constructors take the dependency
+after their native arguments and retain it in a private field. Generated example
+servers call an application factory for each declared dependency. The initial
+factory stops startup with a configuration message until the application
+implements it; it never supplies an insecure default.
+
+Applications using such a plugin must regenerate and update constructor calls
+and implement the new factory. Existing example startup files are not overwritten
+by `goa example`; update their constructor calls explicitly. Applications and
+plugins that declare no dependency keep their existing signatures and behavior.
+This generation capability changes no wire format or stored data. Deploy and
+roll back a plugin, its regenerated code, and its application wiring together.
+
+## v3.34.0: mapped URL parameters
+
+An authored `Param("organization_id:organization")` now binds the payload's
+`organization_id` field to `{organization}` in HTTP and JSON-RPC routes.
+Previously, route preparation and validation could treat `organization` as a
+second payload field, reject the design, or classify the mapped field as a query
+parameter. Generated clients and servers now use the URL name for addressing
+and the payload name for types, field selectors, and validation. An independent
+payload field named `organization` keeps its own body or query binding.
+
+Regenerate clients and servers that use mapped URL parameters. Existing routes
+with identical payload and URL names keep their behavior. The accepted wire
+format does not change, so this correction requires no stored-data migration
+or coordinated peer rollout.
+
+## v3.34.0: native gRPC cancellation and deadline results
+
+`grpc.EncodeError` now maps a single cause matching `context.Canceled` or
+`context.DeadlineExceeded` through `errors.Is` to the matching native gRPC
+status, using the same matching rules as gRPC. Ordinary
+wrappers and joins with one non-nil cause keep the same result and full error
+text. No generic `ErrorResponse` is fabricated for that stop: a canceled
+operation is no longer described as a service fault. Previously these errors
+returned `Unknown` with fault details.
+
+A named `*goa.ServiceError`, a generated declared error response, or an explicit
+gRPC status still owns its response.
+The server still encodes independent joined failures with their existing
+complete-error code and metadata, including two separate context failures.
+Provider or domain errors that wrap a context cause retain their declared meaning.
+
+Regenerated clients preserve an otherwise undecoded `Canceled` or
+`DeadlineExceeded` response while the local caller remains active. They retain
+its text and any undecodable details without searching later details or
+inventing a service-error name. When the local context has ended and its code
+matches, existing caller-context matching also exposes that local context
+cause. Decodable service details still take precedence. This also preserves an
+explicit status supplied for a server error with several joined causes: the
+client receives one status and keeps its code and details. If a client
+interceptor joins the received status with a separate local error, the existing
+complete-error handling still applies. Receiving a remote stop does not establish
+that the caller canceled, that side effects were undone, or that replay is safe.
+Native stops do not introduce automatic retries. Existing explicit retry traits
+remain governed by the application's retry policy.
+
+Upgrade the runtime and generator together and regenerate clients. An older
+ordinary unary client may replace a new native stop with a fault; regenerated
+clients continue to read older generic service details. Server-runtime upgrades
+change raw context encoding without regeneration, so deploy matching clients
+before or with servers. There is no protobuf, request, or stored-data migration.
+Rollback runtime and generated clients together to restore the previous raw
+context behavior.
+
+## v3.34.0: upgrade order and rollback
+
+1. After publication, install the same exact version of the Goa module and
+   command as shown in the installation section below, update official plugins
+   in the same application change when used, and regenerate the complete
+   design.
+2. Endpoints that adopt `FormRequest()`, designs that relied on the old
+   transmitted name of a `struct:tag:json:name` attribute, and applications
+   adopting a plugin-declared server dependency change what peers exchange or
+   how servers are constructed. Regenerate, deploy, and roll back both peers
+   of each such endpoint together.
+3. gRPC cancellation and deadline results change on the server runtime
+   without regeneration. Deploy regenerated clients before or with upgraded
+   servers so a native stop is not reported as a fault, and roll back runtime
+   and clients together.
+4. Explicit object bodies and mapped URL parameters keep their accepted wire
+   formats. Regenerate and rebuild; no deployment order or stored-data
+   migration applies.
+
+## v3.33.0: parameters within HTTP path segments
+
+Routes now recognize every parameter within a segment, including prefixes,
+suffixes, and several parameters together. For example, `/files/{name}.json`
+with name `report` produces `/files/report.json`; `/{month}-{day}-{year}`
+recognizes all three parameters. Previously, prefixed parameters could be
+missed and only the first parameter in a segment could be recognized.
+
+Regenerate clients, servers, and OpenAPI v2/v3 when using these patterns.
+Existing whole-segment and catch-all routes remain supported. No persisted-data
+migration or coordinated peer rollout is required by this route-generation
+capability; peers still need to call the route declared by the design.
+See [#3994](https://github.com/goadesign/goa/pull/3994).
+
+## v3.33.0: merged errors preserve original contributions
+
+**This changes the mutation and pointer identity contract of `MergeErrors` and
+`ServiceError.History`.** For two nonnil inputs, `MergeErrors` now returns a
+fresh `*ServiceError` and leaves both inputs unchanged. Always store or return
+the result:
+
+```go
+err = goa.MergeErrors(err, next)
+```
+
+Code that ignored the return must change. Retained inputs and earlier merge
+results no longer gain later errors. For example, merging `first` with `second`
+leaves `first.Message` unchanged; only the returned result has
+`first.Message + "; " + second.Message`. Nil operands still return the other
+input exactly.
+
+The whole result keeps the selected left ID and Field pointer, the existing
+Name rule (`"error"` adopts the right Name), the full joined message and each
+trait's AND rule. Wrapped inputs still select a ServiceError through
+`errors.As`. The existing causes remain the same concrete objects in the same
+join order. `errors.As` to ServiceError now finds the fresh result.
+`errors.Is(result, left)` no longer succeeds merely because the result used to
+be `left`; it succeeds only when the original left object is actually reachable
+as a cause or matches through a cause's own methods. No pointer-equivalence
+methods have been added.
+
+History now returns detached entries, including a detached singleton for an
+unmerged error. It preserves original Name, ID, Message, traits, cause and
+copied Field values in order, including repeated contributions. Editing a
+returned slice, entry or Field value no longer changes future History reads or
+the whole result. Set an original error's Field before including it in a merge.
+A later whole-result Field assignment affects only that whole result.
+Consumers must read each History entry as an original contribution; do not
+recursively expand its History waiting for pointer equality with the entry.
+
+These ownership rules prevent a merge from making a cycle out of stable finite
+input causes, including wrappers that refer to an input. They do not repair
+previously cyclic graphs or freeze arbitrary external causes. Finish
+constructing public fields and causes before sharing an error with readers.
+The whole Field pointer remains shared with the selected left error; only
+History Field values are isolated.
+
+The default HTTP whole response and gRPC whole detail fields retain their
+values. Existing gRPC History details now carry each original message instead
+of accumulated text, with original field values and the same order. Custom
+formatters that read History observe the same correction. The protobuf shape
+is unchanged; decoded details still do not reconstruct local contribution
+IDs, traits, causes or History.
+
+Rebuild applications with the updated runtime and migrate their merge and
+History readers in the same application change. This runtime change alone
+requires no generator, protobuf or stored-data migration. Independently
+deployed peers can decode the unchanged wire shape, but per-entry text differs
+and must not be assumed equivalent. Roll back the runtime and dependent reader
+changes together. The gRPC selection changes below additionally require the
+matching generator and regenerated servers. Keep their runtime, generated code,
+and reader changes together during deployment and rollback.
+
+Goa remains on the `goa.design/goa/v3` module path under the release policy in
+[RELEASE.md](RELEASE.md). These are intentional breaking changes within v3.
+The selected target is v3.33.0 under that fixed-major policy. These changes
+are breaking; the minor version does not make them backward compatible.
+
+## v3.33.0: generated packages and transport conversions
+
+Regenerate the complete `gen` tree after updating the generator. Generated
+declarations, conversion methods, transport references, and imports now use the
+same planned package and names, including types shared across services.
+
+HTTP and JSON-RPC body mappings keep their existing names and validation rules.
+For example, `detail:message` maps the service field `Detail` to the body field
+`Message`; requiredness and defaults still refer to `detail`. Regenerate to fix
+conversion generation for these mapped fields. The JSON body and error envelope
+are unchanged.
+
+Generator plugins constructing `codegen.GoTypePlanOptions` must use keyed literals:
+the struct adds `MappedFields`. HTTP wire planning enables this option to retain
+mapped Go field names and logical requiredness together. Leave it false when
+planning ordinary service fields. Existing keyed literals retain their behavior;
+old positional literals must name their fields.
+
+A type assigned `struct:pkg:path` supplies the package for its unlocated
+dependencies. A referenced type with its own explicit location keeps that
+location and supplies it to its descendants. The design no longer needs to
+repeat the parent's location on every dependency. Conflicting locations for one
+original type, incompatible inherited locations, and generated Go import cycles
+fail during planning. Give a shared dependency one explicit location when its
+parents would otherwise place it in different packages. Check handwritten Go
+imports after regeneration if types move to an inherited package.
+
+External `ConvertTo` and `CreateFrom` methods retain exact external named scalar,
+collection, and union method types. Conversion methods belong to the generated
+receiver's package, including relocated receivers shared by several services.
+An external type name must be accessible wherever the selected conversion writes
+it: for example, `ConvertTo` cannot construct an exported slice whose elements
+have an unexported named type from another package. Planning now reports that
+type and its use instead of emitting uncompilable Go. Export the necessary
+external types or remove that conversion declaration. `CreateFrom` may still
+read private scalar or collection-entry types through exported fields or getters
+when no generated signature needs to name them. It must still be able to name
+its external root and any external helper parameter types.
+
+Named scalar HTTP headers use the underlying primitive's formatting and retain
+their named service type and inherited validation rules. Regenerate HTTP clients
+and servers to pick up the corrected header conversions.
+
+Protobuf repeated and map fields lose empty-versus-absent information on the
+wire. Regenerated protobuf-to-service request and response constructors allocate
+empty required collections after that round trip. Optional direct collections
+retain their existing representation; singular message, scalar, and wrapper
+presence checks remain independent. Length and element constraints still apply.
+This does not relax required JSON properties: missing or `null` required
+collections remain invalid, while `[]` and `{}` are valid unless a length rule
+forbids them. An original typed Go value with a nil required collection still
+fails strict JSON validation.
+
+For streaming gRPC clients, an initial request send that returns `io.EOF` now
+allows the receive path to obtain the server's final status. Other send errors
+still fail immediately. Streaming invokers no longer add the unary header
+capture option; caller-supplied call options remain forwarded. These changes
+apply independently of generic error cause retention below.
+
+The header and collection corrections do not change the DSL or protobuf field
+numbers and require no wire or stored-data migration. Independently deployed
+servers do not need a matching regeneration for clients to use these fixes.
+
+## v3.33.0: result views and generated validation
+
+Result views containing required named unions from another generated package
+could fail generation or produce validation that did not compile. Authored
+service types now keep their declared package, while the view copies belong to
+the service's views package. Validation calls union methods through the type
+that owns them. `MethodTypeLayout` returns the pointer fields actually used by
+views to retain presence; plugins consuming those layouts must use the returned
+representation. Ordinary service fields keep their representation.
+
+A service returning a missing object without an error now receives a Goa
+internal fault before view conversion instead of a panic. Empty result
+collections remain valid. Regenerate affected services and plugin output, then
+compile and test valid and invalid results. No persisted-data migration,
+wire-format change, or coordinated peer rollout is required. Regenerating with
+an earlier generator restores its defects.
+See [#4017](https://github.com/goadesign/goa/pull/4017).
+
+HTTP clients whose response header selects a result view now include the Goa
+import needed to report an unknown view. Map values whose object types have
+only required fields now receive the nested validators expected by the
+validation plan, including HTTP-backed JSON-RPC and server-sent events.
+Regenerate affected code. Required fields stay required, gRPC map generation is
+unaffected by the HTTP validator correction, and neither fix requires a wire
+or stored-data migration.
+See [#4016](https://github.com/goadesign/goa/pull/4016) and
+[#4014](https://github.com/goadesign/goa/pull/4014).
+
+## v3.33.0: generic gRPC errors retain their cause
+
+Regenerated clients decode a generic protobuf `ErrorResponse` into the same
+`*goa.ServiceError` as before, preserving its Name, ID, Message, Timeout,
+Temporary, and Fault fields, including empty values. The error now unwraps to
+the original RPC error. For example, a server-side `Canceled` or
+`DeadlineExceeded` status remains inspectable with `status.Code(err)` even
+while the caller's context is active.
+
+Direct `*goa.ServiceError` assertions and its error text remain unchanged.
+`errors.Is` and `errors.As` can additionally inspect the original cause.
+`status.FromError` retains its code and ordered protobuf details, including
+unknown detail types and malformed later details, but uses the outer service
+error's text as its status message, as it does for other wrapped errors. The
+first detail still determines decoding; this does not reconstruct additional
+service error fields or change declared custom error constructors.
+
+Receiving a cancellation status does not itself add `context.Canceled` or
+`context.DeadlineExceeded` as a cause. Existing caller-context matching remains
+unchanged. If a local interceptor already supplies a context error or multiple
+causes, the decoded service error exposes those existing causes.
+
+An interceptor's existing `Retryable() bool` trait also becomes inspectable.
+An idempotent unary method may therefore retry once even if its received
+`Temporary` field is false. The retry policy already accepts any of a true
+Temporary field, a true retryable trait, or a designed temporary error name;
+false Temporary is not a retry veto. Local codec errors and stream operations
+remain outside that retry policy.
+
+Upgrade the generator and runtime together and regenerate clients to use
+`grpc.NewServiceErrorWithCause(original, response)`. Both arguments are
+required; the existing `grpc.NewServiceError(response)` API is unchanged.
+This cause-retention change applies only where generated clients already convert
+generic details during unary calls, stream opening, receive, or completion.
+It does not itself change raw stream errors, sends, half-closes, or header
+handling; the separate streaming corrections are described above. There is no
+wire or data migration, and independently deployed servers need no update.
+
+## v3.33.0: gRPC encoding selects complete returned errors
+
+Generic gRPC encoding no longer chooses a status from one independent joined
+error and Goa details from another. For example, joining a `Canceled` status
+with a Goa fault now returns `Unknown` with the complete joined message,
+instead of `Canceled` with only the fault child's message and ID.
+
+An ordinary wrapper or a join with one non-nil cause remains one error chain.
+A status supplied explicitly on that outer chain keeps its code and ordered
+details. A Goa service error on that chain keeps its Name, ID, Message, traits,
+and merged history, including empty fields. History contains the original
+contributions described above. Its single status cause retains
+the existing status precedence. When its cause contains several independent
+errors, status discovery stops at that join and its own name and traits
+determine the code.
+
+For an otherwise unowned join, each branch is classified by the existing
+generic rules. Unanimous branch codes become the result code; disagreement
+becomes `Unknown`, regardless of join order. Details describe the complete
+result: Name `fault`, a fresh ID, the exact original error text, Fault true,
+Timeout false, and Temporary false. No child's status details, Name, ID,
+history, timeout, or retry trait describe the whole join. Independent raw Go
+context errors, including duplicates, still encode as `Unknown` unless a caller
+has supplied an explicit status for the complete result. No context origin is
+inferred. Single context stops are described above.
+
+This intentionally changes code and metadata selection for independent joins.
+Consumers relying on a child's name, occurrence ID, shorter text, or retry
+traits must adjust those expectations. First-detail decoding remains unchanged,
+including unknown or malformed first details; later details are not searched.
+Generated declared responses now follow this ownership rule too. Direct
+declarations, ordinary wrappers, and single effective causes keep their designed
+code and detail. An outer declared owner may retain independent causes without
+giving up its own fields. At a visible independent join, children cannot donate
+a declared name or custom fields. Fully single-chain custom `As` discovery and
+dynamic `ErrorName` fields keep their existing behavior. An outer named owner
+may explicitly supply its custom value through its own `As`; an As-only facade
+with independent visible causes cannot promote a child.
+
+For example, a temporary `busy` ErrorResult joined with an independent Canceled
+status formerly sent Unavailable with the Busy child's name, ID, shorter message,
+and Temporary field. Updating the runtime alone already changes that shared
+detail to a whole fault with a fresh ID, complete original text, Fault true, and
+Timeout/Temporary false, even with old generated servers. An existing idempotent
+client whose temporary names include busy can consequently make one call instead
+of two. Regenerating the server also changes this disagreeing join's code to
+Unknown. Direct or wrapped owned Busy keeps its fields, designed code, and
+existing retry. This rule applies to one returned composite, not every Busy
+error or all work in a request. False Temporary is not a universal retry veto:
+an explicit whole temporary detail, a designed temporary name, or an exposed
+true Retryable trait still uses the existing retry policy.
+
+An unowned join containing a custom declaration now returns a generic complete
+error instead of one child's custom type and fields. Denied plus an independent
+failure no longer promises PermissionDenied or a decoded Denied.Reason. Message
+retains exactly the original Error text; separate fields absent from that text
+are not reconstructed. Direct custom declarations keep their concrete types,
+fields, designed codes, and existing constructors, including their lack of a
+retained RPC cause. Current generic clients retain the original RPC cause.
+
+A complete status directly implemented before or on a named owner takes
+precedence over the declared mapping and keeps its ordered detail prefix. A
+status retained only below an earlier declared owner does not replace that
+declaration. A nil status does not establish whole-status precedence, and the
+first nil status is not skipped to find a later status. Single-chain status
+exposure through As alone keeps existing declared precedence. First-detail
+decoding and validation remain authoritative, including a custom first detail;
+an unknown or malformed first detail does not cause a later-detail scan.
+
+Update runtime and generator together and regenerate servers for the complete
+behavior. Old generated servers with the new runtime apply the shared ErrorResult
+detail/retry change but keep their old declared-code/custom selection. A new
+generated server with the old runtime also does not establish complete selection.
+No dependency addition, protobuf or stored-data migration, or new client repair
+API is required. Current clients can read the same generic ErrorResponse format,
+but callers relying on old composite codes, custom types, fields, or retries must
+adjust before server deployment. Clients predating generic RPC-cause retention
+need their own runtime/generator update and regeneration for that guarantee.
+Mixed server versions return their respective outcomes. Roll back runtime and
+generated server together, keeping callers able to handle both during rollback.
+
+## v3.33.0: upgrade order and rollback
+
+1. After publication, install the same exact version of the Goa module and
+   command as shown below. Update official plugins in the same application
+   change when used. Regenerate the complete design and inspect moved type
+   imports, keyed plugin literals, generated validation, and transport code.
+2. Store or return the `MergeErrors` result whenever both inputs are nonnil.
+   Read each detached History entry once, including singleton entries; remove
+   recursive expansion that waits for pointer equality. Update these readers
+   with the runtime.
+3. Regenerate and rebuild servers with the matching runtime for complete
+   joined-error selection. Before deployment, check callers against both old
+   and new codes, names, IDs, custom types/fields, history text, and retries.
+   Test direct and wrapped declared errors as well as independent joins.
+4. Regenerate clients with the matching runtime for generic RPC-cause retention
+   and local codec/retry fixes. These client corrections do not require a server
+   update. Old and new server binaries may return their respective composite
+   outcomes during rollout; unchanged protobuf shape is not unchanged meaning.
+5. Keep previous binaries, design, dependency versions, generated tree, and
+   reader/plugin changes. Roll back runtime, generated server, and dependent
+   readers together, keeping callers able to handle both server outcomes.
+
+No protobuf field-number, wire-shape, or stored-data migration is required by
+the v3.33.0 range. Generator compile fixes, HTTP/JSON-RPC body mappings,
+collection/header conversions, and local client error corrections require no
+coordinated peer rollout. Documentation and CI-only changes require no
+application action. Older protocol migrations below retain their own
+coordinated-deployment requirements.
+
+## v3.33.0: dependency changes and validation limits
+
+The root module changes direct `golang.org/x/tools` v0.50.0 to v0.51.0 and
+`google.golang.org/genproto/googleapis/rpc`
+v0.0.0-20260918162117-cecb64721679 to
+v0.0.0-20260928230214-8a89bd6388cc. The nested JSON-RPC module changes only
+its indirect tools requirement and adds checksums matching the root.
+The root also updates `github.com/getkin/kin-openapi` v0.144.0 to v0.149.0,
+indirect `github.com/go-openapi/jsonpointer` v0.22.5 to v1.0.2, and indirect
+`github.com/santhosh-tekuri/jsonschema/v6` v6.0.2 to v6.0.3. The indirect
+`github.com/go-openapi/swag/jsonname` requirement is removed. Other requirement
+versions and direct/indirect roles stay the same. The root has no replacement;
+the nested module retains its local Goa replacement.
+The RPC module's extracted source files are identical across these
+revisions; this update introduces no protobuf wire-definition change.
+
+The tools update can affect package loading and generated import cleanup.
+The OpenAPI dependency updates affect schema and document processing.
+Compile and test the application with its resulting graph. The complete
+selected graph was not separately captured. Goa's owning make, including lint
+and root/nested tests, passed before and after the updates on Go 1.27.1 macOS.
+Go 1.26.0 is a declared minimum, not a tested-minimum claim.
+
+## Earlier migrations: already using v3.31.1?
+
+The behavioral sections from here describe earlier v3.31/v3.32 changes carried
+forward. They do not designate new v3.33.0 protocol changes. Current-target
+installation and regeneration instructions below apply after publication.
+
+v3.32.0 fixes missing client-interceptor imports in generated HTTP, gRPC, and
+JSON-RPC clients and command starters. For example, applying a client
+interceptor to one method could make gRPC command generation fail or leave
+generated code unable to compile. Upgrade the module and command together and
+regenerate the complete `gen` tree.
+
+Plugins can use `service.Plan.ServiceHasClientInterceptors` to query the
+retained interceptor applicability during import planning. This is an additive
+generator API. The import correction adds no runtime or wire change and requires
+no coordinated client/server deployment or persisted-data migration.
+
+This release also updates dependencies. Compile and test applications with the
+new dependency graph. To roll back an upgrade from v3.31.1, restore its module,
+command, dependencies, and generated tree together.
+
+## Upgrading from v3.30.x or the generation preview
+
+**The v3.31 generator upgrade introduced intentional breaking changes.**
+Goa remains on the `goa.design/goa/v3` module path. Keeping v3 does not mean
+that every generated API, plugin API, or transport exchange is compatible
+with v3.30.0. Read the relevant sections before regenerating a production
+application.
+
+The guidance below covers that migration, including the subsequent gRPC fixes
+for collection presence, cancellation, and recursive collections. Generated
+application starters import Clue for logging and debugging; its Go 1.26 minimum
+is now shared by Goa itself.
+
+## Already using v3.31.0?
+
+v3.31.1 fixes recursive gRPC collection generation. Upgrade the module and
+command together and regenerate the complete `gen` tree. This patch adds no
+further breaking API or wire changes and needs no coordinated deployment.
+The full migration guidance below applies when upgrading from v3.30.x or the
+preview.
+
+## Plan the upgrade
+
+| If you use… | Required action |
+| --- | --- |
+| Generated Goa packages | Upgrade the module and command together, regenerate the complete `gen` tree, compile, and test. Do not mix files from different generator versions. |
+| `OneOf`, interceptors, multipart decoders, or direct transport helpers | Update handwritten callers for the generated signatures and types described below. |
+| Required gRPC scalar fields | Regenerate protobuf code and update direct message literals. Coordinate peers when required zero or empty values matter. |
+| JSON-RPC errors, selected views, or server streams | Update both generated peers and custom clients for the changed envelopes and stream lifecycle. JSON-RPC WebSocket generation has been removed. |
+| Dynamic gRPC views or optional primitive HTTP SSE data | Regenerate and deploy both peers together for the cases listed under coordinated deployment. |
+| Code-generation plugins | Upgrade `goa.design/plugins/v3` to v3.35.0 and migrate custom plugins that declare names or call removed generator APIs. |
+
+There is no persisted-data migration. Keep the previous binaries, dependency
+versions, design, and generated tree available for rollback.
+
+## Why generation changed
+
+Goa used to make some generated-name and type decisions in separate passes.
+Those passes could describe the same Go package while seeing different sets of
+names. One pass could declare a validation function under one name while a
+later pass called another name. Similar disagreements affected imports, union
+types, conversions, result views, examples, and plugin output.
+
+The new generator prepares the complete design first. It then chooses every
+generated package, file, declaration, import, validation function, conversion,
+and helper once. HTTP, gRPC, JSON-RPC, command, example, OpenAPI, and plugin
+generation all use those recorded choices. Templates write the selected code;
+generated programs do not inspect their own type names or choose between paths
+that were already known during generation.
+
+That architectural correction exposed places where the old output accepted
+values that the design rejected, described transport behavior the transport
+could not provide, or exposed generator details as public APIs. This release
+fixes those contracts together instead of preserving contradictory behavior.
+
+## Corrections carried forward from the preview
+
+The stable release includes the preview fixes for selected HTTP result views,
+explicit response-body attributes, collection types with suffixed identifiers,
+required arrays of viewed types, named string credentials, and shared errors.
+Generated HTTP path files also retain imports for custom parameter types such
+as `uuid.UUID`.
+Required gRPC arrays and maps now accept valid empty collections after a
+protobuf round trip; their length and item rules still apply.
+
+HTTP response selection also becomes explicit. A method must define exactly
+one response without `Tag`; this is its default response. Every other success
+response must use `Tag`. Remove extra untagged responses or give them a tag
+that the result can select. Generated encoders test tagged responses in design
+order and use the default last.
+
+## Identify affected features
+
+Review the matching migration sections if your project has any of these characteristics:
+
+- it uses a Goa code-generation plugin;
+- it uses required primitive fields, `OneOf`, result views, defaults, repeated
+  values, maps, or metadata with gRPC;
+- it uses JSON-RPC, server-sent events, or WebSocket streams;
+- it implements generated interceptors;
+- it constructs generated transport or protobuf types directly;
+- it replaces generated sections or calls Goa generator packages directly; or
+- it has several services, generation roots, transports, or plugins that write
+  into the same generated Go package.
+
+Test ordinary HTTP-only services as well. Review the generated diff even when
+none of the specialized migrations below applies.
+
+## Install v3.35.0 after publication
+
+After the exact tags are published and verified, start from a branch with the
+current generated tree committed. Install both the Goa module and the `goa`
+command from the same release version:
+
+```bash
+go get goa.design/goa/v3@v3.35.0
+go install goa.design/goa/v3/cmd/goa@v3.35.0
+goa version
+```
+
+The Go command records the same release version in `go.mod`. The installed
+command reports the same version:
+
+```text
+Goa version v3.35.0
+```
+
+Do not use an older `goa` command with the new module. Also install the
+protobuf generators covered by this release if the design uses gRPC:
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+```
+
+Goa checks these two program versions before writing gRPC files.
+
+If your design imports the official plugins, update that module in the same
+application change:
+
+```bash
+go get goa.design/plugins/v3@v3.35.0
+```
+
+Wait for the matching plugins/examples tags before selecting them; their
+publication is not implied by the Goa tag. Use v3.35.0 when copying examples
+for this target. Custom plugins must complete
+the generator-library migration below before regenerating an application.
+
+## Regenerate and test an application
+
+1. Record the existing generated output in version control.
+2. Update the Goa module and command as shown above.
+3. Run the same complete `goa gen` command used by the project. `goa gen`
+   deletes and recreates the complete `gen` directory.
+4. Run `goa example` only if the project normally maintains Goa starter files.
+   This command creates missing files but does not replace handwritten files.
+5. Read every generation error. Several invalid or ambiguous designs now stop
+   before source is written; the sections below explain how to update them.
+6. Compile the complete project and update handwritten code for intentional
+   source changes.
+7. Run unit, integration, and client/server tests. Compare generated `.proto`
+   and OpenAPI files with the committed versions, especially field numbers,
+   routes, selected views, errors, and examples.
+8. Run generation a second time and confirm that it produces no further diff.
+
+Never copy individual files from the old generated tree into the new one. A
+declaration and every use of it must come from the same generation run.
+
+## Changes most application authors will see
+
+### Required gRPC primitive fields now preserve presence
+
+A required boolean, number, string, enum, byte slice, or alias must distinguish
+an omitted value from an explicit zero value. The generated protobuf schema now
+uses proto3 presence for these singular fields. In generated protobuf Go code,
+booleans, numbers, strings, enums, and their aliases therefore become pointers.
+Byte slices remain slices, and messages remain pointers. Goa service types keep
+their existing field layout.
+
+The protobuf field numbers and binary wire types do not change. The behavior
+does: generated clients and servers reject an omitted required field instead of
+converting it to the service type's zero value. Explicit `false`, `0`, an empty
+string, an empty byte slice, and protobuf null remain valid when supplied.
+
+Code that constructs protobuf messages directly must set the new pointers or
+use generated getters when reading them. Regenerate both peers when required
+zero or empty values matter. An old client cannot prove to a new server that it
+explicitly selected a zero value because its schema did not record presence.
+
+Defaults now use the same rule. Goa applies an authored default only when the
+incoming value is absent. An explicit zero or empty value stays explicit.
+Service results are sent exactly as returned; result conversion does not add
+input defaults.
+
+### `OneOf` values have one explicit selected branch
+
+Generated union branch storage is now private. Construct, update, and read a
+union with its generated constructor, setter, accessor, and `Kind` method:
+
+```go
+value := NewValueText("hello")
+value.SetCount(3)
+count, ok := value.AsCount()
+```
+
+The exact names use the union and branch names from the design. Compiler-made
+branch types have descriptive names such as `ValueBranchText`; discovery-order
+names such as `Value2` are gone.
+
+A union holds exactly one valid branch. Selecting a new branch replaces the
+old selection. A required union rejects no selected branch, a typed wrapper
+whose value is nil, and a selected nil message, byte slice, or `Any` value. A
+selected nonnil empty message remains valid. JSON and protobuf data keep the
+same union representation.
+
+Update handwritten code that set or read public branch fields. If two authored
+unions would need the same public Go name in one package, give them distinct
+`TypeName` values; generation now reports the collision instead of silently
+renumbering public types.
+
+### Required array items reject JSON `null`
+
+`ArrayOfRequired` marks every array item as required. Incoming HTTP and
+JSON-RPC body types now use pointers for primitive items and primitive aliases
+so the decoder can distinguish `null` from a zero value. A request containing
+`[null]` returns a validation error. Valid requests still become ordinary
+value slices in the service layer, and generated response bodies remain value
+slices.
+
+Only code that constructs incoming generated transport bodies directly needs
+to use pointers for these items. Service implementations do not change.
+
+### Interceptor information is read-only
+
+Generated interceptor methods now receive `NameInfo`, a read-only interface,
+instead of `*NameInfo`, a pointer to a public struct whose fields were already
+private. The interface provides the same public accessor methods for the
+service, method, call kind, and typed value.
+
+Update each handwritten interceptor signature by removing the `*`. Code that
+used the public accessors otherwise remains the same. The generated private
+implementation is specific to the method and call kind, so it does not inspect
+method names or switch on payload types while the service is running.
+
+### Selected gRPC views use their exact contract
+
+Every selected result view now has matching conversion and validation. A field
+omitted by a view is not treated as required, while a missing field selected by
+that view is rejected before conversion. A dynamic server stream sends the
+selected view in initial `goa-view` metadata, and the generated client reads it
+before decoding the first message.
+
+Regenerate and deploy both sides of dynamic viewed streams together. Do the
+same for a viewed method where a non-default view omits fields used by the old
+default conversion. Fixed-view methods otherwise keep their wire choice.
+
+Top-level validators keep stable exported names such as
+`ValidateShowResponse` and `ValidateShowResponseTiny`. Validators used only by
+another validator are private. Handwritten code must call the top-level
+validator for its selected view rather than an old numbered or nested helper.
+
+### API-level errors are definitions, not automatic method errors
+
+An error declared at API level defines a reusable error. It no longer means
+that every service and method can return that error. Select it where it is
+actually returned:
+
+```go
+var _ = API("calc", func() {
+    Error("busy", Busy)
+})
+
+var _ = Service("calculator", func() {
+    Error("busy")
+})
+```
+
+The name-only service or method declaration selects the API definition and
+keeps its type, validation, default, description, and fault settings. Supplying
+another argument defines a separate local error. Add explicit selections to
+designs that relied on the old automatic lookup.
+
+### Custom errors use the exact declared type
+
+Goa adds `Error`, `ErrorName`, and `GoaErrorName` methods only to the exact
+authored type passed to `Error`. A named type nested inside that error remains
+an ordinary generated type and no longer receives error methods accidentally.
+Update application code that returned or inspected the nested type as though it
+were the declared service error.
+
+When the exact error type is also used as a payload or result, Goa emits one Go
+declaration and adds the error methods beside it. The same rule applies when
+`struct:pkg:path` places the type in a shared generated package: every service
+imports the one declaration instead of generating competing data and error
+copies. This is a generated Go source correction. It does not change the
+transport body or require a persisted-data migration.
+
+One authored error type must also have one static error name across the complete
+generation. Goa now rejects a type used as, for example, `not_found` in one
+service and `missing` in another service, even when the services are evaluated
+through different generation roots. The old generator checked only errors in
+the same method, so its generated `ErrorName` result could depend on which
+service happened to emit the shared type.
+
+If one type intentionally represents several names, add an `ErrorName` field to
+the type and set the name on each error value. Otherwise, define a separate type
+for each static name. Regenerate the complete design after making the choice;
+generating services separately does not create separate names for a type placed
+in one shared Go package.
+
+### Named string credentials and map keys keep their declared types
+
+Security credentials may use the built-in `String` type or a named string type.
+Generated service, HTTP, and gRPC code now preserves that named type while
+converting its value to the plain string required by authorization functions.
+HTTP Basic authentication also preserves whether an optional username or
+password was absent. It sends the Authorization header whenever either value is
+required or present.
+
+Regenerating changes generated HTTP Basic payload constructor arguments.
+Handwritten code that calls those transport constructors directly must pass the
+username and password values expected by the regenerated signature. Code that
+uses Goa's generated decoders changes automatically.
+
+Goa now rejects security fields that use a non-string type, define a default, or
+use `struct:field:type`. Those designs could not preserve the security contract
+safely and previously produced invalid or misleading code. Replace the field
+with `String` or a named string type and perform any application-specific
+conversion after authorization.
+
+OpenAPI v2 output now also preserves the declared value schema for maps whose
+keys use a named string type. Custom clients generated from the old Swagger may
+have treated those values as unrestricted. Regenerate such clients so they use
+the designed value type.
+
+## Transport changes
+
+### JSON-RPC supports unary calls and explicit server-sent-event streams
+
+JSON-RPC methods now have one of two contracts:
+
+- one HTTP request followed by one JSON response; or
+- one HTTP request followed by server results through
+  `ServerSentEvents()`.
+
+Design validation rejects client streams, bidirectional streams, JSON-RPC
+WebSocket streams, server streams without `ServerSentEvents()`, and a method
+that defines both `Result` and `StreamingResult`. Move an unsupported method to
+unary JSON-RPC, JSON-RPC server-sent events, ordinary HTTP WebSocket, or gRPC.
+
+Request and response handling now follows JSON-RPC 2.0 for IDs,
+notifications, invalid objects, batches, `result: null`, invalid parameters,
+internal errors, accepted media types, and streams in batches. A method
+declared as a notification requires an absent `id`; every ordinary method
+requires a non-null string or numeric `id`. Regenerate custom peers together
+and update them to follow the declared method kind.
+
+A result whose view is chosen by the caller uses this value inside JSON-RPC's
+top-level `result` member:
+
+```json
+{
+  "view": "detailed",
+  "body": {
+    "name": "example"
+  }
+}
+```
+
+Goa adds this envelope only when the caller chooses among views. Unviewed and
+fixed-view results keep their body shape. The value is valid JSON-RPC, which
+allows any JSON value in `result`; a separate protocol built on JSON-RPC must
+still use the result shape required by that protocol.
+
+Designed JSON-RPC errors keep the authored JSON-RPC code and place their Goa
+error name and body in the error's `data` member. Custom clients that decode
+that data must accept the new `{ "name": ..., "body": ... }` shape.
+Regenerate both peers together for designed errors. A client receiving an
+unknown error code, name, or body preserves the raw JSON-RPC error instead of
+misidentifying it as a designed error.
+
+Server streams now use the service stream's `Send`, `SendWithContext`, and
+`Close` methods. Clients use `Recv()` or `RecvWithContext(ctx)` instead of
+`Recv(ctx)`. Each sent value is a notification; the opening request has a
+non-null ID and ends with a terminal success or error response. Update custom
+peers for this lifecycle. The former JSON-RPC-only `StreamEvent`, `SendAndClose`,
+`SendError`, concrete client-stream, and WebSocket configuration APIs are removed.
+
+Code calling `jsonrpc.IDToString` directly must handle its new `(string, error)`
+return. Positional `RawRequest` and `RawResponse` literals must use named fields.
+
+### HTTP decoding, validation, and streams are more exact
+
+- Multipart decoders fill and validate the request body before constructing
+  the service payload. Generated multipart decoder callback signatures may
+  change, and invalid nested fields now report their complete field and array
+  paths.
+- Exclusive maximum validation rejects the maximum itself as well as larger
+  values.
+- A map assigned to the complete query string reads raw keys such as
+  `?a=1&b=2`, matching generated clients. A custom client that used bracketed
+  keys must change.
+- Float query values use Go's shortest text that converts back to the same
+  value. Systems that sign, cache, or compare exact URL text must accept the
+  compact spelling.
+- Server-sent events write primitive values as raw event text, preserve the
+  difference between an absent optional value and a present empty string, and
+  return write and flush errors.
+- An empty successful WebSocket stream now completes the handshake, sends a
+  normal close frame, and closes once.
+- Generated clients return body read and close errors for bodies they consume.
+  A method that deliberately returns the raw body still leaves it open for the
+  caller.
+
+### Other gRPC corrections
+
+- Recursive payloads and results containing arrays or maps of themselves now
+  generate successfully ([#2515](https://github.com/goadesign/goa/issues/2515)).
+  Regenerate to get the fix; the design and protobuf wire format stay the same.
+  Nested validation, optional values, and defaults are preserved.
+- Byte metadata uses its actual string contents. For example, `[]byte{65, 66}`
+  becomes `"AB"`, not `"[65 66]"`. Floating-point metadata uses the width
+  declared by the design.
+- Protobuf cannot distinguish an omitted repeated or map field from an empty
+  one. Generated validators no longer report a false missing-field error.
+  Authored length and item rules still run.
+- A nil repeated or map wrapper used as a map value converts to an empty
+  collection instead of panicking.
+- A validator that has no work is no longer generated. Remove handwritten
+  calls to such a function.
+- A schema with a real protobuf name collision may receive stable suffixes.
+  Regenerate both sides of a formerly conflicting schema because its descriptor
+  names or gRPC method path can change.
+
+## Generated starter code, examples, and OpenAPI
+
+Generated commands now execute the endpoint, receive stream values, print
+them, and return endpoint, stream, output, and close errors. Review handwritten
+command code against the new starter when updating it. gRPC flags for complete
+messages now decode protobuf JSON.
+
+Update a command's `main.go` and its transport helpers together: private
+`doHTTP`, `doGRPC`, and `doJSONRPC` helpers now execute and print results rather
+than returning an endpoint and payload. `goa example` keeps existing files, so
+it cannot complete this handwritten migration automatically. Input-streaming
+and bidirectional command starters return an unsupported-input error.
+
+Direct callers of generated `Build<Method>Payload` functions must also follow
+the new signatures: a flag without a default uses `*string`, with nil meaning
+omitted. A pointer to an empty string means explicitly supplied. Required
+flags are checked rather than populated with the literal text `REQUIRED`.
+
+Generated example values now belong to the design declaration that authored
+them. Another service or transport can no longer consume shared random state
+and change those values. This causes a large one-time text change in some
+examples, but a second generation must be identical.
+
+OpenAPI output now has consistent base64 byte examples, empty security scope
+arrays instead of JSON null, independent server-variable examples, selected
+view schemas, and server-sent-event data schemas. Review these changes as
+contract corrections rather than accepting the complete generated diff
+without inspection.
+
+## Designs that now fail validation
+
+Defaults for custom fields now use their schema value instead of requiring
+the default's Go package and type name to match `struct:field:type`. This keeps
+`json.RawMessage` defaults valid when Go represents that type as an alias.
+String fields with custom metadata accept string or byte-slice defaults; byte
+values render as `Target([]byte{...})`, which works for targets with underlying
+string or `[]byte`. The stored default and its serialization methods remain
+unchanged. Ordinary fields without custom metadata keep their existing default
+eligibility.
+
+Custom numeric defaults are checked before narrowing. For example, an int64
+default of 4294967296 for Int32 now fails instead of being validated as 0.
+Negative unsigned defaults, float-to-integer defaults, non-finite numbers and
+overflow also fail. Correct these authored values and regenerate; there is no
+data migration. Normal floating-point rounding and underflow remain supported.
+
+Direct `codegen.RenderGoValue` calls check the separately supplied value's
+literal kind, unsigned sign and finite numbers. They do not validate the stored
+default or all schema rules. Custom literals retain their source numeric
+precision; the Go compiler still checks the actual authored target declaration.
+
+Generation now rejects ambiguous designs before writing files. In addition to
+the error, response, security, and streaming rules above, check these cases:
+
+- Nested defaults must satisfy their complete type, required fields, and
+  validation rules.
+- A relocated authored type using `struct:pkg:path` supplies its location to
+  unlocated dependencies. Each original type must resolve to one package, and
+  the resulting Go package imports must be acyclic.
+- Ordinary HTTP and JSON-RPC routes on one server cannot overlap, even when
+  their path parameter names differ.
+- JSON-RPC routes must use `POST`; method names cannot start with `rpc.`.
+  Keep request IDs as one direct string payload field with no competing
+  parameter, header, cookie, or event-ID mapping.
+- Multipart requests need a non-empty request body for the decoder to fill.
+- `SSERequestID` must be the sole mapping for `Last-Event-ID`. A viewed stream
+  cannot use `SSEEventData` to discard the rest of its view information.
+- HTTP client-streaming and bidirectional methods must use a fixed response
+  view. Server-only streams may still select a view from their request.
+- Remove duplicate conversions and unsupported transport mappings, including
+  non-primitive gRPC metadata and JSON-RPC response fields mapped to HTTP
+  response headers or cookies.
+
+The [complete design migration table](codegen/ARCHITECTURE.md#designs-that-now-stop-generation)
+describes each rejected combination and its replacement.
+
+## Plugin and generator-library migration
+
+The released four-argument plugin registration functions, `Genfunc`, the
+replaceable `Generators` variable, and the exported `Service`, `Transport`,
+`OpenAPI`, and `Example` functions remain. Their released ordering and support
+for repeated callback names also remain. Common generated-name fields such as
+`MountHandler`, `HandlerInit`, constructors, codecs, validators, multipart
+helpers, server-sent-event names, WebSocket names, and gRPC names remain
+available for existing templates.
+
+A plugin that edits ordinary generated values or files should usually continue
+to work. A plugin that declares a package-level name or chooses a generated
+name must move that work to `generator.PluginFactory` and declare it during
+`Plugin.Plan`. This lets Goa check the plugin's names with every other name in
+the generated package before templates run.
+
+A preparation plugin that adds a service must attach it to the owning root and
+call `EvaluateAttachedServices`. Public helpers that directly ran plugin
+callbacks or rebuilt Goa's private service or transport analysis are removed;
+the complete generation run now owns those steps once.
+
+Several public planning and template-data structures gained private state or
+typed declaration records. As a result:
+
+- positional struct literals must become named-field literals;
+- values containing maps or function-planning state can no longer be compared
+  with `==` or used as map keys;
+- plugins that replaced interceptor section templates must use the new typed
+  section data; and
+- plugins that render viewed gRPC conversions must use the per-view conversion
+  lists rather than one default conversion for every view.
+
+The complete table of changed generator APIs and their replacements is in
+[Code Generation Architecture](codegen/ARCHITECTURE.md#generator-library-migration).
+That document is the detailed contract for plugin authors; this guide is the
+application-facing summary.
+
+## Changes that require coordinated deployment
+
+Updating the Goa module does not change a compiled application. The changes
+take effect only after regeneration and compilation. There is no persisted-data
+migration.
+
+Regenerate, deploy, and roll back both client and server together for:
+
+- designed JSON-RPC errors;
+- caller-selected JSON-RPC views;
+- JSON-RPC server-sent-event streams;
+- dynamic caller-selected gRPC streams;
+- viewed gRPC methods whose chosen view omits fields used by the old default
+  conversion;
+- HTTP server-sent-event streams with optional primitive data; and
+- gRPC metadata whose byte or floating-point text matters to another program.
+
+Required protobuf fields keep compatible field numbers and binary types, but a
+new server may reject a required zero value from an old client because the old
+message did not record whether that zero was present.
+
+Most other changes are source changes in generated Go packages or stricter
+validation of previously invalid input. They require regeneration and a normal
+application build, but not a data migration.
+
+For required protobuf zero or empty values, update all affected clients before
+enabling the new server's presence validation, or deploy matching peers
+together. For changed JSON-RPC and streaming exchanges, use a coordinated
+cutover or route clients to a matching server version. An independently rolling
+deployment cannot assume those old and new generated contracts interoperate.
+
+The gRPC cancellation fix also applies when rebuilding clients that already
+call `grpc.ContextError`. A locally canceled call has one context cause while
+retaining its gRPC status and transport details. Independent cleanup errors
+remain separate; no coordinated deployment is required for this runtime fix.
+
+## Roll back to v3.30.0
+
+Restore the previous design and handwritten application changes as well as the
+module version. For a project upgrading from v3.30.0:
+
+```bash
+go get goa.design/goa/v3@v3.30.0
+go install goa.design/goa/v3/cmd/goa@v3.30.0
+goa gen YOUR_MODULE/design
+```
+
+Restore the previous plugin dependency versions too, if used. Regenerate the
+complete `gen` directory with the v3.30.0 command, or restore the recorded v3.30.0
+generated tree and matching binaries. Do not mix generated versions. For a
+changed transport exchange, roll back both client and server together. No
+persisted data needs to be changed or restored.
+
+## Existing limitations checked for this release
+
+The issue review confirmed this remaining limitation, which also affects v3.30.0:
+
+- A custom `uuid.UUID` field mapped to an HTTP query parameter can produce a
+  client that does not compile. Server-side text decoding is supported, but the
+  generated client does not perform the corresponding conversion to text.
+  Until [#3924](https://github.com/goadesign/goa/issues/3924) is resolved, keep
+  the contract field as `String` with `FormatUUID` and convert inside the
+  implementation when a UUID value is needed.
+
+## Report a problem
+
+Open a [GitHub issue][issues] for a reproducible bug. Use
+[GitHub Discussions][discussions] for design and migration questions.
+
+A useful report includes:
+
+- the exact Goa version, Go version, and operating system;
+- `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc` versions for gRPC;
+- the affected transport and whether a plugin participates;
+- the smallest design that reproduces the behavior;
+- the exact `goa gen` or `goa example` command;
+- the relevant before-and-after generated diff;
+- the complete generation, compilation, or runtime error; and
+- whether both client and server were regenerated.
+
+Please remove credentials and private application data. A small public
+reproduction is ideal.
+
+[discussions]: https://github.com/goadesign/goa/discussions
+[issues]: https://github.com/goadesign/goa/issues

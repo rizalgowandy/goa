@@ -1,0 +1,44 @@
+func transform() {
+	target := &proto.WithDefaults{
+		String_:        &source.String,
+		RequiredString: &source.RequiredString,
+		Bytes_:         source.Bytes,
+		RequiredBytes:  source.RequiredBytes,
+		Any:            &source.Any,
+		RequiredAny:    &source.RequiredAny,
+	}
+	int_ := int32(source.Int)
+	target.Int = &int_
+	rawJSON := string(source.RawJSON)
+	target.RawJson = &rawJSON
+	requiredInt := int32(source.RequiredInt)
+	target.RequiredInt = &requiredInt
+	if source.Array != nil {
+		target.Array = make([]string, len(source.Array))
+		for i, val := range source.Array {
+			target.Array[i] = val
+		}
+	}
+	if source.RequiredArray != nil {
+		target.RequiredArray = make([]string, len(source.RequiredArray))
+		for i, val := range source.RequiredArray {
+			target.RequiredArray[i] = val
+		}
+	}
+	if source.Map != nil {
+		target.Map_ = make(map[int32]string, len(source.Map))
+		for key, val := range source.Map {
+			tk := int32(key)
+			tv := val
+			target.Map_[tk] = tv
+		}
+	}
+	if source.RequiredMap != nil {
+		target.RequiredMap = make(map[int32]string, len(source.RequiredMap))
+		for key, val := range source.RequiredMap {
+			tk := int32(key)
+			tv := val
+			target.RequiredMap[tk] = tv
+		}
+	}
+}

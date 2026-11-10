@@ -1,0 +1,53 @@
+{
+  "consumes": [
+    "application/json",
+    "application/xml",
+    "application/gob"
+  ],
+  "host": "localhost:80",
+  "info": {
+    "title": "",
+    "version": "0.0.1"
+  },
+  "paths": {
+    "/{foo}/{bar}": {
+      "post": {
+        "operationId": "test service#test endpoint",
+        "parameters": [
+          {
+            "format": "int64",
+            "in": "path",
+            "name": "foo",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "format": "int64",
+            "in": "path",
+            "name": "bar",
+            "required": true,
+            "type": "integer"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content response."
+          }
+        },
+        "schemes": [
+          "http"
+        ],
+        "summary": "test endpoint test service",
+        "tags": [
+          "test service"
+        ]
+      }
+    }
+  },
+  "produces": [
+    "application/json",
+    "application/xml",
+    "application/gob"
+  ],
+  "swagger": "2.0"
+}

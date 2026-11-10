@@ -1,3 +1,5 @@
+// This file builds protobuf schema files and compiles each one with the tools
+// selected before rendering starts.
 package codegen
 
 import (
@@ -5,70 +7,105 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/expr"
-	goa "goa.design/goa/v3/pkg"
 )
 
 const (
 	// ProtoVersion is the protocol buffer version used to generate .proto files
 	ProtoVersion = "proto3"
+
+	// ProtoPrefix is the prefix added to the proto package name.
+	ProtoPrefix = "goagen"
 )
 
-// ProtoFiles returns a *.proto file for each gRPC service.
-func ProtoFiles(genpkg string, root *expr.RootExpr) []*codegen.File {
-	fw := make([]*codegen.File, len(root.API.GRPC.Services))
-	for i, svc := range root.API.GRPC.Services {
-		fw[i] = protoFile(genpkg, svc)
+// defaultProtocCmd selects protoc when the design does not choose a compiler.
+var defaultProtocCmd = []string{expr.DefaultProtoc}
+
+// protoFiles returns the planned protobuf file for every gRPC service.
+func protoFiles(services *ServicesData) []*codegen.File {
+	fw := make([]*codegen.File, len(services.servicePlans))
+	for i, servicePlan := range services.servicePlans {
+		fw[i] = protoFile(servicePlan.expression, services)
 	}
 	return fw
 }
 
-func protoFile(genpkg string, svc *expr.GRPCServiceExpr) *codegen.File {
-	data := GRPCServices.Get(svc.Name())
-	svcName := codegen.SnakeCase(data.Service.VarName)
-	path := filepath.Join(codegen.Gendir, "grpc", svcName, pbPkgName, svcName+".proto")
+// protoFile returns the protobuf file defining the specified service.
+func protoFile(svc *expr.GRPCServiceExpr, services *ServicesData) *codegen.File {
+	genpkg := services.GenPkg()
+	data := services.Get(svc.Name())
+	svcName := data.Service.PathName
+	fileServiceName := svcName
+	if planned := services.protobuf[svc]; planned != nil && planned.fileIndex > 1 {
+		fileServiceName += strconv.Itoa(planned.fileIndex)
+	}
+	parts := strings.Split(genpkg, "/")
+	var repoName string
+	if len(parts) > 1 {
+		repoName = parts[len(parts)-2]
+	} else {
+		repoName = parts[0]
+	}
+	// Include the repository and service so two services do not write the same
+	// file.
+	fname := fmt.Sprintf("%s_%s_%s.proto", ProtoPrefix, repoName, fileServiceName)
+	path := filepath.Join(codegen.Gendir, "grpc", svcName, pbPkgName, fname)
 
-	sections := []*codegen.SectionTemplate{
+	sections := make([]*codegen.SectionTemplate, 0, 3+len(data.Messages))
+	sections = append(sections,
 		// header comments
-		{
+		&codegen.SectionTemplate{
 			Name:   "proto-header",
-			Source: protoHeaderT,
-			Data: map[string]interface{}{
-				"Title":       fmt.Sprintf("%s protocol buffer definition", svc.Name()),
-				"ToolVersion": goa.Version(),
+			Source: grpcTemplates.Read(grpcProtoHeaderT),
+			Data: map[string]any{
+				"Title": fmt.Sprintf("%s protocol buffer definition", svc.Name()),
 			},
 		},
 		// proto syntax and package
-		{
+		&codegen.SectionTemplate{
 			Name:   "proto-start",
-			Source: protoStartT,
-			Data: map[string]interface{}{
+			Source: grpcTemplates.Read(grpcProtoStartT),
+			Data: map[string]any{
 				"ProtoVersion": ProtoVersion,
 				"Pkg":          pkgName(svc, svcName),
+				"Imports":      data.ProtoImports,
 			},
 		},
 		// service definition
-		{
+		&codegen.SectionTemplate{
 			Name:   "grpc-service",
-			Source: serviceT,
+			Source: grpcTemplates.Read(grpcServiceT),
 			Data:   data,
 		},
-	}
+	)
 
 	// message definition
 	for _, m := range data.Messages {
-		sections = append(sections, &codegen.SectionTemplate{Name: "grpc-message", Source: messageT, Data: m})
+		sections = append(sections, &codegen.SectionTemplate{
+			Name:   "grpc-message",
+			Source: grpcTemplates.Read(grpcMessageT),
+			Data:   m,
+		})
+	}
+
+	finalize := services.finalizers[svc]
+	if finalize == nil {
+		panic(fmt.Sprintf("protobuf finalizer for service %q was not planned", svc.Name()))
 	}
 
 	return &codegen.File{
 		Path:             path,
 		SectionTemplates: sections,
-		FinalizeFunc:     protoc,
+		FinalizeFunc:     finalize,
 	}
 }
 
+// pkgName returns the protobuf package chosen by the design or the service
+// name used when the design does not choose one.
 func pkgName(svc *expr.GRPCServiceExpr, svcName string) string {
 	if svc.ProtoPkg != "" {
 		return svc.ProtoPkg
@@ -76,55 +113,33 @@ func pkgName(svc *expr.GRPCServiceExpr, svcName string) string {
 	return codegen.SnakeCase(svcName)
 }
 
-func protoc(path string) error {
+// runProtoc compiles one schema with the command fixed during planning.
+func runProtoc(tools *protobufToolPlan, path string) error {
 	dir := filepath.Dir(path)
-	os.MkdirAll(dir, 0777)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return err
+	}
 
-	args := []string{"--proto_path", dir, "--go_out", dir, "--go-grpc_out", dir, "--go_opt=paths=source_relative", "--go-grpc_opt=paths=source_relative", path}
-	cmd := exec.Command("protoc", args...)
+	args := []string{
+		path,
+		"--proto_path", dir,
+		"--go_out", dir,
+		"--go-grpc_out", dir,
+		"--go_opt=paths=source_relative",
+		"--go-grpc_opt=paths=source_relative",
+		"--plugin=protoc-gen-go=" + tools.goPlugin,
+		"--plugin=protoc-gen-go-grpc=" + tools.goGRPCPlugin,
+	}
+	for _, include := range tools.includes {
+		args = append(args, "-I", include)
+	}
+	command := tools.command
+	cmd := exec.Command(command[0], append(command[1:len(command):len(command)], args...)...)
 	cmd.Dir = filepath.Dir(path)
 
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to run protoc: %s: %s", err, output)
+		return fmt.Errorf("failed to run protoc: %w: %s", err, output)
 	}
 
 	return nil
 }
-
-const (
-	protoHeaderT = `{{ if .Title -}}
-// Code generated with goa {{ .ToolVersion }}, DO NOT EDIT.
-//
-// {{ .Title }}
-//
-// Command:
-{{ comment commandLine }}
-{{- end }}
-`
-
-	protoStartT = `
-syntax = {{ printf "%q" .ProtoVersion }};
-
-package {{ .Pkg }};
-
-option go_package = "/{{ .Pkg }}pb";
-`
-
-	// input: ServiceData
-	serviceT = `
-{{ .Description | comment }}
-service {{ .Name }} {
-	{{- range .Endpoints }}
-	{{ if .Method.Description }}{{ .Method.Description | comment }}{{ end }}
-	{{- $serverStream := or (eq .Method.StreamKind 3) (eq .Method.StreamKind 4) }}
-	{{- $clientStream := or (eq .Method.StreamKind 2) (eq .Method.StreamKind 4) }}
-	rpc {{ .Method.VarName }} ({{ if $clientStream }}stream {{ end }}{{ .Request.Message.VarName }}) returns ({{ if $serverStream }}stream {{ end }}{{ .Response.Message.VarName }});
-	{{- end }}
-}
-`
-
-	// input: service.UserTypeData
-	messageT = `{{ comment .Description }}
-message {{ .VarName }}{{ .Def }}
-`
-)

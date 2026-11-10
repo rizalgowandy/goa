@@ -1,107 +1,147 @@
+// This file writes runnable gRPC command-line examples with the package names
+// already chosen for this generation.
 package codegen
 
 import (
-	"os"
 	"path"
 	"path/filepath"
-	"strings"
 
 	"goa.design/goa/v3/codegen"
+	"goa.design/goa/v3/codegen/cli"
 	"goa.design/goa/v3/codegen/example"
+	"goa.design/goa/v3/codegen/service"
 	"goa.design/goa/v3/expr"
 )
 
-// ExampleCLIFiles returns an example gRPC client tool implementation.
-func ExampleCLIFiles(genpkg string, root *expr.RootExpr) []*codegen.File {
+// exampleCLIFiles returns an example gRPC client tool implementation.
+func exampleCLIFiles(root *example.Root, services *ServicesData) []*codegen.File {
 	var files []*codegen.File
-	for _, svr := range root.API.Servers {
-		if f := exampleCLI(genpkg, root, svr); f != nil {
+	for _, server := range root.Servers {
+		if f := exampleCLI(services, server); f != nil {
 			files = append(files, f)
 		}
 	}
 	return files
 }
 
-// exampleCLI returns an example client tool HTTP implementation for the given
-// server expression.
-func exampleCLI(genpkg string, root *expr.RootExpr, svr *expr.ServerExpr) *codegen.File {
-	var (
-		mainPath string
-
-		svrdata = example.Servers.Get(svr)
-	)
-	{
-		mainPath = filepath.Join("cmd", svrdata.Dir+"-cli", "grpc.go")
-		if _, err := os.Stat(mainPath); !os.IsNotExist(err) {
-			return nil // file already exists, skip it.
-		}
+// exampleCLI writes the gRPC command-line program for server.
+func exampleCLI(services *ServicesData, server *example.Data) *codegen.File {
+	genpkg := services.GenPkg()
+	mainPath := filepath.Join("cmd", server.Dir+"-cli", "grpc.go")
+	rootPath := path.Dir(genpkg)
+	outputPackage := path.Join(rootPath, "cmd", server.Dir+"-cli")
+	parser := services.cliPlan.parser(server.Name)
+	if parser == nil {
+		return nil
 	}
 
-	var (
-		rootPath string
-		apiPkg   string
-
-		scope = codegen.NewNameScope()
-	)
-	{
-		// genpkg is created by path.Join so the separator is / regardless of operating system
-		idx := strings.LastIndex(genpkg, string("/"))
-		rootPath = "."
-		if idx > 0 {
-			rootPath = genpkg[:idx]
-		}
-		apiPkg = scope.Unique(strings.ToLower(codegen.Goify(root.API.Name, false)), "api")
-	}
-
-	var (
-		specs []*codegen.ImportSpec
-	)
-	{
-		specs = []*codegen.ImportSpec{
-			{Path: "context"},
-			{Path: "encoding/json"},
-			{Path: "flag"},
-			{Path: "fmt"},
-			{Path: "google.golang.org/grpc"},
-			{Path: "os"},
-			{Path: "time"},
-			codegen.GoaImport(""),
-			codegen.GoaNamedImport("grpc", "goagrpc"),
-			{Path: rootPath, Name: apiPkg},
-			{Path: path.Join(genpkg, "grpc", "cli", svrdata.Dir), Name: "cli"},
+	var svcData []*ServiceData
+	hasClientInterceptors := false
+	for _, svc := range server.Services {
+		if data := services.Get(svc); data != nil {
+			if len(data.Endpoints) == 0 {
+				continue
+			}
+			svcData = append(svcData, services.exampleServiceData(data, outputPackage, false))
+			hasClientInterceptors = hasClientInterceptors || len(data.Service.ClientInterceptors) > 0
 		}
 	}
-
-	var (
-		sections []*codegen.SectionTemplate
-	)
-	{
-		sections = []*codegen.SectionTemplate{
-			codegen.Header("", "main", specs),
-			{Name: "do-grpc-cli", Source: grpcCLIDoT, Data: svrdata},
-		}
+	cliImport := services.PackageImport(outputPackage, path.Join(genpkg, "grpc", "cli", server.Dir))
+	var interceptorsPkg string
+	if hasClientInterceptors {
+		interceptorImport := services.PackageImport(outputPackage, rootPath+"/interceptors")
+		interceptorsPkg = interceptorImport.Name
 	}
 
-	return &codegen.File{Path: mainPath, SectionTemplates: sections, SkipExist: true}
+	sections := []*codegen.SectionTemplate{
+		codegen.Header("", "main", nil),
+		{
+			Name:   "do-grpc-cli",
+			Source: grpcTemplates.Read(grpcDoGRPCCLIT),
+			Data: map[string]any{
+				"DefaultTransport": server.DefaultClientTransport(),
+				"Services":         svcData,
+				"InterceptorsPkg":  interceptorsPkg,
+				"CLIPkg":           cliImport.Name,
+				"Parser":           parser.Declarations,
+			},
+			FuncMap: map[string]any{
+				"hasAnyInputStreams": cliHasAnyInputStreams,
+				"hasInputStreams":    cliHasInputStreams,
+				"hasRunnable":        cliHasRunnableCommands,
+				"hasRunnableService": cliHasRunnableService,
+				"kebab":              codegen.KebabCase,
+				"streamsInput":       cliStreamsInput,
+				"streamsOutput":      cliStreamsOutput,
+			},
+		},
+	}
+
+	return addEndpointImports(&codegen.File{Path: mainPath, SectionTemplates: sections, SkipExist: true}, services)
 }
 
-const (
-	grpcCLIDoT = `func doGRPC(scheme, host string, timeout int, debug bool) (goa.Endpoint, interface{}, error) {
-	conn, err := grpc.Dial(host, grpc.WithInsecure())
-	if err != nil {
-    fmt.Fprintf(os.Stderr, "could not connect to gRPC server at %s: %v\n", host, err)
-  }
-	return cli.ParseEndpoint(conn)
+// cliStreamsInput reports whether an example command would need to send more
+// payload values after the endpoint call starts.
+func cliStreamsInput(method *service.MethodData) bool {
+	return method.StreamKind == expr.ClientStreamKind || method.StreamKind == expr.BidirectionalStreamKind
 }
 
-{{ if eq .DefaultTransport.Type "grpc" }}
-func grpcUsageCommands() string {
-	return cli.UsageCommands()
+// cliStreamsOutput reports whether an example command receives a sequence of
+// results from the server.
+func cliStreamsOutput(method *service.MethodData) bool {
+	return method.StreamKind == expr.ServerStreamKind
 }
 
-func grpcUsageExamples() string {
-	return cli.UsageExamples()
+// cliHasInputStreams reports whether a service has commands that the example
+// client must reject before parsing an endpoint.
+func cliHasInputStreams(data *ServiceData) bool {
+	for _, endpoint := range data.Endpoints {
+		if cliStreamsInput(endpoint.Method) {
+			return true
+		}
+	}
+	return false
 }
-{{- end }}
-`
-)
+
+// cliHasAnyInputStreams reports whether any service has a command that the
+// example client must reject before parsing an endpoint.
+func cliHasAnyInputStreams(services []*ServiceData) bool {
+	for _, data := range services {
+		if cliHasInputStreams(data) {
+			return true
+		}
+	}
+	return false
+}
+
+// cliHasRunnableCommands reports whether the example client can invoke at
+// least one generated endpoint.
+func cliHasRunnableCommands(services []*ServiceData) bool {
+	for _, data := range services {
+		if cliHasRunnableService(data) {
+			return true
+		}
+	}
+	return false
+}
+
+// cliHasRunnableService reports whether the example client can invoke at
+// least one endpoint in the service.
+func cliHasRunnableService(data *ServiceData) bool {
+	for _, endpoint := range data.Endpoints {
+		if !cliStreamsInput(endpoint.Method) {
+			return true
+		}
+	}
+	return false
+}
+
+// parser returns the command parser saved for the named server.
+func (p *grpcCLIPlan) parser(serverName string) *cli.ParserPlan {
+	for _, server := range p.servers {
+		if server.name == serverName {
+			return server.parser
+		}
+	}
+	return nil
+}

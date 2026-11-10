@@ -1,0 +1,330 @@
+
+// Service is the ResultWithOneOfType service interface.
+type Service interface {
+	// A implements A.
+	A(context.Context) (res *ResultOneof, err error)
+}
+
+// APIName is the name of the API as defined in the design.
+const APIName = "test api"
+
+// APIVersion is the version of the API as defined in the design.
+const APIVersion = "0.0.1"
+
+// ServiceName is the name of the service as defined in the design. This is the
+// same value that is set in the endpoint request contexts under the ServiceKey
+// key.
+const ServiceName = "ResultWithOneOfType"
+
+// MethodNames lists the service method names as defined in the design. These
+// are the same values that are set in the endpoint request contexts under the
+// MethodKey key.
+var MethodNames = [1]string{"A"}
+
+type Item struct {
+	A *string
+}
+
+// ResultOneof is the result type of the ResultWithOneOfType service A method.
+type ResultOneof struct {
+	Result Result
+}
+
+type T struct {
+	Message *string
+}
+
+type U struct {
+	Item *Item
+}
+
+// Result holds exactly one of its branch values.
+type Result struct {
+	kind ResultKind
+	t    *T
+	u    *U
+}
+
+// ResultKind records which Result branch is selected.
+type ResultKind string
+
+const (
+	// ResultKindT identifies the t branch.
+	ResultKindT ResultKind = "t"
+	// ResultKindU identifies the u branch.
+	ResultKindU ResultKind = "u"
+)
+
+// Kind returns the selected branch.
+func (u Result) Kind() ResultKind {
+	return u.kind
+}
+
+// NewResultT constructs Result with the t branch set.
+func NewResultT(v *T) Result {
+	return Result{
+		kind: ResultKindT,
+		t:    v,
+	}
+}
+
+// AsT returns the value when the t branch is selected.
+func (u Result) AsT() (_ *T, ok bool) {
+	if u.kind != ResultKindT {
+		return
+	}
+	return u.t, true
+}
+
+// SetT selects the t branch and stores v.
+func (u *Result) SetT(v *T) {
+	*u = Result{
+		kind: ResultKindT,
+		t:    v,
+	}
+}
+
+// NewResultU constructs Result with the u branch set.
+func NewResultU(v *U) Result {
+	return Result{
+		kind: ResultKindU,
+		u:    v,
+	}
+}
+
+// AsU returns the value when the u branch is selected.
+func (u Result) AsU() (_ *U, ok bool) {
+	if u.kind != ResultKindU {
+		return
+	}
+	return u.u, true
+}
+
+// SetU selects the u branch and stores v.
+func (u *Result) SetU(v *U) {
+	*u = Result{
+		kind: ResultKindU,
+		u:    v,
+	}
+}
+
+// Validate ensures exactly one valid branch is selected.
+func (u Result) Validate() error {
+	_, err := u.Value()
+	return err
+}
+
+// Value returns the selected branch value, or the same selection error as Validate.
+// Go templates can read this method directly; an invalid selection stops execution.
+func (u Result) Value() (any, error) {
+	switch u.kind {
+	case "":
+		return nil, goa.InvalidEnumValueError("type", "", []any{
+			string(ResultKindT),
+			string(ResultKindU),
+		})
+	case ResultKindT:
+		if u.t == nil {
+			return nil, goa.MissingFieldError("value", "Result")
+		}
+		return u.t, nil
+	case ResultKindU:
+		if u.u == nil {
+			return nil, goa.MissingFieldError("value", "Result")
+		}
+		return u.u, nil
+	default:
+		return nil, goa.InvalidEnumValueError("type", u.kind, []any{
+			string(ResultKindT),
+			string(ResultKindU),
+		})
+	}
+}
+
+// MarshalJSON marshals the union into the canonical {type,value} JSON shape.
+func (u Result) MarshalJSON() ([]byte, error) {
+	value, err := u.Value()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		Type  string `json:"type"`
+		Value any    `json:"value"`
+	}{
+		Type:  string(u.kind),
+		Value: value,
+	})
+}
+
+// UnmarshalJSON unmarshals the union from the canonical {type,value} JSON shape.
+func (u *Result) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Type  string          `json:"type"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw.Value) == 0 {
+		return goa.MissingFieldError("value", "Result")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw.Value), []byte("null")) {
+		return goa.InvalidFieldTypeError("value", nil, "non-null JSON value")
+	}
+	switch raw.Type {
+	case string(ResultKindT):
+		var v *T
+		if err := json.Unmarshal(raw.Value, &v); err != nil {
+			return err
+		}
+		u.SetT(v)
+	case string(ResultKindU):
+		var v *U
+		if err := json.Unmarshal(raw.Value, &v); err != nil {
+			return err
+		}
+		u.SetU(v)
+	default:
+		if raw.Type == "" {
+			return goa.MissingFieldError("type", "Result")
+		}
+		return goa.InvalidEnumValueError("type", raw.Type, []any{
+			string(ResultKindT),
+			string(ResultKindU),
+		})
+	}
+	return nil
+}
+
+// NewResultOneof initializes result type ResultOneof from viewed result type
+// ResultOneof.
+func NewResultOneof(vres *resultwithoneoftypeviews.ResultOneof) *ResultOneof {
+	return newResultOneof(vres.Projected)
+}
+
+// NewViewedResultOneof initializes viewed result type ResultOneof from result
+// type ResultOneof using the given view.
+func NewViewedResultOneof(res *ResultOneof, view string) *resultwithoneoftypeviews.ResultOneof {
+	p := newResultOneofView(res)
+	return &resultwithoneoftypeviews.ResultOneof{Projected: p, View: "default"}
+}
+
+// newResultOneof converts projected type ResultOneof to service type
+// ResultOneof.
+func newResultOneof(vres *resultwithoneoftypeviews.ResultOneofView) *ResultOneof {
+	res := &ResultOneof{}
+	if vres.Result.Kind() != "" {
+		switch string(vres.Result.Kind()) {
+		case "t":
+			actual, _ := vres.Result.AsT()
+			var obj *T
+			if actual != nil {
+				obj = transformResultwithoneoftypeviewsTViewToT(actual)
+			}
+			u := res.Result
+			u.SetT((*T)(obj))
+			res.Result = u
+		case "u":
+			actual, _ := vres.Result.AsU()
+			var obj *U
+			if actual != nil {
+				obj = transformResultwithoneoftypeviewsUViewToU(actual)
+			}
+			u := res.Result
+			u.SetU((*U)(obj))
+			res.Result = u
+		}
+	}
+	return res
+}
+
+// newResultOneofView projects result type ResultOneof to projected type
+// ResultOneofView using the "default" view.
+func newResultOneofView(res *ResultOneof) *resultwithoneoftypeviews.ResultOneofView {
+	vres := &resultwithoneoftypeviews.ResultOneofView{}
+	if res.Result.Kind() != "" {
+		switch string(res.Result.Kind()) {
+		case "t":
+			actual, _ := res.Result.AsT()
+			var obj *resultwithoneoftypeviews.TView
+			if actual != nil {
+				obj = transformTToResultwithoneoftypeviewsTView(actual)
+			}
+			u := vres.Result
+			u.SetT((*resultwithoneoftypeviews.TView)(obj))
+			vres.Result = u
+		case "u":
+			actual, _ := res.Result.AsU()
+			var obj *resultwithoneoftypeviews.UView
+			if actual != nil {
+				obj = transformUToResultwithoneoftypeviewsUView(actual)
+			}
+			u := vres.Result
+			u.SetU((*resultwithoneoftypeviews.UView)(obj))
+			vres.Result = u
+		}
+	}
+	return vres
+}
+
+// transformResultwithoneoftypeviewsTViewToT builds a value of type *T from a
+// value of type *resultwithoneoftypeviews.TView.
+func transformResultwithoneoftypeviewsTViewToT(v *resultwithoneoftypeviews.TView) *T {
+	res := &T{
+		Message: v.Message,
+	}
+
+	return res
+}
+
+// transformResultwithoneoftypeviewsUViewToU builds a value of type *U from a
+// value of type *resultwithoneoftypeviews.UView.
+func transformResultwithoneoftypeviewsUViewToU(v *resultwithoneoftypeviews.UView) *U {
+	res := &U{}
+	if v.Item != nil {
+		res.Item = transformResultwithoneoftypeviewsItemViewToItem(v.Item)
+	}
+
+	return res
+}
+
+// transformResultwithoneoftypeviewsItemViewToItem builds a value of type *Item
+// from a value of type *resultwithoneoftypeviews.ItemView.
+func transformResultwithoneoftypeviewsItemViewToItem(v *resultwithoneoftypeviews.ItemView) *Item {
+	res := &Item{
+		A: v.A,
+	}
+
+	return res
+}
+
+// transformTToResultwithoneoftypeviewsTView builds a value of type
+// *resultwithoneoftypeviews.TView from a value of type *T.
+func transformTToResultwithoneoftypeviewsTView(v *T) *resultwithoneoftypeviews.TView {
+	res := &resultwithoneoftypeviews.TView{
+		Message: v.Message,
+	}
+
+	return res
+}
+
+// transformUToResultwithoneoftypeviewsUView builds a value of type
+// *resultwithoneoftypeviews.UView from a value of type *U.
+func transformUToResultwithoneoftypeviewsUView(v *U) *resultwithoneoftypeviews.UView {
+	res := &resultwithoneoftypeviews.UView{}
+	if v.Item != nil {
+		res.Item = transformItemToResultwithoneoftypeviewsItemView(v.Item)
+	}
+
+	return res
+}
+
+// transformItemToResultwithoneoftypeviewsItemView builds a value of type
+// *resultwithoneoftypeviews.ItemView from a value of type *Item.
+func transformItemToResultwithoneoftypeviewsItemView(v *Item) *resultwithoneoftypeviews.ItemView {
+	res := &resultwithoneoftypeviews.ItemView{
+		A: v.A,
+	}
+
+	return res
+}

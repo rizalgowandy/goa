@@ -1,3 +1,5 @@
+// This file verifies expression type conversion, compatibility, and example
+// behavior, including the tagged representation produced for union values.
 package expr
 
 import "testing"
@@ -500,6 +502,53 @@ func TestIsPrimitive(t *testing.T) {
 	}
 }
 
+func TestIsAlias(t *testing.T) {
+	var (
+		aliasUserType = &UserTypeExpr{
+			AttributeExpr: &AttributeExpr{
+				Type: String,
+			},
+		}
+		notAliasUserType = &UserTypeExpr{
+			AttributeExpr: &AttributeExpr{
+				Type: &Object{},
+			},
+		}
+		aliasResultType = &ResultTypeExpr{
+			UserTypeExpr: aliasUserType,
+		}
+		notAliasResultType = &ResultTypeExpr{
+			UserTypeExpr: notAliasUserType,
+		}
+	)
+	cases := map[string]struct {
+		dt       DataType
+		expected bool
+	}{
+		"alias user type": {
+			dt:       aliasUserType,
+			expected: true,
+		},
+		"not alias user type": {
+			dt:       notAliasUserType,
+			expected: false,
+		},
+		"alias result type": {
+			dt:       aliasResultType,
+			expected: true,
+		},
+		"not alias result type": {
+			dt:       notAliasResultType,
+			expected: false,
+		},
+	}
+	for k, tc := range cases {
+		if actual := IsAlias(tc.dt); tc.expected != actual {
+			t.Errorf("%s: got %#v, expected %#v", k, actual, tc.expected)
+		}
+	}
+}
+
 func TestPrimitiveIsCompatible(t *testing.T) {
 	var (
 		b    = bool(true)
@@ -522,127 +571,127 @@ func TestPrimitiveIsCompatible(t *testing.T) {
 	)
 	cases := map[string]struct {
 		p        Primitive
-		values   []interface{}
+		values   []any
 		expected bool
 	}{
 		"any": {
 			p:        Any,
-			values:   []interface{}{b},
+			values:   []any{b},
 			expected: true,
 		},
 		"boolean compatible": {
 			p:        Boolean,
-			values:   []interface{}{b},
+			values:   []any{b},
 			expected: true,
 		},
 		"boolean not compatible": {
 			p:        Boolean,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64, s, bs},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64, s, bs},
 			expected: false,
 		},
 		"int compatible": {
 			p:        Int,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32},
 			expected: true,
 		},
 		"int not compatible": {
 			p:        Int,
-			values:   []interface{}{b, i64, ui64, f32, f64, s, bs},
+			values:   []any{b, i64, ui64, f32, f64, s, bs},
 			expected: false,
 		},
 		"int32 compatible": {
 			p:        Int32,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32},
 			expected: true,
 		},
 		"int32 not compatible": {
 			p:        Int32,
-			values:   []interface{}{b, i64, ui64, f32, f64, s, bs},
+			values:   []any{b, i64, ui64, f32, f64, s, bs},
 			expected: false,
 		},
 		"int64 compatible": {
 			p:        Int64,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64},
 			expected: true,
 		},
 		"int64 not compatible": {
 			p:        Int64,
-			values:   []interface{}{b, f32, f64, s, bs},
+			values:   []any{b, f32, f64, s, bs},
 			expected: false,
 		},
 		"uint compatible": {
 			p:        UInt,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32},
 			expected: true,
 		},
 		"uint not compatible": {
 			p:        UInt,
-			values:   []interface{}{b, i64, ui64, f32, f64, s, bs},
+			values:   []any{b, i64, ui64, f32, f64, s, bs},
 			expected: false,
 		},
 		"uint32 compatible": {
 			p:        UInt32,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32},
 			expected: true,
 		},
 		"uint32 not compatible": {
 			p:        UInt32,
-			values:   []interface{}{b, i64, ui64, f32, f64, s, bs},
+			values:   []any{b, i64, ui64, f32, f64, s, bs},
 			expected: false,
 		},
 		"uint64 compatible": {
 			p:        UInt64,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64},
 			expected: true,
 		},
 		"uint64 not compatible": {
 			p:        UInt64,
-			values:   []interface{}{b, f32, f64, s, bs},
+			values:   []any{b, f32, f64, s, bs},
 			expected: false,
 		},
 		"float32 compatible": {
 			p:        Float32,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64},
 			expected: true,
 		},
 		"float32 not compatible": {
 			p:        Float32,
-			values:   []interface{}{b, s, bs},
+			values:   []any{b, s, bs},
 			expected: false,
 		},
 		"float64 compatible": {
 			p:        Float64,
-			values:   []interface{}{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64},
+			values:   []any{i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64},
 			expected: true,
 		},
 		"float64 not compatible": {
 			p:        Float64,
-			values:   []interface{}{b, s, bs},
+			values:   []any{b, s, bs},
 			expected: false,
 		},
 		"string compatible": {
 			p:        String,
-			values:   []interface{}{s},
+			values:   []any{s},
 			expected: true,
 		},
 		"string not compatible": {
 			p:        String,
-			values:   []interface{}{b, i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64, bs},
+			values:   []any{b, i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64, bs},
 			expected: false,
 		},
 		"bytes compatible": {
 			p:        Bytes,
-			values:   []interface{}{s, bs},
+			values:   []any{s, bs},
 			expected: true,
 		},
 		"bytes not compatible": {
 			p:        Bytes,
-			values:   []interface{}{b, i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64},
+			values:   []any{b, i, i8, i16, i32, ui, ui8, ui16, ui32, i64, ui64, f32, f64},
 			expected: false,
 		},
 		"not supported types": {
 			p:        Boolean,
-			values:   []interface{}{ss, is},
+			values:   []any{ss, is},
 			expected: false,
 		},
 	}
@@ -656,68 +705,6 @@ func TestPrimitiveIsCompatible(t *testing.T) {
 	}
 }
 
-func TestPrimitiveHash(t *testing.T) {
-	cases := map[string]struct {
-		p        Primitive
-		expected string
-	}{
-		"boolean": {
-			p:        Boolean,
-			expected: "boolean",
-		},
-		"int": {
-			p:        Int,
-			expected: "int",
-		},
-		"int32": {
-			p:        Int32,
-			expected: "int32",
-		},
-		"int64": {
-			p:        Int64,
-			expected: "int64",
-		},
-		"uint": {
-			p:        UInt,
-			expected: "uint",
-		},
-		"uint32": {
-			p:        UInt32,
-			expected: "uint32",
-		},
-		"uint64": {
-			p:        UInt64,
-			expected: "uint64",
-		},
-		"float32": {
-			p:        Float32,
-			expected: "float32",
-		},
-		"float64": {
-			p:        Float64,
-			expected: "float64",
-		},
-		"string": {
-			p:        String,
-			expected: "string",
-		},
-		"bytes": {
-			p:        Bytes,
-			expected: "bytes",
-		},
-		"any": {
-			p:        Any,
-			expected: "any",
-		},
-	}
-
-	for k, tc := range cases {
-		if actual := tc.p.Hash(); tc.expected != actual {
-			t.Errorf("%s: got %#v, expected %#v", k, actual, tc.expected)
-		}
-	}
-}
-
 func TestArrayIsCompatible(t *testing.T) {
 	var (
 		b  = true
@@ -727,27 +714,27 @@ func TestArrayIsCompatible(t *testing.T) {
 	)
 	cases := map[string]struct {
 		typ      DataType
-		values   []interface{}
+		values   []any
 		expected bool
 	}{
 		"compatible": {
 			typ:      Int,
-			values:   []interface{}{ia, is},
+			values:   []any{ia, is},
 			expected: true,
 		},
 		"not array and slice": {
 			typ:      String,
-			values:   []interface{}{b, i},
+			values:   []any{b, i},
 			expected: false,
 		},
 		"array but not compatible": {
 			typ:      String,
-			values:   []interface{}{ia},
+			values:   []any{ia},
 			expected: false,
 		},
 		"slice but not compatible": {
 			typ:      String,
-			values:   []interface{}{is},
+			values:   []any{is},
 			expected: false,
 		},
 	}
@@ -807,82 +794,6 @@ func TestObjectRename(t *testing.T) {
 	}
 }
 
-func TestObjectHash(t *testing.T) {
-	var (
-		attributeInt = &AttributeExpr{
-			Type: Int,
-		}
-		attributeString = &AttributeExpr{
-			Type: String,
-		}
-		attributeArray = &AttributeExpr{
-			Type: &Array{
-				ElemType: attributeString,
-			},
-		}
-		attributeMap = &AttributeExpr{
-			Type: &Map{
-				KeyType:  attributeInt,
-				ElemType: attributeString,
-			},
-		}
-		userType = &UserTypeExpr{
-			AttributeExpr: attributeString,
-			TypeName:      "quux",
-		}
-		namedAttributePrimitive = &NamedAttributeExpr{
-			Name:      "foo",
-			Attribute: attributeInt,
-		}
-		namedAttributeArray = &NamedAttributeExpr{
-			Name:      "bar",
-			Attribute: attributeArray,
-		}
-		namedAttributeMap = &NamedAttributeExpr{
-			Name:      "baz",
-			Attribute: attributeMap,
-		}
-		namedAttributeUserType = &NamedAttributeExpr{
-			Name: "qux",
-			Attribute: &AttributeExpr{
-				Type: userType,
-			},
-		}
-	)
-	cases := map[string]struct {
-		object   Object
-		expected string
-	}{
-		"nil": {
-			object:   nil,
-			expected: "_object_",
-		},
-		"single attribute": {
-			object: Object{
-				namedAttributePrimitive,
-			},
-			expected: "_object_+foo/int",
-		},
-		"multiple attributes": {
-			object: Object{
-				namedAttributePrimitive,
-				namedAttributeArray,
-				namedAttributeMap,
-				namedAttributeUserType,
-			},
-			expected: "_object_+foo/int+bar/_array_+string+baz/_map_+int:string+qux/_type_+quux",
-		},
-	}
-
-	for k, tc := range cases {
-		t.Run(k, func(t *testing.T) {
-			if actual := tc.object.Hash(); actual != tc.expected {
-				t.Errorf("got %#v, expected %#v", actual, tc.expected)
-			}
-		})
-	}
-}
-
 func TestObjectIsCompatible(t *testing.T) {
 	var (
 		b = true
@@ -895,15 +806,15 @@ func TestObjectIsCompatible(t *testing.T) {
 		m = map[int]string{}
 	)
 	cases := map[string]struct {
-		values   []interface{}
+		values   []any
 		expected bool
 	}{
 		"compatible": {
-			values:   []interface{}{s, m},
+			values:   []any{s, m},
 			expected: true,
 		},
 		"not comatible": {
-			values:   []interface{}{b, i},
+			values:   []any{b, i},
 			expected: false,
 		},
 	}
@@ -933,19 +844,19 @@ func TestMapIsCompatible(t *testing.T) {
 		}
 	)
 	cases := map[string]struct {
-		values   []interface{}
+		values   []any
 		expected bool
 	}{
 		"compatible": {
-			values:   []interface{}{ism},
+			values:   []any{ism},
 			expected: true,
 		},
 		"not comatible": {
-			values:   []interface{}{b, i},
+			values:   []any{b, i},
 			expected: false,
 		},
 		"map but not comatible": {
-			values:   []interface{}{ssm, iim},
+			values:   []any{ssm, iim},
 			expected: false,
 		},
 	}
@@ -964,6 +875,138 @@ func TestMapIsCompatible(t *testing.T) {
 				t.Errorf("%s: got %#v, expected %#v", k, actual, tc.expected)
 			}
 		}
+	}
+}
+
+func TestUnionGetTypeKey(t *testing.T) {
+	cases := map[string]struct {
+		typeKey  string
+		expected string
+	}{
+		"default": {
+			typeKey:  "",
+			expected: "type",
+		},
+		"custom": {
+			typeKey:  "kind",
+			expected: "kind",
+		},
+		"discriminator": {
+			typeKey:  "discriminator",
+			expected: "discriminator",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			union := &Union{
+				TypeName: "TestUnion",
+				TypeKey:  tc.typeKey,
+			}
+			if actual := union.GetTypeKey(); actual != tc.expected {
+				t.Errorf("got %q, expected %q", actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestUnionExampleAndCompatibilityUseTaggedEnvelope(t *testing.T) {
+	union := &Union{
+		TypeName: "Outcome",
+		TypeKey:  "kind",
+		ValueKey: "data",
+		Values: []*NamedAttributeExpr{
+			{Name: "text", Attribute: &AttributeExpr{Type: String}},
+			{Name: "count", Attribute: &AttributeExpr{Type: Int}},
+		},
+	}
+
+	example := union.Example(NewExampleGenerator(NewFakerRandomizerFactory("test")).At(
+		MethodPayloadExampleIdentity(&MethodExpr{
+			Name:    "union",
+			Service: &ServiceExpr{Name: "test"},
+		}),
+	))
+	envelope, ok := example.(map[string]any)
+	if !ok {
+		t.Fatalf("expected tagged envelope, got %T", example)
+	}
+	if !union.IsCompatible(envelope) {
+		t.Fatalf("generated example is not compatible: %#v", envelope)
+	}
+	if union.IsCompatible(map[string]any{"kind": "text", "data": 3}) {
+		t.Fatal("expected mismatched branch value to be incompatible")
+	}
+	if union.IsCompatible("plain branch value") {
+		t.Fatal("expected untagged branch value to be incompatible")
+	}
+}
+
+func TestUnionGetValueKey(t *testing.T) {
+	cases := map[string]struct {
+		valueKey string
+		expected string
+	}{
+		"default": {
+			valueKey: "",
+			expected: "value",
+		},
+		"custom": {
+			valueKey: "data",
+			expected: "data",
+		},
+		"payload": {
+			valueKey: "payload",
+			expected: "payload",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			union := &Union{
+				TypeName: "TestUnion",
+				ValueKey: tc.valueKey,
+			}
+			if actual := union.GetValueKey(); actual != tc.expected {
+				t.Errorf("got %q, expected %q", actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestUnionDupPreservesCustomKeys(t *testing.T) {
+	original := &Union{
+		TypeName: "TestUnion",
+		TypeKey:  "kind",
+		ValueKey: "data",
+		Values: []*NamedAttributeExpr{
+			{
+				Name: "String",
+				Attribute: &AttributeExpr{
+					Type: String,
+				},
+			},
+		},
+	}
+
+	duplicated := Dup(original)
+
+	dup, ok := duplicated.(*Union)
+	if !ok {
+		t.Fatalf("expected *Union, got %T", duplicated)
+	}
+
+	if dup.TypeKey != original.TypeKey {
+		t.Errorf("TypeKey: got %q, expected %q", dup.TypeKey, original.TypeKey)
+	}
+	if dup.ValueKey != original.ValueKey {
+		t.Errorf("ValueKey: got %q, expected %q", dup.ValueKey, original.ValueKey)
+	}
+	if dup.GetTypeKey() != original.GetTypeKey() {
+		t.Errorf("GetTypeKey(): got %q, expected %q", dup.GetTypeKey(), original.GetTypeKey())
+	}
+	if dup.GetValueKey() != original.GetValueKey() {
+		t.Errorf("GetValueKey(): got %q, expected %q", dup.GetValueKey(), original.GetValueKey())
 	}
 }
 

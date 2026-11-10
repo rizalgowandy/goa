@@ -1,3 +1,5 @@
+// This file defines HTTP error response designs used by transport codegen
+// tests, including reusable API mappings and service-level error contracts.
 package testdata
 
 import (
@@ -148,7 +150,7 @@ var APINoBodyErrorResponseDSL = func() {
 		})
 	})
 	Service("ServiceNoBodyErrorResponse", func() {
-		Error("bad_request")
+		Error("bad_request", StringError)
 		Method("MethodServiceErrorResponse", func() {
 			HTTP(func() {
 				GET("/one/two")
@@ -171,7 +173,7 @@ var APINoBodyErrorResponseWithContentTypeDSL = func() {
 		})
 	})
 	Service("ServiceNoBodyErrorResponse", func() {
-		Error("bad_request")
+		Error("bad_request", StringError)
 		Method("MethodServiceErrorResponse", func() {
 			HTTP(func() {
 				GET("/one/two")
@@ -212,6 +214,61 @@ var NoBodyErrorResponseWithContentTypeDSL = func() {
 		Method("MethodServiceErrorResponse", func() {
 			HTTP(func() {
 				GET("/one/two")
+			})
+		})
+	})
+}
+
+var ErrorExamplesDSL = func() {
+	var customType = ResultType("application/vnd.goa.custom-error", func() {
+		TypeName("CustomError")
+		Attribute("message", String, func() {
+			Example("error message")
+		})
+		ErrorName("name", String, func() {
+			Example("custom")
+		})
+		Required("name", "message")
+	})
+
+	var _ = Service("Errors", func() {
+		Method("Error", func() {
+			Error("not_found") // default example
+			Error("retry", func() {
+				Temporary()
+			})
+			Error("deadline", func() {
+				Timeout()
+			})
+			Error("retry_deadline", func() {
+				Temporary()
+				Timeout()
+			})
+			Error("internal", func() {
+				Fault()
+			})
+			Error("bad_request", func() {
+				Example("BadRequest example", func() {
+					Value(Val{
+						"id":        "foo",
+						"name":      "bad_request",
+						"message":   "request is invalid",
+						"fault":     false,
+						"timeout":   false,
+						"temporary": false,
+					})
+				})
+			})
+			Error("custom", customType)
+			HTTP(func() {
+				GET("/")
+				Response("not_found", StatusNotFound)
+				Response("retry", StatusTooManyRequests)
+				Response("deadline", StatusGatewayTimeout)
+				Response("retry_deadline", StatusServiceUnavailable)
+				Response("internal", StatusInternalServerError)
+				Response("bad_request", StatusBadRequest)
+				Response("custom", StatusConflict)
 			})
 		})
 	})

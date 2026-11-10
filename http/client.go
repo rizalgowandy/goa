@@ -2,14 +2,15 @@ package http
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 type (
@@ -50,8 +51,19 @@ type (
 		Timeout bool
 		// Is the error a server-side fault?
 		Fault bool
+		// The original error if any
+		Err error
 	}
 )
+
+func (c ClientError) Unwrap() error {
+	return c.Err
+}
+
+// Retryable reports whether repeating an idempotent request may succeed.
+func (c ClientError) Retryable() bool {
+	return c.Temporary
+}
 
 // NewDebugDoer wraps the given doer and captures the request and response so
 // they can be printed.
@@ -63,8 +75,8 @@ func NewDebugDoer(d Doer) DebugDoer {
 func (dd *debugDoer) Do(req *http.Request) (*http.Response, error) {
 	var reqb []byte
 	if req.Body != nil {
-		reqb, _ = ioutil.ReadAll(req.Body)
-		req.Body = ioutil.NopCloser(bytes.NewBuffer(reqb))
+		reqb, _ = io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewBuffer(reqb))
 	}
 
 	resp, err := dd.Doer.Do(req)
@@ -73,15 +85,15 @@ func (dd *debugDoer) Do(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	respb, err := ioutil.ReadAll(resp.Body)
+	respb, err := io.ReadAll(resp.Body)
 	if err != nil {
-		respb = []byte(fmt.Sprintf("!!failed to read response: %s", err))
+		respb = fmt.Appendf(nil, "!!failed to read response: %s", err)
 	}
-	resp.Body = ioutil.NopCloser(bytes.NewBuffer(respb))
+	resp.Body = io.NopCloser(bytes.NewBuffer(respb))
 
 	dd.Response = resp
 
-	req.Body = ioutil.NopCloser(bytes.NewBuffer(reqb))
+	req.Body = io.NopCloser(bytes.NewBuffer(reqb))
 	dd.Request = req
 
 	dd.Fprint(os.Stderr)
@@ -95,7 +107,7 @@ func (dd *debugDoer) Fprint(w io.Writer) {
 		return
 	}
 	buf := &bytes.Buffer{}
-	buf.WriteString(fmt.Sprintf("> %s %s", dd.Request.Method, dd.Request.URL.String()))
+	fmt.Fprintf(buf, "> %s %s", dd.Request.Method, dd.Request.URL.String())
 
 	keys := make([]string, len(dd.Request.Header))
 	i := 0
@@ -105,21 +117,21 @@ func (dd *debugDoer) Fprint(w io.Writer) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		buf.WriteString(fmt.Sprintf("\n> %s: %s", k, strings.Join(dd.Request.Header[k], ", ")))
+		fmt.Fprintf(buf, "\n> %s: %s", k, strings.Join(dd.Request.Header[k], ", ")) // nolint: errcheck
 	}
 
-	b, _ := ioutil.ReadAll(dd.Request.Body)
+	b, _ := io.ReadAll(dd.Request.Body)
 	if len(b) > 0 {
-		dd.Request.Body = ioutil.NopCloser(bytes.NewBuffer(b)) // reset the request body
-		buf.WriteByte('\n')
-		buf.Write(b)
+		dd.Request.Body = io.NopCloser(bytes.NewBuffer(b)) // reset the request body
+		buf.WriteByte('\n')                                // nolint: errcheck
+		buf.Write(b)                                       // nolint: errcheck
 	}
 
 	if dd.Response == nil {
-		w.Write(buf.Bytes())
+		w.Write(buf.Bytes()) // nolint: errcheck
 		return
 	}
-	buf.WriteString(fmt.Sprintf("\n< %s", dd.Response.Status))
+	fmt.Fprintf(buf, "\n< %s", dd.Response.Status)
 
 	keys = make([]string, len(dd.Response.Header))
 	i = 0
@@ -129,27 +141,27 @@ func (dd *debugDoer) Fprint(w io.Writer) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		buf.WriteString(fmt.Sprintf("\n< %s: %s", k, strings.Join(dd.Response.Header[k], ", ")))
+		fmt.Fprintf(buf, "\n< %s: %s", k, strings.Join(dd.Response.Header[k], ", ")) // nolint: errcheck
 	}
 
-	rb, _ := ioutil.ReadAll(dd.Response.Body) // this is reading from a memory buffer so safe to ignore errors
+	rb, _ := io.ReadAll(dd.Response.Body) // this is reading from a memory buffer so safe to ignore errors
 	if len(rb) > 0 {
-		dd.Response.Body = ioutil.NopCloser(bytes.NewBuffer(rb)) // reset the response body
-		buf.WriteByte('\n')
-		buf.Write(rb)
+		dd.Response.Body = io.NopCloser(bytes.NewBuffer(rb)) // reset the response body
+		buf.WriteByte('\n')                                  // nolint: errcheck
+		buf.Write(rb)                                        // nolint: errcheck
 	}
-	w.Write(buf.Bytes())
-	w.Write([]byte{'\n'})
+	w.Write(buf.Bytes())  // nolint: errcheck
+	w.Write([]byte{'\n'}) // nolint: errcheck
 }
 
 // Error builds an error message.
-func (c *ClientError) Error() string {
+func (c ClientError) Error() string {
 	return fmt.Sprintf("[%s %s]: %s", c.Service, c.Method, c.Message)
 }
 
 // ErrInvalidType is the error returned when the wrong type is given to a
 // method function.
-func ErrInvalidType(svc, m, expected string, actual interface{}) error {
+func ErrInvalidType(svc, m, expected string, actual any) error {
 	msg := fmt.Sprintf("invalid value expected %s, got %v", expected, actual)
 	return &ClientError{Name: "invalid_type", Message: msg, Service: svc, Method: m}
 }
@@ -158,28 +170,35 @@ func ErrInvalidType(svc, m, expected string, actual interface{}) error {
 // request body.
 func ErrEncodingError(svc, m string, err error) error {
 	msg := fmt.Sprintf("failed to encode request body: %s", err)
-	return &ClientError{Name: "encoding_error", Message: msg, Service: svc, Method: m}
+	return &ClientError{Name: "encoding_error", Message: msg, Service: svc, Method: m, Err: err}
 }
 
 // ErrInvalidURL is the error returned when the URL computed for an method is
 // invalid.
 func ErrInvalidURL(svc, m, u string, err error) error {
 	msg := fmt.Sprintf("invalid URL %s: %s", u, err)
-	return &ClientError{Name: "invalid_url", Message: msg, Service: svc, Method: m}
+	return &ClientError{Name: "invalid_url", Message: msg, Service: svc, Method: m, Err: err}
 }
 
-// ErrDecodingError is the error returned when the decoder fails to decode the
+// ErrDecodingError reports a failure while reading, decoding, or closing a
 // response body.
 func ErrDecodingError(svc, m string, err error) error {
 	msg := fmt.Sprintf("failed to decode response body: %s", err)
-	return &ClientError{Name: "decoding_error", Message: msg, Service: svc, Method: m}
+	return &ClientError{
+		Name:      "decoding_error",
+		Message:   msg,
+		Service:   svc,
+		Method:    m,
+		Temporary: retryableRequestError(err),
+		Err:       err,
+	}
 }
 
 // ErrValidationError is the error returned when the response body is properly
 // received and decoded but fails validation.
 func ErrValidationError(svc, m string, err error) error {
 	msg := fmt.Sprintf("invalid response: %s", err)
-	return &ClientError{Name: "validation_error", Message: msg, Service: svc, Method: m}
+	return &ClientError{Name: "validation_error", Message: msg, Service: svc, Method: m, Err: err}
 }
 
 // ErrInvalidResponse is the error returned when the service responded with an
@@ -191,9 +210,12 @@ func ErrInvalidResponse(svc, m string, code int, body string) error {
 	}
 	msg := fmt.Sprintf("invalid response code %#v"+b+"%s", code, body)
 
-	temporary := code == http.StatusServiceUnavailable ||
+	temporary := code == http.StatusRequestTimeout ||
 		code == http.StatusConflict ||
+		code == http.StatusTooEarly ||
 		code == http.StatusTooManyRequests ||
+		code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable ||
 		code == http.StatusGatewayTimeout
 
 	timeout := code == http.StatusRequestTimeout ||
@@ -209,12 +231,30 @@ func ErrInvalidResponse(svc, m string, code int, body string) error {
 
 // ErrRequestError is the error returned when the request fails to be sent.
 func ErrRequestError(svc, m string, err error) error {
-	temporary := false
 	timeout := false
-	if nerr, ok := err.(net.Error); ok {
-		temporary = nerr.Temporary()
+	var nerr net.Error
+	if errors.As(err, &nerr) {
 		timeout = nerr.Timeout()
 	}
 	return &ClientError{Name: "request_error", Message: err.Error(), Service: svc, Method: m,
-		Temporary: temporary, Timeout: timeout}
+		Temporary: retryableRequestError(err), Timeout: timeout, Err: err}
+}
+
+// retryableRequestError recognizes connection and response-body failures that
+// can succeed when a replay-safe request uses a new connection.
+func retryableRequestError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var dnserr *net.DNSError
+	if errors.As(err, &dnserr) && dnserr.IsTemporary {
+		return true
+	}
+	var nerr net.Error
+	return errors.As(err, &nerr) && nerr.Timeout()
 }

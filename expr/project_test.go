@@ -1,13 +1,23 @@
+// This file verifies result-type projections preserve view shape, field
+// metadata, recursion, and synthesized example ownership.
 package expr
 
 import (
-	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
-	testrand = NewRandom("test")
+	testrand = NewExampleGenerator(NewFakerRandomizerFactory("test")).At(
+		MethodPayloadExampleIdentity(&MethodExpr{
+			Name:    "project",
+			Service: &ServiceExpr{Name: "test"},
+		}),
+	)
 
 	simpleResult        = resultType("a", String, "b", Int, view("default", "a", String, "b", Int), view("link", "a", String))
 	simpleResultDefault = resultType("a", String, "b", Int)
@@ -27,7 +37,9 @@ var (
 	compositeResultDefault = resultType("a", object(collectionResultDefault), "b", String)
 	compositeResultLink    = resultType("a", object(collectionResultLink))
 
-	recursiveResult = resultRecursive("a", String, "r", simpleResult, view("default", "a", String, "r", AsObject(simpleResult)))
+	// recursiveResult is its own expected projection: projecting a recursive
+	// result type yields a single projected type that references itself.
+	recursiveResult = resultRecursive("a", String, view("default", "a", object(String)))
 )
 
 func init() {
@@ -58,18 +70,212 @@ func TestProject(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !Equal(projected, k.Expected) {
-				pj, err := json.MarshalIndent(projected.Example(testrand), "  ", "  ")
-				if err != nil {
-					t.Fatal(err)
+				projected.Debug("got")
+				k.Expected.Debug("expected")
+				t.Errorf("got: %s, expected: %s\n", Hash(projected, false, true, true), Hash(k.Expected, false, true, true))
+			}
+			if pobj := AsObject(projected.Type); pobj != nil {
+				for _, att := range *pobj {
+					att2 := k.Expected.Find(att.Name)
+					if att2 == nil {
+						continue
+					}
+					if att.Attribute.Description != att2.Description {
+						t.Errorf("got description %q, expected %q", att.Attribute.Description, att2.Description)
+					}
 				}
-				ej, err := json.MarshalIndent(k.Expected.Example(testrand), "  ", "  ")
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Errorf("projected type\n%s\ndoes not match expectation\n%s", string(pj), string(ej))
 			}
 		})
 	}
+}
+
+func TestProjectUnionBranchViews(t *testing.T) {
+	for _, flatten := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flatten=%t", flatten), func(t *testing.T) {
+			choice := &Union{
+				TypeName: "Outcome", TypeKey: "resultType", ValueKey: "data", Flatten: flatten,
+				Values: []*NamedAttributeExpr{
+					{Name: "public", Attribute: &AttributeExpr{Type: simpleResult, Meta: MetaExpr{ViewMetaKey: {"link"}}}},
+					{Name: "full", Attribute: &AttributeExpr{Type: simpleResult}},
+				},
+			}
+			source := resultType("choice", choice, view("default", "choice", choice))
+			projected, err := Project(source, DefaultView)
+			require.NoError(t, err)
+			union := AsUnion(projected.Find("choice").Type)
+			require.NotSame(t, choice, union)
+			require.Equal(t, flatten, union.Flatten)
+			require.Equal(t, "resultType", union.TypeKey)
+			require.Equal(t, "data", union.ValueKey)
+			require.Len(t, *AsObject(union.Values[0].Attribute.Type), 1)
+			require.Len(t, *AsObject(union.Values[1].Attribute.Type), 2)
+			require.Len(t, *AsObject(choice.Values[0].Attribute.Type), 2)
+			require.Equal(t, "link", union.Values[0].Attribute.Meta[ViewMetaKey][0])
+		})
+	}
+}
+
+func TestProjectPreservesGeneratedExampleIdentity(t *testing.T) {
+	source := resultType("value", String, view("default", "value", String))
+	owner := MethodResultExampleIdentity(&MethodExpr{
+		Name:    "read",
+		Service: &ServiceExpr{Name: "values"},
+	})
+	source.UserTypeExpr = NewGeneratedUserType(source.TypeName, source.AttributeExpr, owner)
+
+	projected, err := Project(source, DefaultView)
+	require.NoError(t, err)
+	projectedOwner, ok := GeneratedUserTypeExampleIdentity(projected)
+	require.True(t, ok)
+	require.Equal(t, owner, projectedOwner)
+}
+
+// TestProjectDoesNotAliasFieldAttributes verifies that fields sharing a type
+// share the projected type but never the AttributeExpr wrapping it, so that
+// per-field metadata such as descriptions does not leak across fields.
+func TestProjectDoesNotAliasFieldAttributes(t *testing.T) {
+	t.Run("sibling user type fields", func(t *testing.T) {
+		shared := userType("Shared", object(Int))
+		rt := resultType("a", shared, "b", shared,
+			view("default", "a", object(Int), "b", object(Int)))
+
+		projected, err := Project(rt, "default")
+		require.NoError(t, err)
+
+		obj := AsObject(projected.Type)
+		a, b := obj.Attribute("a"), obj.Attribute("b")
+		assert.NotSame(t, a, b)
+		assert.Equal(t, "desc a", a.Description)
+		assert.Equal(t, "desc b", b.Description)
+		assert.Same(t, a.Type, b.Type)
+	})
+
+	t.Run("sibling result type fields", func(t *testing.T) {
+		rt := resultType("x", simpleResult, "y", simpleResult,
+			view("default", "x", AsObject(simpleResult), "y", AsObject(simpleResult)))
+
+		projected, err := Project(rt, "default")
+		require.NoError(t, err)
+
+		obj := AsObject(projected.Type)
+		x, y := obj.Attribute("x"), obj.Attribute("y")
+		assert.NotSame(t, x, y)
+		assert.Equal(t, "desc x", x.Description)
+		assert.Equal(t, "desc y", y.Description)
+		assert.Same(t, x.Type, y.Type)
+	})
+
+	t.Run("same field in different parent types", func(t *testing.T) {
+		shared := userType("Shared", object(Int))
+		wrapper := userType("Wrapper", &Object{
+			{Name: "a", Attribute: &AttributeExpr{Type: shared, Description: "Inner A"}},
+		})
+		rt := resultType("a", shared, "nested", wrapper,
+			view("default",
+				"a", object(Int),
+				"nested", &Object{{Name: "a", Attribute: &AttributeExpr{Type: object(Int)}}}))
+
+		projected, err := Project(rt, "default")
+		require.NoError(t, err)
+
+		obj := AsObject(projected.Type)
+		outer := obj.Attribute("a")
+		assert.Equal(t, "desc a", outer.Description)
+		inner := AsObject(obj.Attribute("nested").Type).Attribute("a")
+		assert.NotSame(t, outer, inner)
+		assert.Equal(t, "Inner A", inner.Description)
+		assert.Same(t, outer.Type, inner.Type)
+	})
+
+	t.Run("recursive result type references its own projection", func(t *testing.T) {
+		projected, err := Project(recursiveResult, "default")
+		require.NoError(t, err)
+
+		rec := AsObject(projected.Type).Attribute("rec")
+		assert.Equal(t, "desc rec", rec.Description)
+		assert.Same(t, projected, rec.Type)
+	})
+
+	t.Run("explicit view copied before inheritance finalization unifies recursive user type", func(t *testing.T) {
+		minLen := 2
+		node := &UserTypeExpr{
+			TypeName:      "Node",
+			AttributeExpr: &AttributeExpr{Type: &Object{}},
+		}
+		ancestor := &UserTypeExpr{
+			TypeName: "Ancestor",
+			AttributeExpr: &AttributeExpr{
+				Type: &Object{
+					{Name: "query", Attribute: &AttributeExpr{
+						Type:       String,
+						Validation: &ValidationExpr{MinLength: &minLen},
+					}},
+					{Name: "back", Attribute: &AttributeExpr{Type: node}},
+				},
+				Validation: &ValidationExpr{Required: []string{"query"}},
+			},
+		}
+		base := &UserTypeExpr{
+			TypeName: "Base",
+			AttributeExpr: &AttributeExpr{
+				Type:  &Object{},
+				Bases: []DataType{ancestor},
+			},
+		}
+		derived := &UserTypeExpr{
+			TypeName: "Derived",
+			AttributeExpr: &AttributeExpr{
+				Type:  &Object{},
+				Bases: []DataType{base},
+			},
+		}
+		*AsObject(node.Type) = Object{
+			{Name: "self", Attribute: &AttributeExpr{Type: node}},
+			{Name: "nested", Attribute: &AttributeExpr{
+				Type: &Object{
+					{Name: "extra", Attribute: &AttributeExpr{Type: String}},
+				},
+				Bases: []DataType{derived},
+			}},
+		}
+		rt := &ResultTypeExpr{
+			UserTypeExpr: &UserTypeExpr{
+				TypeName: "Document",
+				AttributeExpr: &AttributeExpr{
+					Type: &Object{
+						{Name: "node", Attribute: &AttributeExpr{Type: node}},
+					},
+				},
+			},
+			Identifier: "application/vnd.test.document",
+		}
+		viewNode := DupAttForDSL(rt.Find("node"))
+		rt.Views = []*ViewExpr{{
+			Name: DefaultView,
+			AttributeExpr: &AttributeExpr{
+				Type: &Object{
+					{Name: "node", Attribute: viewNode},
+				},
+			},
+			Parent: rt,
+		}}
+
+		ancestor.Finalize()
+		base.Finalize()
+		derived.Finalize()
+		node.Finalize()
+		rt.Finalize()
+
+		projected, err := Project(rt, DefaultView)
+		require.NoError(t, err)
+		projNode := AsObject(projected.Type).Attribute("node").Type
+		projSelf := AsObject(projNode).Attribute("self").Type
+		projNested := AsObject(projNode).Attribute("nested")
+		projBack := AsObject(projNested.Type).Attribute("back").Type
+		assert.Same(t, projNode, projSelf)
+		assert.Same(t, projNode, projBack)
+		assert.NotNil(t, AsObject(projNested.Type).Attribute("query"))
+	})
 }
 
 // view is a helper function for building view expressions used in tests. name
@@ -77,7 +283,7 @@ func TestProject(t *testing.T) {
 // by the view. name may use the format "name:view" in which case view is the
 // name of the view used to render the attribute (when its type is a result
 // type).
-func view(name string, params ...interface{}) *ViewExpr {
+func view(name string, params ...any) *ViewExpr {
 	var obj Object = make([]*NamedAttributeExpr, len(params)/2)
 	for i := 0; i < len(params); i += 2 {
 		var (
@@ -106,9 +312,8 @@ func view(name string, params ...interface{}) *ViewExpr {
 // tests. The arguments is a list of attribute name and type pairs followed by a
 // list of view expressions, e.g.:
 //
-//    resultType("attr1", String, "attr2", Int, view1, view2)
-//
-func resultType(params ...interface{}) *ResultTypeExpr {
+//	resultType("attr1", String, "attr2", Int, view1, view2)
+func resultType(params ...any) *ResultTypeExpr {
 	var (
 		views []*ViewExpr
 		obj   Object
@@ -117,9 +322,11 @@ func resultType(params ...interface{}) *ResultTypeExpr {
 		switch pt := p.(type) {
 		case string:
 			obj = append(obj, &NamedAttributeExpr{
-				Name:      params[i].(string),
-				Attribute: &AttributeExpr{Type: params[i+1].(DataType)},
-			})
+				Name: params[i].(string),
+				Attribute: &AttributeExpr{
+					Type:        params[i+1].(DataType),
+					Description: fmt.Sprintf("desc %s", params[i]),
+				}})
 		case *ViewExpr:
 			views = append(views, pt)
 		}
@@ -149,9 +356,9 @@ func collection(elemType *ResultTypeExpr) *ResultTypeExpr {
 	}
 }
 
-func resultRecursive(params ...interface{}) *ResultTypeExpr {
+func resultRecursive(params ...any) *ResultTypeExpr {
 	rt := resultType(params...)
-	recAtt := &NamedAttributeExpr{Name: "rec", Attribute: &AttributeExpr{Type: rt}}
+	recAtt := &NamedAttributeExpr{Name: "rec", Attribute: &AttributeExpr{Type: rt, Description: "desc rec"}}
 	obj := AsObject(rt)
 	*obj = append(*obj, recAtt)
 	for _, v := range rt.Views {

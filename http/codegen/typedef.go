@@ -1,3 +1,6 @@
+// This file generates HTTP and JSON-RPC body structs from their transport
+// attributes. Body fields use the designed HTTP names unless a complete struct
+// tag overrides them; internal JSON names remain on the service structs.
 package codegen
 
 import (
@@ -12,11 +15,11 @@ import (
 // It differs from the function defined in the codegen package in the following
 // ways:
 //
-//    - It defines marshaler tags on each fields using the HTTP element names.
+//   - It defines marshaler tags on each fields using the HTTP element names.
 //
-//    - It produced fields with pointers even if the corresponding attribute is
-//      required when ptr is true so that the generated code may validate
-//      explicitly.
+//   - It produced fields with pointers even if the corresponding attribute is
+//     required when ptr is true so that the generated code may validate
+//     explicitly.
 //
 // useDefault directs whether fields holding primitive types with default values
 // should hold pointers when ptr is false. If it is true then the fields are
@@ -24,24 +27,29 @@ import (
 // default value so cannot be nil) otherwise the fields are values only when
 // required.
 func goTypeDef(scope *codegen.NameScope, att *expr.AttributeExpr, ptr, useDefault bool) string {
+	ctx := codegen.NewAttributeContext(ptr, false, useDefault, "", scope)
+	ctx.UnionPointer = true
+	return goTypeDefForContext(att, ctx)
+}
+
+// goTypeDefForContext recursively renders an HTTP body type using the same
+// field representation consulted by transport conversion and validation.
+func goTypeDefForContext(att *expr.AttributeExpr, ctx *codegen.AttributeContext) string {
 	switch actual := att.Type.(type) {
 	case expr.Primitive:
-		if t, _ := codegen.GetMetaType(att); t != "" {
-			return t
-		}
-		return codegen.GoNativeTypeName(actual)
+		return ctx.Scope.Name(att, ctx.Pkg(att), ctx.Pointer, ctx.UseDefault)
 	case *expr.Array:
-		d := goTypeDef(scope, actual.ElemType, ptr, useDefault)
-		if expr.IsObject(actual.ElemType.Type) {
+		d := goTypeDefForContext(actual.ElemType, ctx)
+		if expr.IsObject(actual.ElemType.Type) || ctx.IsArrayElementPointer(actual) {
 			d = "*" + d
 		}
 		return "[]" + d
 	case *expr.Map:
-		keyDef := goTypeDef(scope, actual.KeyType, ptr, useDefault)
+		keyDef := goTypeDefForContext(actual.KeyType, ctx)
 		if expr.IsObject(actual.KeyType.Type) {
 			keyDef = "*" + keyDef
 		}
-		elemDef := goTypeDef(scope, actual.ElemType, ptr, useDefault)
+		elemDef := goTypeDefForContext(actual.ElemType, ctx)
 		if expr.IsObject(actual.ElemType.Type) {
 			elemDef = "*" + elemDef
 		}
@@ -50,8 +58,7 @@ func goTypeDef(scope *codegen.NameScope, att *expr.AttributeExpr, ptr, useDefaul
 		var ss []string
 		ss = append(ss, "struct {")
 		ma := expr.NewMappedAttributeExpr(att)
-		mat := ma.Attribute()
-		codegen.WalkMappedAttr(ma, func(name, elem string, required bool, at *expr.AttributeExpr) error {
+		codegen.WalkMappedAttr(ma, func(name, elem string, _ bool, at *expr.AttributeExpr) error { // nolint: errcheck
 			var (
 				fn   string
 				tdef string
@@ -59,13 +66,9 @@ func goTypeDef(scope *codegen.NameScope, att *expr.AttributeExpr, ptr, useDefaul
 				tags string
 			)
 			{
-				fn = codegen.GoifyAtt(at, name, true)
-				tdef = goTypeDef(scope, at, ptr, useDefault)
-				if expr.IsPrimitive(at.Type) {
-					if (ptr || mat.IsPrimitivePointer(name, useDefault)) && at.Type != expr.Bytes && at.Type != expr.Any {
-						tdef = "*" + tdef
-					}
-				} else if expr.IsObject(at.Type) {
+				fn = codegen.GoifyAtt(at, elem, true)
+				tdef = goTypeDefForContext(at, ctx)
+				if ctx.IsFieldPointer(name, ma.AttributeExpr) {
 					tdef = "*" + tdef
 				}
 				if at.Description != "" {
@@ -74,31 +77,32 @@ func goTypeDef(scope *codegen.NameScope, att *expr.AttributeExpr, ptr, useDefaul
 				var optional bool
 				{
 					switch {
-					case ptr:
+					case ctx.Pointer:
 						optional = true
-					case useDefault:
+					case ctx.UseDefault:
 						optional = !ma.IsRequired(name) && !ma.HasDefaultValue(name)
 					default:
 						optional = !ma.IsRequired(name)
 					}
 				}
-				tags = attributeTags(mat, at, elem, optional)
+				tags = attributeTags(at, elem, optional)
 			}
 			ss = append(ss, fmt.Sprintf("\t%s%s %s%s", desc, fn, tdef, tags))
 			return nil
 		})
 		ss = append(ss, "}")
 		return strings.Join(ss, "\n")
-	case expr.UserType:
-		return scope.GoTypeName(att)
+	case expr.UserType, *expr.Union:
+		return ctx.Scope.Name(att, ctx.Pkg(att), ctx.Pointer, ctx.UseDefault)
 	default:
 		panic(fmt.Sprintf("unknown data type %T", actual)) // bug
 	}
 }
 
-// attributeTags computes the struct field tags.
-func attributeTags(parent, att *expr.AttributeExpr, t string, optional bool) string {
-	if tags := codegen.AttributeTags(parent, att); tags != "" {
+// attributeTags uses explicit complete tags when supplied and otherwise names
+// body fields from the HTTP design, including optional-field omission.
+func attributeTags(att *expr.AttributeExpr, t string, optional bool) string {
+	if tags := codegen.AttributeTags(att); tags != "" {
 		return tags
 	}
 	var o string

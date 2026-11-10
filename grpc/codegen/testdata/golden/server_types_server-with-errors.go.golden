@@ -1,0 +1,62 @@
+// NewMethodUnaryRPCWithErrorsPayload builds string from
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsRequest.
+func NewMethodUnaryRPCWithErrorsPayload(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsRequest) string {
+	v := *message.Field
+	return v
+}
+
+// NewProtoMethodUnaryRPCWithErrorsResponse builds
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsResponse from
+// string.
+func NewProtoMethodUnaryRPCWithErrorsResponse(result string) *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsResponse {
+	message := &service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsResponse{}
+	message.Field = new(string)
+	*message.Field = result
+	return message
+}
+
+// NewMethodUnaryRPCWithErrorsInternalError builds
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsInternalError from
+// *serviceunaryrpcwitherrors.AnotherError.
+func NewMethodUnaryRPCWithErrorsInternalError(er *serviceunaryrpcwitherrors.AnotherError) *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsInternalError {
+	message := &service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsInternalError{
+		Name: &er.Name,
+	}
+	if er.Description != nil {
+		message.Description = er.Description
+	}
+	return message
+}
+
+// NewMethodUnaryRPCWithErrorsBadRequestError builds
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsBadRequestError
+// from *serviceunaryrpcwitherrors.AnotherError.
+func NewMethodUnaryRPCWithErrorsBadRequestError(er *serviceunaryrpcwitherrors.AnotherError) *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsBadRequestError {
+	message := &service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsBadRequestError{
+		Name: &er.Name,
+	}
+	if er.Description != nil {
+		message.Description = er.Description
+	}
+	return message
+}
+
+// NewMethodUnaryRPCWithErrorsCustomErrorError builds
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsCustomErrorError
+// from *serviceunaryrpcwitherrors.ErrorType.
+func NewMethodUnaryRPCWithErrorsCustomErrorError(er *serviceunaryrpcwitherrors.ErrorType) *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsCustomErrorError {
+	message := &service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsCustomErrorError{}
+	if er.A != nil {
+		message.A = er.A
+	}
+	return message
+}
+
+// ValidateMethodUnaryRPCWithErrorsRequest runs the validations defined on
+// MethodUnaryRPCWithErrorsRequest.
+func ValidateMethodUnaryRPCWithErrorsRequest(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsRequest) (err error) {
+	if message.Field == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("field", "message"))
+	}
+	return
+}

@@ -1,0 +1,233 @@
+{
+  "components": {
+    "schemas": {
+      "Error": {
+        "description": "Error response result type",
+        "example": {
+          "fault": false,
+          "id": "123abc",
+          "message": "parameter 'p' must be an integer",
+          "name": "bad_request",
+          "temporary": true,
+          "timeout": true
+        },
+        "properties": {
+          "fault": {
+            "description": "Is the error a server-side fault?",
+            "example": false,
+            "type": "boolean"
+          },
+          "id": {
+            "description": "ID is a unique identifier for this particular occurrence of the problem.",
+            "example": "123abc",
+            "type": "string"
+          },
+          "message": {
+            "description": "Message is a human-readable explanation specific to this occurrence of the problem.",
+            "example": "parameter 'p' must be an integer",
+            "type": "string"
+          },
+          "name": {
+            "description": "Name is the name of this class of errors.",
+            "example": "bad_request",
+            "type": "string"
+          },
+          "temporary": {
+            "description": "Is the error temporary?",
+            "example": true,
+            "type": "boolean"
+          },
+          "timeout": {
+            "description": "Is the error a timeout?",
+            "example": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "id",
+          "message",
+          "temporary",
+          "timeout",
+          "fault"
+        ],
+        "type": "object"
+      },
+      "GoaCustomError": {
+        "example": {
+          "message": "error message",
+          "name": "custom"
+        },
+        "properties": {
+          "message": {
+            "example": "error message",
+            "type": "string"
+          },
+          "name": {
+            "example": "custom",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "message"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Goa API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "Errors#Error",
+        "responses": {
+          "204": {
+            "description": "No Content response."
+          },
+          "400": {
+            "content": {
+              "application/vnd.goa.error": {
+                "example": {
+                  "fault": false,
+                  "id": "foo",
+                  "message": "request is invalid",
+                  "name": "bad_request",
+                  "temporary": false,
+                  "timeout": false
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "bad_request: Bad Request response."
+          },
+          "404": {
+            "content": {
+              "application/vnd.goa.error": {
+                "example": {
+                  "fault": false,
+                  "id": "123abc",
+                  "message": "parameter 'p' must be an integer",
+                  "name": "not_found",
+                  "temporary": false,
+                  "timeout": false
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "not_found: Not Found response."
+          },
+          "409": {
+            "content": {
+              "application/vnd.goa.custom-error": {
+                "example": {
+                  "message": "error message",
+                  "name": "custom"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/GoaCustomError"
+                }
+              }
+            },
+            "description": "custom: Conflict response."
+          },
+          "429": {
+            "content": {
+              "application/vnd.goa.error": {
+                "example": {
+                  "fault": false,
+                  "id": "123abc",
+                  "message": "parameter 'p' must be an integer",
+                  "name": "retry",
+                  "temporary": true,
+                  "timeout": false
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "retry: Too Many Requests response."
+          },
+          "500": {
+            "content": {
+              "application/vnd.goa.error": {
+                "example": {
+                  "fault": true,
+                  "id": "123abc",
+                  "message": "parameter 'p' must be an integer",
+                  "name": "internal",
+                  "temporary": false,
+                  "timeout": false
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "internal: Internal Server Error response."
+          },
+          "503": {
+            "content": {
+              "application/vnd.goa.error": {
+                "example": {
+                  "fault": false,
+                  "id": "123abc",
+                  "message": "parameter 'p' must be an integer",
+                  "name": "retry_deadline",
+                  "temporary": true,
+                  "timeout": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "retry_deadline: Service Unavailable response."
+          },
+          "504": {
+            "content": {
+              "application/vnd.goa.error": {
+                "example": {
+                  "fault": false,
+                  "id": "123abc",
+                  "message": "parameter 'p' must be an integer",
+                  "name": "deadline",
+                  "temporary": false,
+                  "timeout": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "deadline: Gateway Timeout response."
+          }
+        },
+        "summary": "Error Errors",
+        "tags": [
+          "Errors"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Default server for test api",
+      "url": "http://localhost:80"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Errors"
+    }
+  ]
+}

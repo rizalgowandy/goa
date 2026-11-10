@@ -1,0 +1,48 @@
+// NewProtoMethodResultWithCollectionRequest builds
+// *service_result_with_collectionpb.MethodResultWithCollectionRequest from
+// metadata values.
+func NewProtoMethodResultWithCollectionRequest() *service_result_with_collectionpb.MethodResultWithCollectionRequest {
+	message := &service_result_with_collectionpb.MethodResultWithCollectionRequest{}
+	return message
+}
+
+// NewMethodResultWithCollectionResult builds
+// *serviceresultwithcollection.MethodResultWithCollectionResult from
+// *service_result_with_collectionpb.MethodResultWithCollectionResponse.
+func NewMethodResultWithCollectionResult(message *service_result_with_collectionpb.MethodResultWithCollectionResponse) *serviceresultwithcollection.MethodResultWithCollectionResult {
+	result := &serviceresultwithcollection.MethodResultWithCollectionResult{}
+	if message.Result != nil {
+		result.Result = transformProtoResultTToResultT(message.Result)
+	}
+	return result
+}
+
+// transformProtoResultTToResultT builds a value of type
+// *serviceresultwithcollection.ResultT from a value of type
+// *service_result_with_collectionpb.ResultT.
+func transformProtoResultTToResultT(v *service_result_with_collectionpb.ResultT) *serviceresultwithcollection.ResultT {
+	res := &serviceresultwithcollection.ResultT{}
+	if v.CollectionField != nil {
+		res.CollectionField = make([]*serviceresultwithcollection.RT, len(v.CollectionField.Field))
+		for i, val := range v.CollectionField.Field {
+			if val == nil {
+				continue
+			}
+			res.CollectionField[i] = transformProtoRTToRT(val)
+		}
+	}
+
+	return res
+}
+
+// transformProtoRTToRT builds a value of type *serviceresultwithcollection.RT
+// from a value of type *service_result_with_collectionpb.RT.
+func transformProtoRTToRT(v *service_result_with_collectionpb.RT) *serviceresultwithcollection.RT {
+	res := &serviceresultwithcollection.RT{}
+	if v.IntField != nil {
+		intField := int(*v.IntField)
+		res.IntField = &intField
+	}
+
+	return res
+}

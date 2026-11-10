@@ -1,0 +1,19 @@
+// NewServiceMultipartWithParamsAndHeadersMethodMultipartWithParamsAndHeadersDecoder
+// returns a decoder to decode the multipart request for the
+// "ServiceMultipartWithParamsAndHeaders" service
+// "MethodMultipartWithParamsAndHeaders" endpoint.
+func NewServiceMultipartWithParamsAndHeadersMethodMultipartWithParamsAndHeadersDecoder(_ goahttp.Muxer, serviceMultipartWithParamsAndHeadersMethodMultipartWithParamsAndHeadersDecoderFn ServiceMultipartWithParamsAndHeadersMethodMultipartWithParamsAndHeadersDecoderFunc) func(r *http.Request) goahttp.Decoder {
+	return func(r *http.Request) goahttp.Decoder {
+		return goahttp.EncodingFunc(func(v any) error {
+			mr, merr := r.MultipartReader()
+			if merr != nil {
+				return merr
+			}
+			body := v.(*MethodMultipartWithParamsAndHeadersRequestBody)
+			if err := serviceMultipartWithParamsAndHeadersMethodMultipartWithParamsAndHeadersDecoderFn(mr, body); err != nil {
+				return err
+			}
+			return nil
+		})
+	}
+}

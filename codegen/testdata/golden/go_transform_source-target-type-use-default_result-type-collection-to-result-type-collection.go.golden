@@ -1,0 +1,6 @@
+func transform() {
+	target := &ResultTypeCollection{}
+	if source.Collection != nil {
+		target.Collection = transformResultTypeCollectionToResultTypeCollection(source.Collection)
+	}
+}

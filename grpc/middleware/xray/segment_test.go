@@ -6,8 +6,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/pkg/errors"
 	"goa.design/goa/v3/middleware/xray"
+	"goa.design/goa/v3/middleware/xray/xraytest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
@@ -52,7 +56,7 @@ func TestRecordError(t *testing.T) {
 
 func TestRecordResponse(t *testing.T) {
 	cases := map[string]*xray.Request{
-		"with-HTTP.Request":    &xray.Request{Method: "GRPC", URL: "Test.Test"},
+		"with-HTTP.Request":    {Method: "GRPC", URL: "Test.Test"},
 		"without-HTTP.Request": nil,
 	}
 	for k, r := range cases {
@@ -62,18 +66,10 @@ func TestRecordResponse(t *testing.T) {
 				s.HTTP = &xray.HTTP{Request: r}
 			}
 			s.RecordResponse(&wrapperspb.StringValue{Value: "response"})
-			if s.HTTP == nil {
-				t.Fatal("HTTP field is nil")
-			}
-			if s.HTTP.Response == nil {
-				t.Fatal("HTTP Response field is nil")
-			}
-			if s.HTTP.Response.Status != int(codes.OK) {
-				t.Errorf("HTTP Response Status is invalid, expected %d got %d", int(codes.OK), s.HTTP.Response.Status)
-			}
-			if s.HTTP.Response.ContentLength == 0 {
-				t.Error("HTTP Response ContentLength is invalid: expected non-zero value, got 0")
-			}
+			require.NotNil(t, s.HTTP)
+			require.NotNil(t, s.HTTP.Response)
+			assert.Equal(t, int(codes.OK), s.HTTP.Response.Status)
+			assert.Greater(t, s.HTTP.Response.ContentLength, int64(0))
 		})
 	}
 }
@@ -124,29 +120,17 @@ func TestRecordRequest(t *testing.T) {
 
 			s.RecordRequest(ctx, "Test.Test", &wrapperspb.StringValue{Value: "request"}, "remote")
 
-			if s.Namespace != "remote" {
-				t.Errorf("Namespace is invalid, expected \"remote\" got %q", s.Namespace)
-			}
-			if s.HTTP == nil {
-				t.Fatal("HTTP field is nil")
-			}
-			if s.HTTP.Request == nil {
-				t.Fatal("HTTP Request field is nil")
-			}
-			if s.HTTP.Request.ClientIP != ip {
-				t.Errorf("HTTP Request ClientIP is invalid, expected %q got %q", ip, s.HTTP.Request.ClientIP)
-			}
-			if s.HTTP.Request.Method != "GRPC" {
-				t.Errorf("HTTP Request Method is invalid, expected \"GRPC\" got %q", s.HTTP.Request.Method)
-			}
-			if s.HTTP.Request.UserAgent != c.Request.UserAgent {
-				t.Errorf("HTTP Request UserAgent is invalid, expected %q got %q", c.Request.UserAgent, s.HTTP.Request.UserAgent)
-			}
-			if s.HTTP.Request.ContentLength == 0 {
-				t.Error("HTTP Request ContentLength is invalid: expected non-zero value, got 0")
-			}
-			if c.Response != nil && (s.HTTP.Response == nil || c.Response.Status != s.HTTP.Response.Status) {
-				t.Errorf("HTTP Response is invalid, expected %q got %q", c.Response, s.HTTP.Response)
+			assert.Equal(t, "remote", s.Namespace)
+			require.NotNil(t, s.HTTP)
+			require.NotNil(t, s.HTTP.Request)
+			assert.Equal(t, "Test.Test", s.HTTP.Request.URL)
+			assert.Equal(t, ip, s.HTTP.Request.ClientIP)
+			assert.Equal(t, "GRPC", s.HTTP.Request.Method)
+			assert.Equal(t, userAgent, s.HTTP.Request.UserAgent)
+			assert.Greater(t, s.HTTP.Request.ContentLength, int64(0))
+			if c.Response != nil {
+				require.NotNil(t, s.HTTP.Response)
+				assert.Equal(t, c.Response.Status, s.HTTP.Response.Status)
 			}
 		})
 	}
@@ -165,10 +149,16 @@ func TestRace(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"user-agent": []string{"user agent"}})
 	ctx = peer.NewContext(ctx, &peer.Peer{Addr: &mockAddr{"127.0.0.1"}})
 
-	conn, err := net.Dial("udp", udplisten)
+	daemon := xraytest.NewDaemon(t)
+	conn, err := net.Dial("udp", daemon.Addr)
 	if err != nil {
 		t.Fatalf("failed to connect to daemon - %s", err)
 	}
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("close connection: %v", closeErr)
+		}
+	}()
 	s := &GRPCSegment{
 		Segment: xray.NewSegment("hello", xray.NewTraceID(), xray.NewID(), conn),
 	}
@@ -197,7 +187,7 @@ func TestRace(t *testing.T) {
 		wg.Done()
 	}
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		wg.Add(1)
 		go raceFct()
 	}

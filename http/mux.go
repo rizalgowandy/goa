@@ -1,17 +1,22 @@
+// This file matches HTTP requests to registered routes and exposes captured
+// path values to generated servers. It preserves the router's path representation
+// so escaped values are decoded once before reaching service payloads.
 package http
 
 import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
+	"sync"
 
-	"github.com/dimfeld/httptreemux/v5"
+	chi "github.com/go-chi/chi/v5"
 )
 
 type (
 	// Muxer is the HTTP request multiplexer interface used by the generated
-	// code. ServerHTTP must match the HTTP method and URL of each incoming
+	// code. ServeHTTP must match the HTTP method and URL of each incoming
 	// request against the list of registered patterns and call the handler
 	// for the corresponding method and the pattern that most closely
 	// matches the URL.
@@ -50,43 +55,199 @@ type (
 		Vars(*http.Request) map[string]string
 	}
 
-	// mux is the default Muxer implementation. It leverages the
-	// httptreemux router and simply substitutes the syntax used to define
-	// wildcards from ":wildcard" and "*wildcard" to "{wildcard}" and
-	// "{*wildcard}" respectively.
+	// MiddlewareMuxer makes it possible to mount middlewares downstream of the
+	// Muxer.
+	MiddlewareMuxer interface {
+		Muxer
+		// Use appends a middleware to the list of middlewares to be applied
+		// to the Muxer.
+		Use(func(http.Handler) http.Handler)
+	}
+
+	// ResolverMuxer is a MiddlewareMuxer that can resolve the route pattern used
+	// to register the handler for the given request.
+	ResolverMuxer interface {
+		MiddlewareMuxer
+		ResolvePattern(*http.Request) string
+	}
+
+	// mux is the default Muxer implementation.
 	mux struct {
-		*httptreemux.ContextMux
+		chi.Router
+		// protect access to middlewares and handlers
+		mu sync.Mutex
+		// middlewares to be registered before handlers
+		middlewares []func(http.Handler) http.Handler
+		// wildcards maps a method and a pattern to the name of the wildcard
+		// this is needed because chi does not expose the name of the wildcard
+		wildcards map[string]string
 	}
 )
 
-// NewMuxer returns a Muxer implementation based on the httptreemux router.
-func NewMuxer() Muxer {
-	r := httptreemux.NewContextMux()
-	r.EscapeAddedRoutes = true
-	r.NotFoundHandler = func(w http.ResponseWriter, req *http.Request) {
-		ctx := context.WithValue(req.Context(), AcceptTypeKey, req.Header.Get("Accept"))
-		enc := ResponseEncoder(ctx, w)
-		w.WriteHeader(http.StatusNotFound)
-		enc.Encode(NewErrorResponse(fmt.Errorf("404 page not found")))
+// NewMuxer returns a Muxer implementation based on a Chi router.
+//
+// The returned muxer sets r.Pattern (Go 1.22+) on every dispatched request
+// before middlewares run. This allows observability middleware such as
+// otelhttp to read the matched route from r.Pattern for span attributes and
+// metrics. To take advantage of this, register otelhttp as a mux middleware
+// rather than wrapping the mux externally:
+//
+//	mux := goahttp.NewMuxer()
+//	mux.Use(otelhttp.NewMiddleware("service"))
+func NewMuxer() ResolverMuxer {
+	return &mux{
+		Router:    chi.NewRouter(),
+		wildcards: make(map[string]string),
 	}
-	return &mux{r}
 }
 
-// Handle maps the wildcard format used by goa to the one used by httptreemux.
+// wildPath matches a wildcard path segment.
+var wildPath = regexp.MustCompile(`/{\*([a-zA-Z0-9_]+)}`)
+
+// Handle registers the handler function for the given method and pattern.
+// It sets r.Pattern on every matched request to "METHOD /path" (matching the
+// Go 1.22+ convention used by http.ServeMux), enabling observability
+// middleware such as otelhttp to automatically tag spans and metrics with
+// the matched route.
 func (m *mux) Handle(method, pattern string, handler http.HandlerFunc) {
-	m.ContextMux.Handle(method, treemuxify(pattern), handler)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.middlewares != nil {
+		for _, middleware := range m.middlewares {
+			m.Router.Use(middleware)
+		}
+		m.NotFound(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := context.WithValue(req.Context(), AcceptTypeKey, req.Header.Get("Accept"))
+			enc := ResponseEncoder(ctx, w)
+			w.WriteHeader(http.StatusNotFound)
+			enc.Encode(NewErrorResponse(ctx, fmt.Errorf("404 page not found"))) // nolint:errcheck
+		}))
+		m.middlewares = nil
+	}
+	// Capture the registered pattern before wildcard rewriting so we can
+	// populate r.Pattern for downstream consumers.
+	reqPattern := method + " " + pattern
+	if wildcards := wildPath.FindStringSubmatch(pattern); len(wildcards) > 0 {
+		if len(wildcards) > 2 {
+			panic("too many wildcards")
+		}
+		pattern = wildPath.ReplaceAllString(pattern, "/*")
+		m.wildcards[method+"::"+pattern] = wildcards[1]
+	}
+	m.Method(method, pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Pattern = reqPattern
+		handler(w, r)
+	}))
+}
+
+// ServeHTTP resolves the matched route and sets r.Pattern before dispatching
+// the request through chi's middleware chain and handler. This ensures that
+// middlewares registered via Use() — such as otelhttp.NewMiddleware — can
+// read r.Pattern to tag spans and metrics with the http.route attribute.
+func (m *mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rctx := chi.NewRouteContext()
+	if m.Match(rctx, r.Method, routingPath(r)) {
+		r.Pattern = r.Method + " " + m.resolveWildcard(r.Method, rctx.RoutePattern())
+	}
+	m.Router.ServeHTTP(w, r)
 }
 
 // Vars extracts the path variables from the request context.
 func (m *mux) Vars(r *http.Request) map[string]string {
-	return httptreemux.ContextParams(r.Context())
+	ctx := m.ensureContext(r)
+	if ctx == nil {
+		return nil
+	}
+	params := ctx.URLParams
+	if len(params.Keys) == 0 {
+		return nil
+	}
+	vars := make(map[string]string, len(params.Keys))
+	for i, k := range params.Keys {
+		if k == "*" {
+			wildcard := m.wildcards[r.Method+"::"+ctx.RoutePattern()]
+			vars[wildcard] = params.Values[i]
+			continue
+		}
+		vars[k] = params.Values[i]
+	}
+	// Chi captures decoded URL.Path values when RawPath is absent. Only
+	// captures from RawPath or an explicit router path still need decoding.
+	if r.URL.RawPath != "" || ctx.RoutePath != "" {
+		for key, value := range vars {
+			vars[key] = unescape(value)
+		}
+	}
+	return vars
 }
 
-var wildSeg = regexp.MustCompile(`/{([a-zA-Z0-9_]+)}`)
-var wildPath = regexp.MustCompile(`/{\*([a-zA-Z0-9_]+)}`)
+func unescape(s string) string {
+	u, err := url.PathUnescape(s)
+	if err != nil {
+		return s
+	}
+	return u
+}
 
-func treemuxify(pattern string) string {
-	pattern = wildSeg.ReplaceAllString(pattern, "/:$1")
-	pattern = wildPath.ReplaceAllString(pattern, "/*$1")
+// Use appends a middleware to the list of middlewares to be applied
+// downstream the Muxer.
+func (m *mux) Use(f func(http.Handler) http.Handler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.middlewares != nil {
+		m.middlewares = append(m.middlewares, f)
+		return
+	}
+	m.Router.Use(f)
+}
+
+// ResolvePattern returns the route pattern used to register the handler for the
+// given method and path.
+func (m *mux) ResolvePattern(r *http.Request) string {
+	ctx := m.ensureContext(r)
+	if ctx == nil {
+		return ""
+	}
+	return m.resolveWildcard(r.Method, ctx.RoutePattern())
+}
+
+// resolveWildcard returns the route pattern with the wildcard replaced by the
+// name of the wildcard.
+func (m *mux) resolveWildcard(method, pattern string) string {
+	if wildcard, ok := m.wildcards[method+"::"+pattern]; ok {
+		return pattern[:len(pattern)-2] + "/{*" + wildcard + "}"
+	}
 	return pattern
+}
+
+// ensureContext makes sure chi has initialized the request context if it
+// handles it, otherwise it returns nil.
+func (m *mux) ensureContext(r *http.Request) *chi.Context {
+	ctx := chi.RouteContext(r.Context())
+	if ctx == nil {
+		return nil // request not handled by chi
+	}
+	if ctx.RoutePattern() != "" {
+		return ctx // already initialized
+	}
+	// Pattern lookup before dispatch must not append matches to the live
+	// router context, because Chi will populate that context when it dispatches.
+	matched := chi.NewRouteContext()
+	matched.RoutePath = ctx.RoutePath
+	if !m.Match(matched, r.Method, routingPath(r)) {
+		return nil // route not handled by chi
+	}
+	return matched
+}
+
+// routingPath selects the same request text as Chi so pattern discovery and
+// handler dispatch agree, including requests routed by a parent router.
+func routingPath(r *http.Request) string {
+	if ctx := chi.RouteContext(r.Context()); ctx != nil && ctx.RoutePath != "" {
+		return ctx.RoutePath
+	}
+	if r.URL.RawPath != "" {
+		return r.URL.RawPath
+	}
+	return r.URL.Path
 }

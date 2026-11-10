@@ -3,9 +3,12 @@ package service
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/codegen/service/testdata"
-	"goa.design/goa/v3/expr"
+	"goa.design/goa/v3/codegen/testutil"
 )
 
 func TestSecureEndpointInit(t *testing.T) {
@@ -21,22 +24,15 @@ func TestSecureEndpointInit(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			codegen.RunDSL(t, c.DSL)
-			if len(expr.Root.Services) != 1 {
-				t.Fatalf("got %d services, expected 1", len(expr.Root.Services))
-			}
-			fs := EndpointFile("", expr.Root.Services[0])
-			if fs == nil {
-				t.Fatalf("got nil file, expected not nil")
-			}
+			root := codegen.RunDSL(t, c.DSL)
+			plan := mustServicePlan(t, root)
+			require.Len(t, root.Services, 1)
+			fs := endpointFile(plan, plan.facts.services[0])
+			require.NotNil(t, fs)
 			sections := fs.SectionTemplates
-			if len(sections) < 2 {
-				t.Fatalf("got %d sections, expected at least 2", len(sections))
-			}
+			require.Greater(t, len(sections), 1)
 			code := codegen.SectionCode(t, sections[2])
-			if code != c.Code {
-				t.Errorf("invalid code, got:\n%s\ngot vs. expected:\n%s", code, codegen.Diff(t, code, c.Code))
-			}
+			assert.Equal(t, c.Code, code)
 		})
 	}
 }
@@ -45,28 +41,23 @@ func TestSecureEndpoint(t *testing.T) {
 	cases := []struct {
 		Name string
 		DSL  func()
-		Code string
 	}{
-		{"with-required-scopes", testdata.EndpointWithRequiredScopesDSL, testdata.EndpointWithRequiredScopesCode},
-		{"with-optional-required-scopes", testdata.EndpointWithOptionalRequiredScopesDSL, testdata.EndpointWithOptionalRequiredScopesCode},
-		{"with-api-key-override", testdata.EndpointWithAPIKeyOverrideDSL, testdata.EndpointWithAPIKeyOverrideCode},
-		{"with-oauth2", testdata.EndpointWithOAuth2DSL, testdata.EndpointWithOAuth2Code},
+		{"with-required-scopes", testdata.EndpointWithRequiredScopesDSL},
+		{"with-optional-required-scopes", testdata.EndpointWithOptionalRequiredScopesDSL},
+		{"with-api-key-override", testdata.EndpointWithAPIKeyOverrideDSL},
+		{"with-bearer", testdata.EndpointWithBearerDSL},
+		{"with-oauth2", testdata.EndpointWithOAuth2DSL},
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			codegen.RunDSL(t, c.DSL)
-			if len(expr.Root.Services) != 1 {
-				t.Fatalf("got %d services, expected 1", len(expr.Root.Services))
-			}
-			fs := EndpointFile("", expr.Root.Services[0])
-			if fs == nil {
-				t.Fatalf("got nil file, expected not nil")
-			}
+			root := codegen.RunDSL(t, c.DSL)
+			plan := mustServicePlan(t, root)
+			require.Len(t, root.Services, 1)
+			fs := endpointFile(plan, plan.facts.services[0])
+			require.NotNil(t, fs)
 			sections := fs.SectionTemplates
 			code := codegen.SectionCode(t, sections[4])
-			if code != c.Code {
-				t.Errorf("invalid code, got:\n%s\ngot vs. expected:\n%s", code, codegen.Diff(t, code, c.Code))
-			}
+			testutil.AssertGo(t, "testdata/golden/security_endpoint_"+c.Name+".go.golden", code)
 		})
 	}
 }
@@ -75,25 +66,19 @@ func TestSecureWithSkipRequestBodyEncodeDecode(t *testing.T) {
 	cases := []struct {
 		Name string
 		DSL  func()
-		Code string
 	}{
-		{"with-basicauth", testdata.EndpointWithBasicAuthAndSkipRequestBodyEncodeDecodeDSL, testdata.EndpointWithBasicAuthAndSkipRequestBodyEncodeDecodeCode},
+		{"with-basicauth", testdata.EndpointWithBasicAuthAndSkipRequestBodyEncodeDecodeDSL},
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			codegen.RunDSL(t, c.DSL)
-			if len(expr.Root.Services) != 1 {
-				t.Fatalf("got %d services, expected 1", len(expr.Root.Services))
-			}
-			fs := EndpointFile("", expr.Root.Services[0])
-			if fs == nil {
-				t.Fatalf("got nil file, expected not nil")
-			}
+			root := codegen.RunDSL(t, c.DSL)
+			plan := mustServicePlan(t, root)
+			require.Len(t, root.Services, 1)
+			fs := endpointFile(plan, plan.facts.services[0])
+			require.NotNil(t, fs)
 			sections := fs.SectionTemplates
 			code := codegen.SectionCode(t, sections[5])
-			if code != c.Code {
-				t.Errorf("invalid code, got:\n%s\ngot vs. expected:\n%s", code, codegen.Diff(t, code, c.Code))
-			}
+			testutil.AssertGo(t, "testdata/golden/security_endpoint_"+c.Name+".go.golden", code)
 		})
 	}
 }

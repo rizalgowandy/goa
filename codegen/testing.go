@@ -1,18 +1,17 @@
+// This file evaluates isolated Goa designs and renders sections for codegen
+// tests without performing generation-owned normalization ahead of the test.
 package codegen
 
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"goa.design/goa/v3/eval"
 	"goa.design/goa/v3/expr"
-
-	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // RunDSL returns the DSL root resulting from running the given DSL.
@@ -20,39 +19,13 @@ func RunDSL(t *testing.T, dsl func()) *expr.RootExpr {
 	t.Helper()
 	eval.Reset()
 	expr.Root = new(expr.RootExpr)
-	expr.Root.GeneratedTypes = &expr.GeneratedRoot{}
-	eval.Register(expr.Root)
-	eval.Register(expr.Root.GeneratedTypes)
+	expr.GeneratedResultTypes = new(expr.ResultTypesRoot)
+	require.NoError(t, eval.Register(expr.Root))
+	require.NoError(t, eval.Register(expr.GeneratedResultTypes))
 	expr.Root.API = expr.NewAPIExpr("test api", func() {})
 	expr.Root.API.Servers = []*expr.ServerExpr{expr.Root.API.DefaultServer()}
-	if !eval.Execute(dsl, nil) {
-		t.Fatal(eval.Context.Error())
-	}
-	if err := eval.RunDSL(); err != nil {
-		t.Fatal(err)
-	}
-	return expr.Root
-}
-
-// RunDSLWithFunc returns the DSL root resulting from running the given DSL.
-// It executes a function to add any top-level types to the design Root before
-// running the DSL.
-func RunDSLWithFunc(t *testing.T, dsl func(), fn func()) *expr.RootExpr {
-	t.Helper()
-	eval.Reset()
-	expr.Root = new(expr.RootExpr)
-	expr.Root.GeneratedTypes = &expr.GeneratedRoot{}
-	eval.Register(expr.Root)
-	eval.Register(expr.Root.GeneratedTypes)
-	expr.Root.API = expr.NewAPIExpr("test api", func() {})
-	expr.Root.API.Servers = []*expr.ServerExpr{expr.Root.API.DefaultServer()}
-	fn()
-	if !eval.Execute(dsl, nil) {
-		t.Fatal(eval.Context.Error())
-	}
-	if err := eval.RunDSL(); err != nil {
-		t.Fatal(err)
-	}
+	require.True(t, eval.Execute(dsl, nil), eval.Context.Error())
+	require.NoError(t, eval.RunDSL())
 	return expr.Root
 }
 
@@ -71,22 +44,16 @@ func SectionsCode(t *testing.T, sections []*SectionTemplate) string {
 }
 
 // SectionCodeFromImportsAndMethods generates and formats the code for given import and method definition sections.
-func SectionCodeFromImportsAndMethods(t *testing.T, importSection *SectionTemplate, methodSection *SectionTemplate) string {
+func SectionCodeFromImportsAndMethods(t *testing.T, importSection, methodSection *SectionTemplate) string {
 	t.Helper()
 	var code bytes.Buffer
-	if err := importSection.Write(&code); err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, importSection.Write(&code))
 	return sectionCodeWithPrefix(t, methodSection, code.String())
 }
 
 func sectionCodeWithPrefix(t *testing.T, section *SectionTemplate, prefix string) string {
 	var code bytes.Buffer
-	if err := section.Write(&code); err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, section.Write(&code))
 	codestr := code.String()
 
 	if len(prefix) > 0 {
@@ -100,52 +67,23 @@ func sectionCodeWithPrefix(t *testing.T, section *SectionTemplate, prefix string
 // content of a valid Go source file (i.e. start with "package")
 func FormatTestCode(t *testing.T, code string) string {
 	t.Helper()
-	tmp := CreateTempFile(t, code)
-	defer os.Remove(tmp)
-	if err := finalizeGoSource(tmp); err != nil {
-		t.Fatal(err)
-	}
-	content, err := ioutil.ReadFile(tmp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.Join(strings.Split(string(content), "\n")[2:], "\n")
-}
-
-// Diff returns a diff between s1 and s2. It uses the diff tool if installed
-// otherwise degrades to using the dmp package.
-func Diff(t *testing.T, s1, s2 string) string {
-	_, err := exec.LookPath("diff")
-	supportsDiff := (err == nil)
-	if !supportsDiff {
-		dmp := diffmatchpatch.New()
-		diffs := dmp.DiffMain(s1, s2, false)
-		return dmp.DiffPrettyText(diffs)
-	}
-	left := CreateTempFile(t, s1)
-	right := CreateTempFile(t, s2)
-	defer os.Remove(left)
-	defer os.Remove(right)
-	cmd := exec.Command("diff", left, right)
-	diffb, _ := cmd.CombinedOutput()
-	return strings.Replace(string(diffb), "\t", " ␉ ", -1)
+	// Process the code in memory without creating a temp file
+	formatted, err := finalizeGoSource("test.go", []byte(code))
+	require.NoError(t, err)
+	return strings.Join(strings.Split(string(formatted), "\n")[2:], "\n")
 }
 
 // CreateTempFile creates a temporary file and writes the given content.
 // It is used only for testing.
 func CreateTempFile(t *testing.T, content string) string {
 	t.Helper()
-	f, err := ioutil.TempFile("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	f, err := os.CreateTemp("", "")
+	require.NoError(t, err)
 	_, err = f.WriteString(content)
 	if err != nil {
-		os.Remove(f.Name())
+		require.NoError(t, os.Remove(f.Name()))
 		t.Fatal(err)
 	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, f.Close())
 	return f.Name()
 }

@@ -1,15 +1,20 @@
+// This file builds Swagger 2.0 operations and schemas from HTTP endpoints. It
+// uses the request or response being described to choose each example value.
 package openapiv2
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/expr"
 	"goa.design/goa/v3/http/codegen/openapi"
+	openapiinternal "goa.design/goa/v3/http/codegen/openapi/internal"
 )
 
 // NewV2 returns the OpenAPI v2 specification for the given API.
@@ -17,20 +22,49 @@ func NewV2(root *expr.RootExpr, h *expr.HostExpr) (*V2, error) {
 	if root == nil {
 		return nil, nil
 	}
-	tags := openapi.TagsFromExpr(root.API.Meta)
+	return NewV2WithValues(
+		root,
+		h,
+		expr.NewExampleGenerator(root.API.RandomizerFactory),
+		openapi.Values{},
+	)
+}
+
+// NewV2WithValues returns the OpenAPI v2 specification using values in place
+// of matching titles, descriptions, and examples from the evaluated design.
+// The generator supplies examples for attributes that have no matching value.
+func NewV2WithValues(root *expr.RootExpr, h *expr.HostExpr, generator *expr.ExampleGenerator, values openapi.Values) (*V2, error) {
+	if root == nil {
+		return nil, nil
+	}
+	tags := openapi.TagsFromExpr(root.API.Meta, openapi.Version20)
 	u, err := url.Parse(defaultURI(h))
 	if err != nil {
 		// This should never happen because server expression must have been
 		// validated. If it does, then we must fix server validation.
-		return nil, fmt.Errorf("failed to parse server URL: %s", err)
+		return nil, fmt.Errorf("failed to parse server URL: %w", err)
 	}
 	host := u.Host
+	if !openapi.MustGenerate(root.API.Servers[0].Meta) || !openapi.MustGenerate(h.Meta) {
+		host = ""
+	}
+	schemas := newSchemaBuilder(values)
+	var contact *expr.ContactExpr
+	if root.API.Contact != nil {
+		contactCopy := *root.API.Contact
+		contact = &contactCopy
+	}
+	var license *expr.LicenseExpr
+	if root.API.License != nil {
+		licenseCopy := *root.API.License
+		license = &licenseCopy
+	}
 
 	basePath := root.API.HTTP.Path
 	if hasAbsoluteRoutes(root) {
 		basePath = ""
 	}
-	params := paramsFromExpr(root.API.HTTP.Params, basePath)
+	params := paramsFromExpr(nil, root.API.HTTP.Params, basePath, values)
 	var paramMap map[string]*Parameter
 	if len(params) > 0 {
 		paramMap = make(map[string]*Parameter, len(params))
@@ -41,55 +75,54 @@ func NewV2(root *expr.RootExpr, h *expr.HostExpr) (*V2, error) {
 	s := &V2{
 		Swagger: "2.0",
 		Info: &Info{
-			Title:          root.API.Title,
-			Description:    root.API.Description,
+			Title:          values.Title(root.API, root.API.Title),
+			Description:    values.Description(root.API, root.API.Description),
 			TermsOfService: root.API.TermsOfService,
-			Contact:        root.API.Contact,
-			License:        root.API.License,
+			Contact:        contact,
+			License:        license,
 			Version:        root.API.Version,
 			Extensions:     openapi.ExtensionsFromExpr(root.API.Meta),
 		},
 		Host:                host,
 		BasePath:            basePath,
-		Paths:               make(map[string]interface{}),
-		Consumes:            root.API.HTTP.Consumes,
-		Produces:            root.API.HTTP.Produces,
+		Paths:               make(map[string]any),
+		Consumes:            slices.Clone(root.API.HTTP.Consumes),
+		Produces:            slices.Clone(root.API.HTTP.Produces),
 		Parameters:          paramMap,
 		Tags:                tags,
-		SecurityDefinitions: securitySpecFromExpr(root),
-		ExternalDocs:        openapi.DocsFromExpr(root.API.Docs, root.API.Meta),
+		SecurityDefinitions: securitySpecFromExpr(root, values),
+		ExternalDocs:        openapi.DocsFromExprWithValues(root.API.Docs, root.API.Meta, values),
 	}
 	for _, res := range root.API.HTTP.Services {
-		if !mustGenerate(res.Meta) || !mustGenerate(res.ServiceExpr.Meta) {
+		if !openapi.MustGenerate(res.Meta) || !openapi.MustGenerate(res.ServiceExpr.Meta) {
 			continue
 		}
-		for k, v := range openapi.ExtensionsFromExpr(res.Meta) {
-			s.Paths[k] = v
-		}
+		maps.Copy(s.Paths, openapi.ExtensionsFromExpr(res.Meta))
 		for _, fs := range res.FileServers {
-			if !mustGenerate(fs.Meta) || !mustGenerate(fs.Service.Meta) {
+			if !openapi.MustGenerate(fs.Meta) || !openapi.MustGenerate(fs.Service.Meta) {
 				continue
 			}
-			buildPathFromFileServer(s, root, fs)
+			buildPathFromFileServer(s, root, fs, schemas, generator, values)
 		}
 		for _, a := range res.HTTPEndpoints {
-			if !mustGenerate(a.Meta) || !mustGenerate(a.MethodExpr.Meta) {
+			if !openapi.MustGenerate(a.Meta) || !openapi.MustGenerate(a.MethodExpr.Meta) {
 				continue
 			}
 			for _, route := range a.Routes {
-				buildPathFromExpr(s, root, h, route, basePath)
+				buildPathFromExpr(s, root, h, route, basePath, schemas, generator, values)
 			}
 		}
 	}
-	if len(openapi.Definitions) > 0 {
-		s.Definitions = make(map[string]*openapi.Schema)
-		for n, d := range openapi.Definitions {
-			// sad but swagger doesn't support these
+	if len(schemas.definitions) > 0 {
+		s.Definitions = schemas.definitions
+		for _, d := range schemas.definitions {
+			// Swagger 2.0 does not support media metadata or schema links.
 			d.Media = nil
 			d.Links = nil
-			s.Definitions[n] = d
 		}
 	}
+	// Convert OpenAPI 3.0 references (#/$defs/) to Swagger 2.0 format (#/definitions/)
+	convertRefsToV2(s)
 	return s, nil
 }
 
@@ -115,21 +148,11 @@ func defaultURI(h *expr.HostExpr) string {
 	return uri
 }
 
-// mustGenerate returns true if the meta indicates that a OpenAPI specification should be
-// generated, false otherwise.
-func mustGenerate(meta expr.MetaExpr) bool {
-	if m, ok := meta["swagger:generate"]; ok {
-		if len(m) > 0 && m[0] == "false" {
-			return false
-		}
-	}
-	return true
-}
-
 // addScopeDescription generates and adds required scopes to the scheme's description.
 func addScopeDescription(scopes []*expr.ScopeExpr, sd *SecurityDefinition) {
 	// Generate scopes to add to description
-	lines := []string{}
+	lines := make([]string, 0, len(scopes))
+
 	for _, scope := range scopes {
 		lines = append(lines, fmt.Sprintf("  * `%s`: %s", scope.Name, scope.Description))
 	}
@@ -144,14 +167,20 @@ func addScopeDescription(scopes []*expr.ScopeExpr, sd *SecurityDefinition) {
 
 // securitySpecFromExpr generates the OpenAPI security definitions from the
 // security design.
-func securitySpecFromExpr(root *expr.RootExpr) map[string]*SecurityDefinition {
+func securitySpecFromExpr(root *expr.RootExpr, values openapi.Values) map[string]*SecurityDefinition {
 	sds := make(map[string]*SecurityDefinition)
 	for _, svc := range root.API.HTTP.Services {
+		if !openapi.MustGenerate(svc.Meta) || !openapi.MustGenerate(svc.ServiceExpr.Meta) {
+			continue
+		}
 		for _, e := range svc.HTTPEndpoints {
+			if !openapi.MustGenerate(e.Meta) || !openapi.MustGenerate(e.MethodExpr.Meta) {
+				continue
+			}
 			for _, req := range e.Requirements {
 				for _, s := range req.Schemes {
 					sd := SecurityDefinition{
-						Description: s.Description,
+						Description: values.Description(s.AuthoredScheme(), s.Description),
 						Extensions:  openapi.ExtensionsFromExpr(s.Meta),
 					}
 
@@ -164,10 +193,10 @@ func securitySpecFromExpr(root *expr.RootExpr) map[string]*SecurityDefinition {
 						sd.In = s.In
 						sd.Name = s.Name
 						addScopeDescription(s.Scopes, &sd)
-					case expr.JWTKind:
+					case expr.BearerKind, expr.JWTKind:
 						sd.Type = "apiKey"
-						// OpenAPI V2 spec does not support JWT scheme. Hence we add the scheme
-						// information to the description.
+						// OpenAPI V2 spec does not support HTTP bearer schemes. Hence
+						// we add the scheme information to the description.
 						addScopeDescription(s.Scopes, &sd)
 						sd.In = s.In
 						sd.Name = s.Name
@@ -210,18 +239,18 @@ func securitySpecFromExpr(root *expr.RootExpr) map[string]*SecurityDefinition {
 func hasAbsoluteRoutes(root *expr.RootExpr) bool {
 	hasAbsoluteRoutes := false
 	for _, res := range root.API.HTTP.Services {
-		if !mustGenerate(res.Meta) || !mustGenerate(res.ServiceExpr.Meta) {
+		if !openapi.MustGenerate(res.Meta) || !openapi.MustGenerate(res.ServiceExpr.Meta) {
 			continue
 		}
 		for _, fs := range res.FileServers {
-			if !mustGenerate(fs.Meta) || !mustGenerate(fs.Service.Meta) {
+			if !openapi.MustGenerate(fs.Meta) || !openapi.MustGenerate(fs.Service.Meta) {
 				continue
 			}
 			hasAbsoluteRoutes = true
 			break
 		}
 		for _, a := range res.HTTPEndpoints {
-			if !mustGenerate(a.Meta) || !mustGenerate(a.MethodExpr.Meta) {
+			if !openapi.MustGenerate(a.Meta) || !openapi.MustGenerate(a.MethodExpr.Meta) {
 				continue
 			}
 			for _, ro := range a.Routes {
@@ -241,14 +270,24 @@ func hasAbsoluteRoutes(root *expr.RootExpr) bool {
 	return hasAbsoluteRoutes
 }
 
-func summaryFromExpr(name string, e *expr.HTTPEndpointExpr) string {
+func summaryFromExpr(name string, e *expr.HTTPEndpointExpr, meta expr.MetaExpr) string {
 	for n, mdata := range e.Meta {
-		if n == "swagger:summary" && len(mdata) > 0 {
+		if (n == "openapi:summary" || n == "swagger:summary") && len(mdata) > 0 {
 			return mdata[0]
 		}
 	}
 	for n, mdata := range e.MethodExpr.Meta {
-		if n == "swagger:summary" && len(mdata) > 0 {
+		if (n == "openapi:summary" || n == "swagger:summary") && len(mdata) > 0 {
+			return mdata[0]
+		}
+	}
+	for n, mdata := range e.Service.ServiceExpr.Meta {
+		if (n == "openapi:summary" || n == "swagger:summary") && len(mdata) > 0 {
+			return mdata[0]
+		}
+	}
+	for n, mdata := range meta {
+		if (n == "openapi:summary" || n == "swagger:summary") && len(mdata) > 0 {
 			return mdata[0]
 		}
 	}
@@ -257,14 +296,14 @@ func summaryFromExpr(name string, e *expr.HTTPEndpointExpr) string {
 
 func summaryFromMeta(name string, meta expr.MetaExpr) string {
 	for n, mdata := range meta {
-		if n == "swagger:summary" && len(mdata) > 0 {
+		if (n == "openapi:summary" || n == "swagger:summary") && len(mdata) > 0 {
 			return mdata[0]
 		}
 	}
 	return name
 }
 
-func paramsFromExpr(params *expr.MappedAttributeExpr, path string) []*Parameter {
+func paramsFromExpr(endpoint *expr.HTTPEndpointExpr, params *expr.MappedAttributeExpr, path string, values openapi.Values) []*Parameter {
 	if params == nil {
 		return nil
 	}
@@ -272,135 +311,91 @@ func paramsFromExpr(params *expr.MappedAttributeExpr, path string) []*Parameter 
 		res       []*Parameter
 		wildcards = expr.ExtractHTTPWildcards(path)
 	)
-	codegen.WalkMappedAttr(params, func(n, pn string, required bool, at *expr.AttributeExpr) error {
+	codegen.WalkMappedAttr(params, func(_, pn string, required bool, at *expr.AttributeExpr) error { // nolint: errcheck
 		in := "query"
-		for _, w := range wildcards {
-			if n == w {
-				in = "path"
-				required = true
-				break
-			}
+		if slices.Contains(wildcards, pn) {
+			in = "path"
+			required = true
 		}
-		param := paramFor(at, pn, in, required)
+		if endpoint != nil && in != "path" && openapiinternal.IsSecurityParameter(endpoint, in, pn) {
+			return nil
+		}
+		param := paramFor(at, pn, in, required, values)
 		res = append(res, param)
 		return nil
 	})
 	return res
 }
 
-func paramsFromHeaders(endpoint *expr.HTTPEndpointExpr) []*Parameter {
-	params := []*Parameter{}
-	var (
-		rma = endpoint.Service.Params
-		ma  = endpoint.Headers
+func paramsFromHeaders(endpoint *expr.HTTPEndpointExpr, values openapi.Values) []*Parameter {
+	var params []*Parameter
 
-		merged *expr.MappedAttributeExpr
-	)
-	{
-		if rma == nil {
-			merged = ma
-		} else if ma == nil {
-			merged = rma
-		} else {
-			merged = expr.DupMappedAtt(rma)
-			merged.Merge(ma)
+	expr.WalkMappedAttr(endpoint.Headers, func(name, elem string, att *expr.AttributeExpr) error { // nolint: errcheck
+		if openapiinternal.IsSecurityParameter(endpoint, "header", elem) {
+			return nil
 		}
-	}
-
-	for _, n := range *expr.AsObject(merged.Type) {
-		header := n.Attribute
-		required := merged.IsRequiredNoDefault(n.Name)
-		p := paramFor(header, merged.ElemName(n.Name), "header", required)
-		params = append(params, p)
-	}
-
-	// Add basic auth to headers
-	if att := expr.TaggedAttribute(endpoint.MethodExpr.Payload, "security:username"); att != "" {
-		// Basic Auth is always encoded in the Authorization header
-		// https://golang.org/pkg/net/http/#Request.SetBasicAuth
-		params = append(params, &Parameter{
-			In:          "header",
-			Name:        "Authorization",
-			Required:    endpoint.MethodExpr.Payload.IsRequired(att),
-			Description: "Basic Auth security using Basic scheme (https://tools.ietf.org/html/rfc7617)",
-			Type:        "string",
-		})
-	}
+		required := endpoint.Headers.IsRequiredNoDefault(name)
+		params = append(params, paramFor(att, elem, "header", required, values))
+		return nil
+	})
 
 	return params
 }
 
-func paramFor(at *expr.AttributeExpr, name, in string, required bool) *Parameter {
+func paramFor(at *expr.AttributeExpr, name, in string, required bool, values openapi.Values) *Parameter {
+	alias := at
+	at = resolvedAliasAttribute(at)
 	p := &Parameter{
 		In:          in,
 		Name:        name,
 		Default:     openapi.ToStringMap(at.DefaultValue),
-		Description: at.Description,
+		Description: values.Description(alias.AuthoredAttribute(), at.Description),
 		Required:    required,
-		Type:        at.Type.Name(),
 	}
+	p.Type, p.Format = openAPITypeFormat(at)
 	if expr.IsArray(at.Type) {
 		p.Items = itemsFromExpr(expr.AsArray(at.Type).ElemType)
 		p.CollectionFormat = "multi"
 	}
-	switch at.Type {
-	case expr.Int, expr.UInt, expr.UInt32, expr.UInt64:
-		p.Type = "integer"
-	case expr.Int32, expr.Int64:
-		p.Type = "integer"
-		p.Format = at.Type.Name()
-	case expr.Float32:
-		p.Type = "number"
-		p.Format = "float"
-	case expr.Float64:
-		p.Type = "number"
-		p.Format = "double"
-	case expr.Bytes:
-		p.Type = "string"
-		p.Format = "byte"
-	}
 	p.Extensions = openapi.ExtensionsFromExpr(at.Meta)
-	initValidations(at, p)
+	initAttributeValidations(alias, p)
 	return p
 }
 
 func itemsFromExpr(at *expr.AttributeExpr) *Items {
-	items := &Items{Type: at.Type.Name()}
-	switch actual := at.Type.(type) {
-	case expr.Primitive:
-		switch actual.Kind() {
-		case expr.IntKind, expr.Int64Kind, expr.UIntKind, expr.UInt64Kind, expr.Int32Kind, expr.UInt32Kind:
-			items.Type = "integer"
-		case expr.Float32Kind, expr.Float64Kind:
-			items.Type = "number"
-		case expr.BytesKind:
-			items.Type = "string"
-		}
+	itemType, itemFormat := openAPITypeFormat(at)
+	items := &Items{
+		Type:   itemType,
+		Format: itemFormat,
 	}
-	initValidations(at, items)
+	initAttributeValidations(at, items)
 	if expr.IsArray(at.Type) {
 		items.Items = itemsFromExpr(expr.AsArray(at.Type).ElemType)
 	}
 	return items
 }
 
-func responseSpecFromExpr(s *V2, root *expr.RootExpr, r *expr.HTTPResponseExpr, typeNamePrefix string) *Response {
+func responseSpecFromExpr(_ *V2, root *expr.RootExpr, r *expr.HTTPResponseExpr, typeNamePrefix string, schemas *schemaBuilder, generator *expr.ExampleGenerator, fallbackDescription string, values openapi.Values) *Response {
 	var schema *openapi.Schema
 	if mt, ok := r.Body.Type.(*expr.ResultTypeExpr); ok {
 		view := expr.DefaultView
-		if v, ok := r.Body.Meta["view"]; ok {
-			view = v[0]
+		if v, ok := r.Body.Meta.Last(expr.ViewMetaKey); ok {
+			view = v
 		}
 		schema = openapi.NewSchema()
-		schema.Ref = openapi.ResultTypeRefWithPrefix(root.API, mt, view, typeNamePrefix)
+		projection := openapi.ProjectResponseResult(mt, view)
+		schema.Ref = schemas.projectedResultTypeRefWithPrefix(root.API, mt, projection.Result, typeNamePrefix, generator)
 	} else if r.Body.Type != expr.Empty {
-		schema = openapi.AttributeTypeSchemaWithPrefix(root.API, r.Body, typeNamePrefix)
+		schema = schemas.attributeTypeSchemaWithPrefix(root.API, r.Body, typeNamePrefix, generator)
 	}
 	if schema != nil {
 		schema.Extensions = openapi.ExtensionsFromExpr(r.Meta)
 	}
-	headers := headersFromExpr(r.Headers)
-	desc := r.Description
+	headers := headersFromExpr(r.Headers, values)
+	desc := values.Description(r, r.Description)
+	if desc == "" {
+		desc = fallbackDescription
+	}
 	if desc == "" {
 		desc = fmt.Sprintf("%s response.", http.StatusText(r.StatusCode))
 	}
@@ -412,18 +407,23 @@ func responseSpecFromExpr(s *V2, root *expr.RootExpr, r *expr.HTTPResponseExpr, 
 	}
 }
 
-func headersFromExpr(headers *expr.MappedAttributeExpr) map[string]*Header {
+func headersFromExpr(headers *expr.MappedAttributeExpr, values openapi.Values) map[string]*Header {
 	if headers == nil {
 		return nil
 	}
 	res := make(map[string]*Header)
-	codegen.WalkMappedAttr(headers, func(_, n string, required bool, at *expr.AttributeExpr) error {
+	codegen.WalkMappedAttr(headers, func(_, n string, _ bool, at *expr.AttributeExpr) error { // nolint: errcheck
+		headerType, headerFormat := openAPITypeFormat(at)
 		header := &Header{
 			Default:     at.DefaultValue,
-			Description: at.Description,
-			Type:        at.Type.Name(),
+			Description: values.Description(at.AuthoredAttribute(), at.Description),
+			Type:        headerType,
+			Format:      headerFormat,
 		}
-		initValidations(at, header)
+		if expr.IsArray(at.Type) {
+			header.Items = itemsFromExpr(expr.AsArray(at.Type).ElemType)
+		}
+		initAttributeValidations(at, header)
 		res[n] = header
 		return nil
 	})
@@ -433,7 +433,46 @@ func headersFromExpr(headers *expr.MappedAttributeExpr) map[string]*Header {
 	return res
 }
 
-func buildPathFromFileServer(s *V2, root *expr.RootExpr, fs *expr.HTTPFileServerExpr) {
+func openAPITypeFormat(at *expr.AttributeExpr) (string, string) {
+	at = resolvedAliasAttribute(at)
+	p, ok := at.Type.(expr.Primitive)
+	if !ok {
+		return at.Type.Name(), ""
+	}
+	switch p.Kind() {
+	case expr.IntKind, expr.UIntKind, expr.Int64Kind, expr.UInt64Kind:
+		return "integer", "int64"
+	case expr.Int32Kind, expr.UInt32Kind:
+		return "integer", "int32"
+	case expr.Float32Kind:
+		return "number", "float"
+	case expr.Float64Kind:
+		return "number", "double"
+	case expr.BytesKind:
+		return "string", "byte"
+	case expr.AnyKind:
+		return "", ""
+	default:
+		return p.Name(), ""
+	}
+}
+
+func resolvedAliasAttribute(at *expr.AttributeExpr) *expr.AttributeExpr {
+	if expr.IsAlias(at.Type) {
+		return at.Type.(expr.UserType).Attribute()
+	}
+	return at
+}
+
+func initAttributeValidations(at *expr.AttributeExpr, def any) {
+	resolved := resolvedAliasAttribute(at)
+	if resolved != at {
+		initValidations(resolved, def)
+	}
+	initValidations(at, def)
+}
+
+func buildPathFromFileServer(s *V2, root *expr.RootExpr, fs *expr.HTTPFileServerExpr, schemas *schemaBuilder, generator *expr.ExampleGenerator, values openapi.Values) {
 	for _, path := range fs.RequestPaths {
 		wcs := expr.ExtractHTTPWildcards(path)
 		var param []*Parameter
@@ -454,7 +493,8 @@ func buildPathFromFileServer(s *V2, root *expr.RootExpr, fs *expr.HTTPFileServer
 			},
 		}
 		if len(wcs) > 0 {
-			schema := openapi.TypeSchema(root.API, expr.ErrorResult)
+			errgen := generator.At(expr.UserTypeExampleIdentity(expr.ErrorResult))
+			schema := schemas.typeSchema(root.API, expr.ErrorResult, errgen)
 			responses["404"] = &Response{Description: "File not found", Schema: schema}
 		}
 
@@ -468,16 +508,16 @@ func buildPathFromFileServer(s *V2, root *expr.RootExpr, fs *expr.HTTPFileServer
 			}
 		}
 
-		tagNames := openapi.TagNamesFromExpr(fs.Service.Meta, fs.Meta)
+		tagNames := openapi.TagNamesFromExpr(fs.Meta)
 		if len(tagNames) == 0 {
 			// By default tag with service name
 			tagNames = []string{fs.Service.Name()}
 		}
 
 		operation := &Operation{
-			Description:  fs.Description,
+			Description:  values.Description(fs, fs.Description),
 			Summary:      summaryFromMeta(fmt.Sprintf("Download %s", fs.FilePath), fs.Meta),
-			ExternalDocs: openapi.DocsFromExpr(fs.Docs, fs.Meta),
+			ExternalDocs: openapi.DocsFromExprWithValues(fs.Docs, fs.Meta, values),
 			OperationID:  operationID,
 			Parameters:   param,
 			Responses:    responses,
@@ -485,11 +525,11 @@ func buildPathFromFileServer(s *V2, root *expr.RootExpr, fs *expr.HTTPFileServer
 			Tags:         tagNames,
 		}
 
-		key := expr.HTTPWildcardRegex.ReplaceAllString(path, "/{$1}")
+		key := expr.HTTPWildcardRegex.ReplaceAllString(path, "{$1}")
 		if key == "" {
 			key = "/"
 		}
-		var path interface{}
+		var path any
 		var ok bool
 		if path, ok = s.Paths[key]; !ok {
 			path = new(Path)
@@ -501,10 +541,10 @@ func buildPathFromFileServer(s *V2, root *expr.RootExpr, fs *expr.HTTPFileServer
 	}
 }
 
-func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr.RouteExpr, basePath string) {
+func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr.RouteExpr, basePath string, schemas *schemaBuilder, generator *expr.ExampleGenerator, values openapi.Values) {
 	endpoint := route.Endpoint
 
-	tagNames := openapi.TagNamesFromExpr(endpoint.Service.Meta, endpoint.Meta)
+	tagNames := openapi.TagNamesFromExpr(endpoint.Meta)
 	if len(tagNames) == 0 {
 		// By default tag with service name
 		tagNames = []string{route.Endpoint.Service.Name()}
@@ -512,47 +552,56 @@ func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr
 	for _, key := range route.FullPaths() {
 		// Remove any wildcards that is defined in path as a workaround to
 		// https://github.com/OAI/OpenAPI-Specification/issues/291
-		key = expr.HTTPWildcardRegex.ReplaceAllString(key, "/{$1}")
-		params := paramsFromExpr(endpoint.Params, key)
-		params = append(params, paramsFromHeaders(endpoint)...)
-		produces := []string{}
+		key = expr.HTTPWildcardRegex.ReplaceAllString(key, "{$1}")
+		params := paramsFromExpr(endpoint, endpoint.Params, key, values)
+		params = append(params, paramsFromHeaders(endpoint, values)...)
+		var produces []string
+
 		responses := make(map[string]*Response, len(endpoint.Responses))
 		for _, r := range endpoint.Responses {
-			if endpoint.MethodExpr.IsStreaming() {
-				// A streaming endpoint allows at most one successful response
+			responseGenerator := generator.At(expr.ResponseBodyExampleIdentity(endpoint, r))
+			if endpoint.UsesWebSocket() {
+				// A WebSocket endpoint allows at most one successful response
 				// definition. So it is okay to change the first successful
-				// response to a HTTP 101 response for openapi docs.
+				// response to a HTTP 101 response for OpenAPI docs.
 				if _, ok := responses[strconv.Itoa(expr.StatusSwitchingProtocols)]; !ok {
 					r = r.Dup()
 					r.StatusCode = expr.StatusSwitchingProtocols
 				}
 			}
-			resp := responseSpecFromExpr(s, root, r, endpoint.Service.Name())
+			resp := responseSpecFromExpr(s, root, r, endpoint.Service.Name(), schemas, responseGenerator, "", values)
 			responses[strconv.Itoa(r.StatusCode)] = resp
 			if r.ContentType != "" {
-				foundCT := false
-				for _, ct := range produces {
-					if ct == r.ContentType {
-						foundCT = true
-						break
-					}
-				}
+				foundCT := slices.Contains(produces, r.ContentType)
 				if !foundCT {
 					produces = append(produces, r.ContentType)
 				}
 			}
 		}
 		for _, er := range endpoint.HTTPErrors {
-			resp := responseSpecFromExpr(s, root, er.Response, endpoint.Service.Name())
+			responseGenerator := generator.At(expr.ErrorResponseBodyExampleIdentity(endpoint, er))
+			errorDescription := values.Description(er.ErrorExpr, er.Description)
+			resp := responseSpecFromExpr(s, root, er.Response, endpoint.Service.Name(), schemas, responseGenerator, errorDescription, values)
+			resp.Description = er.Name + ": " + resp.Description
+			if example, ok := openapi.ErrorResponseExample(er.ErrorExpr, er.Response.Body, responseGenerator, values); ok {
+				resp.Examples = map[string]any{openapi.ResponseContentType(er.Response): example}
+			}
 			responses[strconv.Itoa(er.Response.StatusCode)] = resp
 		}
 
 		var consumes []string
 		if endpoint.MultipartRequest {
 			consumes = []string{"multipart/form-data"}
+		} else if endpoint.FormRequest {
+			consumes = []string{"application/x-www-form-urlencoded"}
 		}
 
-		if endpoint.Body.Type != expr.Empty {
+		if endpoint.FormRequest {
+			mapped := expr.NewMappedAttributeExpr(endpoint.Body)
+			for _, field := range *expr.AsObject(mapped.Type) {
+				params = append(params, paramFor(field.Attribute, mapped.ElemName(field.Name), "formData", endpoint.RequestBodyRequired() && mapped.IsRequiredNoDefault(field.Name), values))
+			}
+		} else if endpoint.Body.Type != expr.Empty {
 			in := "body"
 			if endpoint.MultipartRequest {
 				in = "formData"
@@ -560,9 +609,14 @@ func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr
 			pp := &Parameter{
 				Name:        endpoint.Body.Type.Name(),
 				In:          in,
-				Description: endpoint.Body.Description,
-				Required:    true,
-				Schema:      openapi.AttributeTypeSchemaWithPrefix(root.API, endpoint.Body, codegen.Goify(endpoint.Service.Name(), true)),
+				Description: values.Description(endpoint.Body.AuthoredAttribute(), endpoint.Body.Description),
+				Required:    endpoint.RequestBodyRequired(),
+				Schema: schemas.attributeTypeSchemaWithPrefix(
+					root.API,
+					endpoint.Body,
+					codegen.Goify(endpoint.Service.Name(), true),
+					generator.At(expr.RequestBodyExampleIdentity(endpoint)),
+				),
 			}
 			params = append(params, pp)
 		}
@@ -588,8 +642,8 @@ func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr
 			}
 		}
 
-		// replace http with ws for streaming endpoints
-		if endpoint.MethodExpr.IsStreaming() {
+		// replace HTTP with WebSocket schemes for WebSocket endpoints
+		if endpoint.UsesWebSocket() {
 			for i := len(schemes) - 1; i >= 0; i-- {
 				if schemes[i] == "http" {
 					news := append([]string{"ws"}, schemes[i+1:]...)
@@ -602,17 +656,22 @@ func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr
 			}
 		}
 
-		description := endpoint.Description()
+		description := values.Description(endpoint.MethodExpr, endpoint.Description())
 
-		requirements := make([]map[string][]string, len(endpoint.Requirements))
+		var requirements SecurityRequirements
+		if len(endpoint.Requirements) > 0 {
+			requirements = make(SecurityRequirements, len(endpoint.Requirements))
+		}
 		for i, req := range endpoint.Requirements {
 			requirement := make(map[string][]string)
 			for _, s := range req.Schemes {
-				requirement[s.Hash()] = []string{}
+				requirement[s.Hash()] = make([]string, 0)
 				switch s.Kind {
 				case expr.OAuth2Kind:
-					requirement[s.Hash()] = append(requirement[s.Hash()], req.Scopes...)
-				case expr.BasicAuthKind, expr.APIKeyKind, expr.JWTKind:
+					if len(req.Scopes) > 0 {
+						requirement[s.Hash()] = req.Scopes
+					}
+				case expr.BasicAuthKind, expr.APIKeyKind, expr.BearerKind, expr.JWTKind:
 					lines := make([]string, 0, len(req.Scopes))
 					for _, scope := range req.Scopes {
 						lines = append(lines, fmt.Sprintf("  * `%s`", scope))
@@ -628,36 +687,34 @@ func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr
 			}
 			requirements[i] = requirement
 		}
-
+		if expr.HasNoSecurity(endpoint.MethodExpr.Requirements) {
+			requirements = SecurityRequirements{}
+		}
+		_, deprecated := endpoint.MethodExpr.Meta.Last("openapi:deprecated")
 		operation := &Operation{
 			Tags:         tagNames,
 			Description:  description,
-			Summary:      summaryFromExpr(endpoint.Name()+" "+endpoint.Service.Name(), endpoint),
-			ExternalDocs: openapi.DocsFromExpr(endpoint.MethodExpr.Docs, endpoint.MethodExpr.Meta),
+			Summary:      summaryFromExpr(endpoint.Name()+" "+endpoint.Service.Name(), endpoint, root.API.Meta),
+			ExternalDocs: openapi.DocsFromExprWithValues(endpoint.MethodExpr.Docs, endpoint.MethodExpr.Meta, values),
 			OperationID:  operationID,
 			Parameters:   params,
 			Consumes:     consumes,
 			Produces:     produces,
 			Responses:    responses,
 			Schemes:      schemes,
-			Deprecated:   false,
-			Extensions:   openapi.ExtensionsFromExpr(endpoint.MethodExpr.Meta),
+			Deprecated:   deprecated,
+			Extensions:   openapi.ExtensionsFromMethod(endpoint.MethodExpr),
 			Security:     requirements,
 		}
 
 		if key == "" {
 			key = "/"
 		}
-		bp := expr.HTTPWildcardRegex.ReplaceAllStringFunc(
-			basePath,
-			func(w string) string {
-				return fmt.Sprintf("/{%s}", w[2:])
-			},
-		)
+		bp := expr.HTTPWildcardRegex.ReplaceAllString(basePath, "{$1}")
 		if bp != "/" {
 			key = strings.TrimPrefix(key, bp)
 		}
-		var path interface{}
+		var path any
 		var ok bool
 		if path, ok = s.Paths[key]; !ok {
 			path = new(Path)
@@ -684,7 +741,7 @@ func buildPathFromExpr(s *V2, root *expr.RootExpr, h *expr.HostExpr, route *expr
 	}
 }
 
-func initEnumValidation(def interface{}, values []interface{}) {
+func initEnumValidation(def any, values []any) {
 	switch actual := def.(type) {
 	case *Parameter:
 		actual.Enum = values
@@ -695,7 +752,7 @@ func initEnumValidation(def interface{}, values []interface{}) {
 	}
 }
 
-func initFormatValidation(def interface{}, format string) {
+func initFormatValidation(def any, format string) {
 	switch actual := def.(type) {
 	case *Parameter:
 		actual.Format = format
@@ -706,7 +763,7 @@ func initFormatValidation(def interface{}, format string) {
 	}
 }
 
-func initPatternValidation(def interface{}, pattern string) {
+func initPatternValidation(def any, pattern string) {
 	switch actual := def.(type) {
 	case *Parameter:
 		actual.Pattern = pattern
@@ -717,7 +774,7 @@ func initPatternValidation(def interface{}, pattern string) {
 	}
 }
 
-func initExclusiveMinimumValidation(def interface{}, exclMin *float64) {
+func initExclusiveMinimumValidation(def any, exclMin *float64) {
 	switch actual := def.(type) {
 	case *Parameter:
 		actual.Minimum = exclMin
@@ -731,21 +788,21 @@ func initExclusiveMinimumValidation(def interface{}, exclMin *float64) {
 	}
 }
 
-func initMinimumValidation(def interface{}, min *float64) {
+func initMinimumValidation(def any, minimum *float64) {
 	switch actual := def.(type) {
 	case *Parameter:
-		actual.Minimum = min
+		actual.Minimum = minimum
 		actual.ExclusiveMinimum = false
 	case *Header:
-		actual.Minimum = min
+		actual.Minimum = minimum
 		actual.ExclusiveMinimum = false
 	case *Items:
-		actual.Minimum = min
+		actual.Minimum = minimum
 		actual.ExclusiveMinimum = false
 	}
 }
 
-func initExclusiveMaximumValidation(def interface{}, exclMax *float64) {
+func initExclusiveMaximumValidation(def any, exclMax *float64) {
 	switch actual := def.(type) {
 	case *Parameter:
 		actual.Maximum = exclMax
@@ -759,51 +816,51 @@ func initExclusiveMaximumValidation(def interface{}, exclMax *float64) {
 	}
 }
 
-func initMaximumValidation(def interface{}, max *float64) {
+func initMaximumValidation(def any, maximum *float64) {
 	switch actual := def.(type) {
 	case *Parameter:
-		actual.Maximum = max
+		actual.Maximum = maximum
 		actual.ExclusiveMaximum = false
 	case *Header:
-		actual.Maximum = max
+		actual.Maximum = maximum
 		actual.ExclusiveMaximum = false
 	case *Items:
-		actual.Maximum = max
+		actual.Maximum = maximum
 		actual.ExclusiveMaximum = false
 	}
 }
 
-func initMinLengthValidation(def interface{}, isArray bool, min *int) {
+func initMinLengthValidation(def any, isArray bool, minLength *int) {
 	switch actual := def.(type) {
 	case *Parameter:
 		if isArray {
-			actual.MinItems = min
+			actual.MinItems = minLength
 		} else {
-			actual.MinLength = min
+			actual.MinLength = minLength
 		}
 	case *Header:
-		actual.MinLength = min
+		actual.MinLength = minLength
 	case *Items:
-		actual.MinLength = min
+		actual.MinLength = minLength
 	}
 }
 
-func initMaxLengthValidation(def interface{}, isArray bool, max *int) {
+func initMaxLengthValidation(def any, isArray bool, maxLength *int) {
 	switch actual := def.(type) {
 	case *Parameter:
 		if isArray {
-			actual.MaxItems = max
+			actual.MaxItems = maxLength
 		} else {
-			actual.MaxLength = max
+			actual.MaxLength = maxLength
 		}
 	case *Header:
-		actual.MaxLength = max
+		actual.MaxLength = maxLength
 	case *Items:
-		actual.MaxLength = max
+		actual.MaxLength = maxLength
 	}
 }
 
-func initValidations(attr *expr.AttributeExpr, def interface{}) {
+func initValidations(attr *expr.AttributeExpr, def any) {
 	val := attr.Validation
 	if val == nil {
 		return
@@ -828,5 +885,80 @@ func initValidations(attr *expr.AttributeExpr, def interface{}) {
 	}
 	if val.MaxLength != nil {
 		initMaxLengthValidation(def, expr.IsArray(attr.Type), val.MaxLength)
+	}
+}
+
+// convertRefsToV2 converts all OpenAPI 3.0 references (#/$defs/) to Swagger 2.0
+// format (#/definitions/) in all schemas throughout the V2 specification.
+func convertRefsToV2(s *V2) {
+	// Convert references in definitions
+	for _, def := range s.Definitions {
+		convertSchemaRefs(def)
+	}
+	// Convert references in paths
+	for _, pathVal := range s.Paths {
+		if path, ok := pathVal.(*Path); ok {
+			convertPathRefs(path)
+		}
+	}
+	// Convert references in parameters
+	for _, param := range s.Parameters {
+		if param.Schema != nil {
+			convertSchemaRefs(param.Schema)
+		}
+	}
+}
+
+// convertPathRefs converts references in all operations of a path.
+func convertPathRefs(path *Path) {
+	ops := []*Operation{path.Get, path.Put, path.Post, path.Delete, path.Options, path.Head, path.Patch}
+	for _, op := range ops {
+		if op == nil {
+			continue
+		}
+		// Convert references in parameters
+		for _, param := range op.Parameters {
+			if param.Schema != nil {
+				convertSchemaRefs(param.Schema)
+			}
+		}
+		// Convert references in responses
+		for _, resp := range op.Responses {
+			if resp.Schema != nil {
+				convertSchemaRefs(resp.Schema)
+			}
+		}
+	}
+}
+
+// convertSchemaRefs recursively converts all #/$defs/ references to #/definitions/
+// in a schema and all nested schemas.
+func convertSchemaRefs(schema *openapi.Schema) {
+	if schema == nil {
+		return
+	}
+	// Convert the reference itself
+	if strings.HasPrefix(schema.Ref, "#/$defs/") {
+		schema.Ref = strings.Replace(schema.Ref, "#/$defs/", "#/definitions/", 1)
+	}
+	// Convert references in items
+	if schema.Items != nil {
+		convertSchemaRefs(schema.Items)
+	}
+	// Convert references in properties
+	for _, prop := range schema.Properties {
+		convertSchemaRefs(prop)
+	}
+	// Convert references in anyOf
+	for _, anyOfSchema := range schema.AnyOf {
+		convertSchemaRefs(anyOfSchema)
+	}
+	// Convert references in additionalProperties when it's a schema
+	if apSchema, ok := schema.AdditionalProperties.(*openapi.Schema); ok {
+		convertSchemaRefs(apSchema)
+	}
+	// Convert references in $defs (though these shouldn't exist in Swagger 2.0)
+	for _, def := range schema.Defs {
+		convertSchemaRefs(def)
 	}
 }

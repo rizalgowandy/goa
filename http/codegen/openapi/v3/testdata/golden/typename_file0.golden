@@ -1,0 +1,212 @@
+{
+  "components": {
+    "schemas": {
+      "BarPayload": {
+        "description": "Request body for bar.",
+        "example": {
+          "value": ""
+        },
+        "properties": {
+          "value": {
+            "example": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BazPayload": {
+        "description": "Request body for baz.",
+        "example": {
+          "value": ""
+        },
+        "properties": {
+          "value": {
+            "example": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BazResult": {
+        "example": {
+          "value": ""
+        },
+        "properties": {
+          "value": {
+            "example": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Foo": {
+        "description": "Request body for foo.",
+        "example": {
+          "value": ""
+        },
+        "properties": {
+          "value": {
+            "example": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "FooResult": {
+        "example": {
+          "value": ""
+        },
+        "properties": {
+          "value": {
+            "example": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GoaExampleBar": {
+        "example": {
+          "value": ""
+        },
+        "properties": {
+          "value": {
+            "example": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Goa API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/bar": {
+      "post": {
+        "operationId": "testService#bar",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "value": ""
+              },
+              "schema": {
+                "$ref": "#/components/schemas/BarPayload"
+              }
+            }
+          },
+          "description": "Request body for bar.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "value": ""
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/GoaExampleBar"
+                }
+              }
+            },
+            "description": "OK response."
+          }
+        },
+        "summary": "bar testService",
+        "tags": [
+          "testService"
+        ]
+      }
+    },
+    "/baz": {
+      "post": {
+        "operationId": "testService#baz",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "value": ""
+              },
+              "schema": {
+                "$ref": "#/components/schemas/BazPayload"
+              }
+            }
+          },
+          "description": "Request body for baz.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "value": ""
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/BazResult"
+                }
+              }
+            },
+            "description": "OK response."
+          }
+        },
+        "summary": "baz testService",
+        "tags": [
+          "testService"
+        ]
+      }
+    },
+    "/foo": {
+      "post": {
+        "operationId": "testService#foo",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "value": ""
+              },
+              "schema": {
+                "$ref": "#/components/schemas/Foo"
+              }
+            }
+          },
+          "description": "Request body for foo.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "value": ""
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/FooResult"
+                }
+              }
+            },
+            "description": "OK response."
+          }
+        },
+        "summary": "foo testService",
+        "tags": [
+          "testService"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://goa.design"
+    }
+  ],
+  "tags": [
+    {
+      "name": "testService"
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+// This file contains expected HTTP streaming sections used to verify that
+// websocket client and server code names the exact catalog-owned wire types.
 package testdata
 
 var MixedEndpointsConnConfigurerStructCode = `// ConnConfigurer holds the websocket connection configurer functions for the
@@ -25,7 +27,7 @@ func NewStreamingResultMethodHandler(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	upgrader goahttp.Upgrader,
 	configurer goahttp.ConnConfigureFunc,
 ) http.Handler {
@@ -39,7 +41,7 @@ func NewStreamingResultMethodHandler(
 		ctx = context.WithValue(ctx, goa.ServiceKey, "StreamingResultService")
 		payload, err := decodeRequest(r)
 		if err != nil {
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -54,19 +56,137 @@ func NewStreamingResultMethodHandler(
 				w:          w,
 				r:          r,
 			},
-			Payload: payload.(*streamingresultservice.Request),
+			Payload: payload,
 		}
 		_, err = endpoint(ctx, v)
 		if err != nil {
-			if _, ok := err.(websocket.HandshakeError); ok {
+			var stream *StreamingResultMethodServerStream
+			if wrapper, ok := v.Stream.(interface{ Unwrap() any }); ok {
+				stream = wrapper.Unwrap().(*StreamingResultMethodServerStream)
+			} else {
+				stream = v.Stream.(*StreamingResultMethodServerStream)
+			}
+			if stream != nil && stream.conn != nil {
+				// Response writer has been hijacked, do not encode the error
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
 				return
 			}
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
 		}
 	})
+}
+`
+
+var MixedResultsServerHandlerInitCode = `// NewCreateHandler creates a HTTP handler which loads the HTTP request and
+// calls the "MixedResultsService" service "Create" endpoint.
+func NewCreateHandler(
+	endpoint goa.Endpoint,
+	mux goahttp.Muxer,
+	decoder func(*http.Request) goahttp.Decoder,
+	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
+	errhandler func(context.Context, http.ResponseWriter, error),
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
+) http.Handler {
+	var (
+		decodeRequest  = DecodeCreateRequest(mux, decoder)
+		encodeResponse = EncodeCreateResponse(encoder)
+		encodeError    = goahttp.ErrorEncoder(encoder, formatter)
+	)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), goahttp.AcceptTypeKey, r.Header.Get("Accept"))
+		ctx = context.WithValue(ctx, goa.MethodKey, "Create")
+		ctx = context.WithValue(ctx, goa.ServiceKey, "MixedResultsService")
+
+		// Content negotiation for mixed results (standard HTTP vs SSE)
+		acceptHeader := r.Header.Get("Accept")
+		if strings.Contains(acceptHeader, "text/event-stream") {
+			// Handle SSE request
+			payload, err := decodeRequest(r)
+			if err != nil {
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			v := &mixedresultsservice.CreateEndpointInput{
+				Stream: &CreateServerStream{
+					w: w,
+					r: r,
+				},
+				Payload: payload,
+			}
+			_, err = endpoint(ctx, v)
+			stream := v.Stream.(*CreateServerStream)
+			if err == nil {
+				err = stream.finish()
+			}
+			if err != nil {
+				if stream.attempted {
+					if errhandler != nil {
+						errhandler(ctx, w, err)
+					}
+					return
+				}
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+			}
+		} else {
+			// Handle standard HTTP request
+			payload, err := decodeRequest(r)
+			if err != nil {
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			// Mixed results endpoints always use the generated endpoint input struct.
+			// In the standard (non-SSE) mode, Stream discards events and the service
+			// must return the synchronous result.
+			v := &mixedresultsservice.CreateEndpointInput{
+				Stream:  &discardCreateServerStream{},
+				Payload: payload,
+			}
+			res, err := endpoint(ctx, v)
+			if err != nil {
+				if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+				return
+			}
+			if err := encodeResponse(ctx, w, res); err != nil {
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
+			}
+		}
+	})
+}
+
+// discardCreateServerStream implements the mixedresultsservice.CreateServerStream
+// interface and drops all events. It is used for mixed results endpoints in
+// regular HTTP requests so service implementations can use the stream
+// parameter without nil checks.
+type discardCreateServerStream struct{}
+
+// Send discards the event.
+func (s *discardCreateServerStream) Send(v *mixedresultsservice.Event) error {
+	return nil
+}
+
+// SendWithContext discards the event.
+func (s *discardCreateServerStream) SendWithContext(ctx context.Context, v *mixedresultsservice.Event) error {
+	return nil
+}
+
+// Close is a no-op.
+func (s *discardCreateServerStream) Close() error {
+	return nil
 }
 `
 
@@ -81,6 +201,7 @@ func (s *StreamingResultMethodServerStream) Send(v *streamingresultservice.UserT
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -88,20 +209,50 @@ func (s *StreamingResultMethodServerStream) Send(v *streamingresultservice.UserT
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	body := NewStreamingResultMethodResponseBody(res)
 	return s.conn.WriteJSON(body)
 }
+
+// SendWithContext streams instances of "streamingresultservice.UserType" to
+// the "StreamingResultMethod" endpoint websocket connection with context.
+func (s *StreamingResultMethodServerStream) SendWithContext(ctx context.Context, v *streamingresultservice.UserType) error {
+	return s.Send(v)
+}
 `
 
 var StreamingResultServerStreamCloseCode = `// Close closes the "StreamingResultMethod" endpoint websocket connection.
 func (s *StreamingResultMethodServerStream) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.close()
+	})
+	return s.closeErr
+}
+
+// close opens the websocket connection when needed, sends its normal close
+// message, and closes it.
+func (s *StreamingResultMethodServerStream) close() error {
 	var err error
-	if s.conn == nil {
-		return nil
+	// Upgrade the HTTP connection to a websocket connection only once. Connection
+	// upgrade is done here so that authorization logic in the endpoint is executed
+	// before calling the actual service method which may call Close().
+	s.once.Do(func() {
+		var conn *websocket.Conn
+		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
+		if err != nil {
+			s.upgradeErr = err
+			return
+		}
+		if s.configurer != nil {
+			conn = s.configurer(conn, s.cancel)
+		}
+		s.conn = conn
+	})
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	if err = s.conn.WriteControl(
 		websocket.CloseMessage,
@@ -117,16 +268,31 @@ func (s *StreamingResultMethodServerStream) Close() error {
 var StreamingResultWithViewsServerStreamSendCode = `// Send streams instances of "streamingresultwithviewsservice.Usertype" to the
 // "StreamingResultWithViewsMethod" endpoint websocket connection.
 func (s *StreamingResultWithViewsMethodServerStream) Send(v *streamingresultwithviewsservice.Usertype) error {
+	view := s.view
+	if view == "" {
+		view = "default"
+	}
+	if s.sentView != "" && view != s.sentView {
+		return goa.InvalidEnumValueError("view", view, []any{s.sentView})
+	}
+	switch view {
+	case "tiny":
+	case "extended":
+	case "default":
+	default:
+		return goa.InvalidEnumValueError("view", view, []any{"tiny", "extended", "default"})
+	}
 	var err error
 	// Upgrade the HTTP connection to a websocket connection only once. Connection
 	// upgrade is done here so that authorization logic in the endpoint is executed
 	// before calling the actual service method which may call Send().
 	s.once.Do(func() {
 		respHdr := make(http.Header)
-		respHdr.Add("goa-view", s.view)
+		respHdr.Add("goa-view", view)
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, respHdr)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -134,20 +300,32 @@ func (s *StreamingResultWithViewsMethodServerStream) Send(v *streamingresultwith
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
-	res := streamingresultwithviewsservice.NewViewedUsertype(v, s.view)
-	var body interface{}
-	switch s.view {
+	if s.sentView == "" {
+		s.sentView = view
+	}
+	switch view {
 	case "tiny":
-		body = NewStreamingResultWithViewsMethodResponseBodyTiny(res.Projected)
+		res := streamingresultwithviewsservice.NewViewedUsertype(v, "tiny")
+		return s.conn.WriteJSON(NewStreamingResultWithViewsMethodResponseBodyTiny(res.Projected))
 	case "extended":
-		body = NewStreamingResultWithViewsMethodResponseBodyExtended(res.Projected)
+		res := streamingresultwithviewsservice.NewViewedUsertype(v, "extended")
+		return s.conn.WriteJSON(NewStreamingResultWithViewsMethodResponseBodyExtended(res.Projected))
 	case "default", "":
-		body = NewStreamingResultWithViewsMethodResponseBody(res.Projected)
+		res := streamingresultwithviewsservice.NewViewedUsertype(v, "default")
+		return s.conn.WriteJSON(NewStreamingResultWithViewsMethodResponseBody(res.Projected))
+	default:
+		return goa.InvalidEnumValueError("view", view, []any{"tiny", "extended", "default"})
 	}
-	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "streamingresultwithviewsservice.Usertype" to the
+// "StreamingResultWithViewsMethod" endpoint websocket connection with context.
+func (s *StreamingResultWithViewsMethodServerStream) SendWithContext(ctx context.Context, v *streamingresultwithviewsservice.Usertype) error {
+	return s.Send(v)
 }
 `
 
@@ -168,7 +346,7 @@ func NewStreamingResultNoPayloadMethodHandler(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	upgrader goahttp.Upgrader,
 	configurer goahttp.ConnConfigureFunc,
 ) http.Handler {
@@ -193,10 +371,20 @@ func NewStreamingResultNoPayloadMethodHandler(
 		}
 		_, err = endpoint(ctx, v)
 		if err != nil {
-			if _, ok := err.(websocket.HandshakeError); ok {
+			var stream *StreamingResultNoPayloadMethodServerStream
+			if wrapper, ok := v.Stream.(interface{ Unwrap() any }); ok {
+				stream = wrapper.Unwrap().(*StreamingResultNoPayloadMethodServerStream)
+			} else {
+				stream = v.Stream.(*StreamingResultNoPayloadMethodServerStream)
+			}
+			if stream != nil && stream.conn != nil {
+				// Response writer has been hijacked, do not encode the error
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
 				return
 			}
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -211,13 +399,11 @@ func (c *Client) StreamingResultMethod() goa.Endpoint {
 	var (
 		decodeResponse = DecodeStreamingResultMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildStreamingResultMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -226,6 +412,8 @@ func (c *Client) StreamingResultMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("StreamingResultService", "StreamingResultMethod", err)
 		}
 		if c.configurer.StreamingResultMethodFn != nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
 			conn = c.configurer.StreamingResultMethodFn(conn, cancel)
 		}
 		go func() {
@@ -246,9 +434,46 @@ func (c *Client) StreamingResultMethod() goa.Endpoint {
 var StreamingResultWithViewsServerStreamCloseCode = `// Close closes the "StreamingResultWithViewsMethod" endpoint websocket
 // connection.
 func (s *StreamingResultWithViewsMethodServerStream) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.close()
+	})
+	return s.closeErr
+}
+
+// close opens the websocket connection when needed, sends its normal close
+// message, and closes it.
+func (s *StreamingResultWithViewsMethodServerStream) close() error {
 	var err error
-	if s.conn == nil {
-		return nil
+	view := s.view
+	if view == "" {
+		view = "default"
+	}
+	switch view {
+	case "tiny":
+	case "extended":
+	case "default":
+	default:
+		return goa.InvalidEnumValueError("view", view, []any{"tiny", "extended", "default"})
+	}
+	// Upgrade the HTTP connection to a websocket connection only once. Connection
+	// upgrade is done here so that authorization logic in the endpoint is executed
+	// before calling the actual service method which may call Close().
+	s.once.Do(func() {
+		respHdr := make(http.Header)
+		respHdr.Add("goa-view", view)
+		var conn *websocket.Conn
+		conn, err = s.upgrader.Upgrade(s.w, s.r, respHdr)
+		if err != nil {
+			s.upgradeErr = err
+			return
+		}
+		if s.configurer != nil {
+			conn = s.configurer(conn, s.cancel)
+		}
+		s.conn = conn
+	})
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	if err = s.conn.WriteControl(
 		websocket.CloseMessage,
@@ -280,6 +505,12 @@ func (s *StreamingResultMethodClientStream) Recv() (*streamingresultservice.User
 	res := NewStreamingResultMethodUserTypeOK(&body)
 	return res, nil
 }
+
+// RecvWithContext reads instances of "streamingresultservice.UserType" from
+// the "StreamingResultMethod" endpoint websocket connection with context.
+func (s *StreamingResultMethodClientStream) RecvWithContext(ctx context.Context) (*streamingresultservice.UserType, error) {
+	return s.Recv()
+}
 `
 
 var StreamingResultWithViewsClientEndpointCode = `// StreamingResultWithViewsMethod returns an endpoint that makes HTTP requests
@@ -289,13 +520,11 @@ func (c *Client) StreamingResultWithViewsMethod() goa.Endpoint {
 	var (
 		decodeResponse = DecodeStreamingResultWithViewsMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildStreamingResultWithViewsMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -304,6 +533,8 @@ func (c *Client) StreamingResultWithViewsMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("StreamingResultWithViewsService", "StreamingResultWithViewsMethod", err)
 		}
 		if c.configurer.StreamingResultWithViewsMethodFn != nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
 			conn = c.configurer.StreamingResultWithViewsMethodFn(conn, cancel)
 		}
 		go func() {
@@ -323,38 +554,6 @@ func (c *Client) StreamingResultWithViewsMethod() goa.Endpoint {
 }
 `
 
-var StreamingResultWithViewsClientStreamRecvCode = `// Recv reads instances of "streamingresultwithviewsservice.Usertype" from the
-// "StreamingResultWithViewsMethod" endpoint websocket connection.
-func (s *StreamingResultWithViewsMethodClientStream) Recv() (*streamingresultwithviewsservice.Usertype, error) {
-	var (
-		rv   *streamingresultwithviewsservice.Usertype
-		body StreamingResultWithViewsMethodResponseBody
-		err  error
-	)
-	err = s.conn.ReadJSON(&body)
-	if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-		s.conn.Close()
-		return rv, io.EOF
-	}
-	if err != nil {
-		return rv, err
-	}
-	res := NewStreamingResultWithViewsMethodUsertypeOK(&body)
-	vres := &streamingresultwithviewsserviceviews.Usertype{res, s.view}
-	if err := streamingresultwithviewsserviceviews.ValidateUsertype(vres); err != nil {
-		return rv, goahttp.ErrValidationError("StreamingResultWithViewsService", "StreamingResultWithViewsMethod", err)
-	}
-	return streamingresultwithviewsservice.NewUsertype(vres), nil
-}
-`
-
-var StreamingResultWithViewsClientStreamSetViewCode = `// SetView sets the view to render the  type before sending to the
-// "StreamingResultWithViewsMethod" endpoint websocket connection.
-func (s *StreamingResultWithViewsMethodClientStream) SetView(view string) {
-	s.view = view
-}
-`
-
 var StreamingResultWithExplicitViewClientEndpointCode = `// StreamingResultWithExplicitViewMethod returns an endpoint that makes HTTP
 // requests to the StreamingResultWithExplicitViewService service
 // StreamingResultWithExplicitViewMethod server.
@@ -362,13 +561,11 @@ func (c *Client) StreamingResultWithExplicitViewMethod() goa.Endpoint {
 	var (
 		decodeResponse = DecodeStreamingResultWithExplicitViewMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildStreamingResultWithExplicitViewMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -377,6 +574,8 @@ func (c *Client) StreamingResultWithExplicitViewMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("StreamingResultWithExplicitViewService", "StreamingResultWithExplicitViewMethod", err)
 		}
 		if c.configurer.StreamingResultWithExplicitViewMethodFn != nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
 			conn = c.configurer.StreamingResultWithExplicitViewMethodFn(conn, cancel)
 		}
 		go func() {
@@ -400,7 +599,7 @@ var StreamingResultWithExplicitViewClientStreamRecvCode = `// Recv reads instanc
 func (s *StreamingResultWithExplicitViewMethodClientStream) Recv() (*streamingresultwithexplicitviewservice.Usertype, error) {
 	var (
 		rv   *streamingresultwithexplicitviewservice.Usertype
-		body StreamingResultWithExplicitViewMethodResponseBody
+		body StreamingResultWithExplicitViewMethodResponseBodyExtended
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -412,11 +611,19 @@ func (s *StreamingResultWithExplicitViewMethodClientStream) Recv() (*streamingre
 		return rv, err
 	}
 	res := NewStreamingResultWithExplicitViewMethodUsertypeOK(&body)
-	vres := &streamingresultwithexplicitviewserviceviews.Usertype{res, "extended"}
+	vres := &streamingresultwithexplicitviewserviceviews.Usertype{Projected: res, View: "extended"}
 	if err := streamingresultwithexplicitviewserviceviews.ValidateUsertype(vres); err != nil {
 		return rv, goahttp.ErrValidationError("StreamingResultWithExplicitViewService", "StreamingResultWithExplicitViewMethod", err)
 	}
 	return streamingresultwithexplicitviewservice.NewUsertype(vres), nil
+}
+
+// RecvWithContext reads instances of
+// "streamingresultwithexplicitviewservice.Usertype" from the
+// "StreamingResultWithExplicitViewMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultWithExplicitViewMethodClientStream) RecvWithContext(ctx context.Context) (*streamingresultwithexplicitviewservice.Usertype, error) {
+	return s.Recv()
 }
 `
 
@@ -431,6 +638,7 @@ func (s *StreamingResultWithExplicitViewMethodServerStream) Send(v *streamingres
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -438,12 +646,20 @@ func (s *StreamingResultWithExplicitViewMethodServerStream) Send(v *streamingres
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := streamingresultwithexplicitviewservice.NewViewedUsertype(v, "extended")
 	body := NewStreamingResultWithExplicitViewMethodResponseBodyExtended(res.Projected)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "streamingresultwithexplicitviewservice.Usertype" to the
+// "StreamingResultWithExplicitViewMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultWithExplicitViewMethodServerStream) SendWithContext(ctx context.Context, v *streamingresultwithexplicitviewservice.Usertype) error {
+	return s.Send(v)
 }
 `
 
@@ -451,16 +667,31 @@ var StreamingResultCollectionWithViewsServerStreamSendCode = `// Send streams in
 // "streamingresultcollectionwithviewsservice.UsertypeCollection" to the
 // "StreamingResultCollectionWithViewsMethod" endpoint websocket connection.
 func (s *StreamingResultCollectionWithViewsMethodServerStream) Send(v streamingresultcollectionwithviewsservice.UsertypeCollection) error {
+	view := s.view
+	if view == "" {
+		view = "default"
+	}
+	if s.sentView != "" && view != s.sentView {
+		return goa.InvalidEnumValueError("view", view, []any{s.sentView})
+	}
+	switch view {
+	case "tiny":
+	case "extended":
+	case "default":
+	default:
+		return goa.InvalidEnumValueError("view", view, []any{"tiny", "extended", "default"})
+	}
 	var err error
 	// Upgrade the HTTP connection to a websocket connection only once. Connection
 	// upgrade is done here so that authorization logic in the endpoint is executed
 	// before calling the actual service method which may call Send().
 	s.once.Do(func() {
 		respHdr := make(http.Header)
-		respHdr.Add("goa-view", s.view)
+		respHdr.Add("goa-view", view)
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, respHdr)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -468,20 +699,33 @@ func (s *StreamingResultCollectionWithViewsMethodServerStream) Send(v streamingr
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
-	res := streamingresultcollectionwithviewsservice.NewViewedUsertypeCollection(v, s.view)
-	var body interface{}
-	switch s.view {
+	if s.sentView == "" {
+		s.sentView = view
+	}
+	switch view {
 	case "tiny":
-		body = NewUsertypeResponseTinyCollection(res.Projected)
+		res := streamingresultcollectionwithviewsservice.NewViewedUsertypeCollection(v, "tiny")
+		return s.conn.WriteJSON(NewUsertypeResponseTinyCollection(res.Projected))
 	case "extended":
-		body = NewUsertypeResponseExtendedCollection(res.Projected)
+		res := streamingresultcollectionwithviewsservice.NewViewedUsertypeCollection(v, "extended")
+		return s.conn.WriteJSON(NewUsertypeResponseExtendedCollection(res.Projected))
 	case "default", "":
-		body = NewUsertypeResponseCollection(res.Projected)
+		res := streamingresultcollectionwithviewsservice.NewViewedUsertypeCollection(v, "default")
+		return s.conn.WriteJSON(NewUsertypeResponseCollection(res.Projected))
+	default:
+		return goa.InvalidEnumValueError("view", view, []any{"tiny", "extended", "default"})
 	}
-	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "streamingresultcollectionwithviewsservice.UsertypeCollection" to the
+// "StreamingResultCollectionWithViewsMethod" endpoint websocket connection
+// with context.
+func (s *StreamingResultCollectionWithViewsMethodServerStream) SendWithContext(ctx context.Context, v streamingresultcollectionwithviewsservice.UsertypeCollection) error {
+	return s.Send(v)
 }
 `
 
@@ -490,39 +734,6 @@ var StreamingResultCollectionWithViewsServerStreamSetViewCode = `// SetView sets
 // sending to the "StreamingResultCollectionWithViewsMethod" endpoint websocket
 // connection.
 func (s *StreamingResultCollectionWithViewsMethodServerStream) SetView(view string) {
-	s.view = view
-}
-`
-
-var StreamingResultCollectionWithViewsClientStreamRecvCode = `// Recv reads instances of
-// "streamingresultcollectionwithviewsservice.UsertypeCollection" from the
-// "StreamingResultCollectionWithViewsMethod" endpoint websocket connection.
-func (s *StreamingResultCollectionWithViewsMethodClientStream) Recv() (streamingresultcollectionwithviewsservice.UsertypeCollection, error) {
-	var (
-		rv   streamingresultcollectionwithviewsservice.UsertypeCollection
-		body StreamingResultCollectionWithViewsMethodResponseBody
-		err  error
-	)
-	err = s.conn.ReadJSON(&body)
-	if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-		s.conn.Close()
-		return rv, io.EOF
-	}
-	if err != nil {
-		return rv, err
-	}
-	res := NewStreamingResultCollectionWithViewsMethodUsertypeCollectionOK(body)
-	vres := streamingresultcollectionwithviewsserviceviews.UsertypeCollection{res, s.view}
-	if err := streamingresultcollectionwithviewsserviceviews.ValidateUsertypeCollection(vres); err != nil {
-		return rv, goahttp.ErrValidationError("StreamingResultCollectionWithViewsService", "StreamingResultCollectionWithViewsMethod", err)
-	}
-	return streamingresultcollectionwithviewsservice.NewUsertypeCollection(vres), nil
-}
-`
-
-var StreamingResultCollectionWithViewsClientStreamSetViewCode = `// SetView sets the view to render the  type before sending to the
-// "StreamingResultCollectionWithViewsMethod" endpoint websocket connection.
-func (s *StreamingResultCollectionWithViewsMethodClientStream) SetView(view string) {
 	s.view = view
 }
 `
@@ -540,6 +751,7 @@ func (s *StreamingResultCollectionWithExplicitViewMethodServerStream) Send(v str
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -547,15 +759,22 @@ func (s *StreamingResultCollectionWithExplicitViewMethodServerStream) Send(v str
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := streamingresultcollectionwithexplicitviewservice.NewViewedUsertypeCollection(v, "tiny")
 	body := NewUsertypeResponseTinyCollection(res.Projected)
 	return s.conn.WriteJSON(body)
 }
-`
 
+// SendWithContext streams instances of
+// "streamingresultcollectionwithexplicitviewservice.UsertypeCollection" to the
+// "StreamingResultCollectionWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *StreamingResultCollectionWithExplicitViewMethodServerStream) SendWithContext(ctx context.Context, v streamingresultcollectionwithexplicitviewservice.UsertypeCollection) error {
+	return s.Send(v)
+}
+`
 var StreamingResultCollectionWithExplicitViewClientEndpointCode = `// StreamingResultCollectionWithExplicitViewMethod returns an endpoint that
 // makes HTTP requests to the StreamingResultCollectionWithExplicitViewService
 // service StreamingResultCollectionWithExplicitViewMethod server.
@@ -563,13 +782,11 @@ func (c *Client) StreamingResultCollectionWithExplicitViewMethod() goa.Endpoint 
 	var (
 		decodeResponse = DecodeStreamingResultCollectionWithExplicitViewMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildStreamingResultCollectionWithExplicitViewMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -578,6 +795,8 @@ func (c *Client) StreamingResultCollectionWithExplicitViewMethod() goa.Endpoint 
 			return nil, goahttp.ErrRequestError("StreamingResultCollectionWithExplicitViewService", "StreamingResultCollectionWithExplicitViewMethod", err)
 		}
 		if c.configurer.StreamingResultCollectionWithExplicitViewMethodFn != nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
 			conn = c.configurer.StreamingResultCollectionWithExplicitViewMethodFn(conn, cancel)
 		}
 		go func() {
@@ -602,7 +821,7 @@ var StreamingResultCollectionWithExplicitViewClientStreamRecvCode = `// Recv rea
 func (s *StreamingResultCollectionWithExplicitViewMethodClientStream) Recv() (streamingresultcollectionwithexplicitviewservice.UsertypeCollection, error) {
 	var (
 		rv   streamingresultcollectionwithexplicitviewservice.UsertypeCollection
-		body StreamingResultCollectionWithExplicitViewMethodResponseBody
+		body UsertypeResponseTinyCollection
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -614,11 +833,19 @@ func (s *StreamingResultCollectionWithExplicitViewMethodClientStream) Recv() (st
 		return rv, err
 	}
 	res := NewStreamingResultCollectionWithExplicitViewMethodUsertypeCollectionOK(body)
-	vres := streamingresultcollectionwithexplicitviewserviceviews.UsertypeCollection{res, "tiny"}
+	vres := streamingresultcollectionwithexplicitviewserviceviews.UsertypeCollection{Projected: res, View: "tiny"}
 	if err := streamingresultcollectionwithexplicitviewserviceviews.ValidateUsertypeCollection(vres); err != nil {
 		return rv, goahttp.ErrValidationError("StreamingResultCollectionWithExplicitViewService", "StreamingResultCollectionWithExplicitViewMethod", err)
 	}
 	return streamingresultcollectionwithexplicitviewservice.NewUsertypeCollection(vres), nil
+}
+
+// RecvWithContext reads instances of
+// "streamingresultcollectionwithexplicitviewservice.UsertypeCollection" from
+// the "StreamingResultCollectionWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *StreamingResultCollectionWithExplicitViewMethodClientStream) RecvWithContext(ctx context.Context) (streamingresultcollectionwithexplicitviewservice.UsertypeCollection, error) {
+	return s.Recv()
 }
 `
 
@@ -633,6 +860,7 @@ func (s *StreamingResultPrimitiveMethodServerStream) Send(v string) error {
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -640,11 +868,17 @@ func (s *StreamingResultPrimitiveMethodServerStream) Send(v string) error {
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendWithContext streams instances of "string" to the
+// "StreamingResultPrimitiveMethod" endpoint websocket connection with context.
+func (s *StreamingResultPrimitiveMethodServerStream) SendWithContext(ctx context.Context, v string) error {
+	return s.Send(v)
 }
 `
 
@@ -666,6 +900,12 @@ func (s *StreamingResultPrimitiveMethodClientStream) Recv() (string, error) {
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "string" from the
+// "StreamingResultPrimitiveMethod" endpoint websocket connection with context.
+func (s *StreamingResultPrimitiveMethodClientStream) RecvWithContext(ctx context.Context) (string, error) {
+	return s.Recv()
+}
 `
 
 var StreamingResultPrimitiveArrayServerStreamSendCode = `// Send streams instances of "[]int32" to the
@@ -679,6 +919,7 @@ func (s *StreamingResultPrimitiveArrayMethodServerStream) Send(v []int32) error 
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -686,11 +927,18 @@ func (s *StreamingResultPrimitiveArrayMethodServerStream) Send(v []int32) error 
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendWithContext streams instances of "[]int32" to the
+// "StreamingResultPrimitiveArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultPrimitiveArrayMethodServerStream) SendWithContext(ctx context.Context, v []int32) error {
+	return s.Send(v)
 }
 `
 
@@ -712,6 +960,13 @@ func (s *StreamingResultPrimitiveArrayMethodClientStream) Recv() ([]int32, error
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "[]int32" from the
+// "StreamingResultPrimitiveArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultPrimitiveArrayMethodClientStream) RecvWithContext(ctx context.Context) ([]int32, error) {
+	return s.Recv()
+}
 `
 
 var StreamingResultPrimitiveMapServerStreamSendCode = `// Send streams instances of "map[int32]string" to the
@@ -725,6 +980,7 @@ func (s *StreamingResultPrimitiveMapMethodServerStream) Send(v map[int32]string)
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -732,11 +988,18 @@ func (s *StreamingResultPrimitiveMapMethodServerStream) Send(v map[int32]string)
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendWithContext streams instances of "map[int32]string" to the
+// "StreamingResultPrimitiveMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultPrimitiveMapMethodServerStream) SendWithContext(ctx context.Context, v map[int32]string) error {
+	return s.Send(v)
 }
 `
 
@@ -758,6 +1021,13 @@ func (s *StreamingResultPrimitiveMapMethodClientStream) Recv() (map[int32]string
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "map[int32]string" from the
+// "StreamingResultPrimitiveMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultPrimitiveMapMethodClientStream) RecvWithContext(ctx context.Context) (map[int32]string, error) {
+	return s.Recv()
+}
 `
 
 var StreamingResultUserTypeArrayServerStreamSendCode = `// Send streams instances of "[]*streamingresultusertypearrayservice.UserType"
@@ -771,6 +1041,7 @@ func (s *StreamingResultUserTypeArrayMethodServerStream) Send(v []*streamingresu
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -778,12 +1049,20 @@ func (s *StreamingResultUserTypeArrayMethodServerStream) Send(v []*streamingresu
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	body := NewStreamingResultUserTypeArrayMethodResponseBody(res)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "[]*streamingresultusertypearrayservice.UserType" to the
+// "StreamingResultUserTypeArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultUserTypeArrayMethodServerStream) SendWithContext(ctx context.Context, v []*streamingresultusertypearrayservice.UserType) error {
+	return s.Send(v)
 }
 `
 
@@ -792,7 +1071,7 @@ var StreamingResultUserTypeArrayClientStreamRecvCode = `// Recv reads instances 
 func (s *StreamingResultUserTypeArrayMethodClientStream) Recv() ([]*streamingresultusertypearrayservice.UserType, error) {
 	var (
 		rv   []*streamingresultusertypearrayservice.UserType
-		body StreamingResultUserTypeArrayMethodResponseBody
+		body []*UserTypeResponse
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -805,6 +1084,14 @@ func (s *StreamingResultUserTypeArrayMethodClientStream) Recv() ([]*streamingres
 	}
 	res := NewStreamingResultUserTypeArrayMethodUserTypeOK(body)
 	return res, nil
+}
+
+// RecvWithContext reads instances of
+// "[]*streamingresultusertypearrayservice.UserType" from the
+// "StreamingResultUserTypeArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultUserTypeArrayMethodClientStream) RecvWithContext(ctx context.Context) ([]*streamingresultusertypearrayservice.UserType, error) {
+	return s.Recv()
 }
 `
 
@@ -820,6 +1107,7 @@ func (s *StreamingResultUserTypeMapMethodServerStream) Send(v map[string]*stream
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -827,12 +1115,20 @@ func (s *StreamingResultUserTypeMapMethodServerStream) Send(v map[string]*stream
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	body := NewStreamingResultUserTypeMapMethodResponseBody(res)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "map[string]*streamingresultusertypemapservice.UserType" to the
+// "StreamingResultUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultUserTypeMapMethodServerStream) SendWithContext(ctx context.Context, v map[string]*streamingresultusertypemapservice.UserType) error {
+	return s.Send(v)
 }
 `
 
@@ -842,7 +1138,7 @@ var StreamingResultUserTypeMapClientStreamRecvCode = `// Recv reads instances of
 func (s *StreamingResultUserTypeMapMethodClientStream) Recv() (map[string]*streamingresultusertypemapservice.UserType, error) {
 	var (
 		rv   map[string]*streamingresultusertypemapservice.UserType
-		body StreamingResultUserTypeMapMethodResponseBody
+		body map[string]*UserTypeResponse
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -856,6 +1152,14 @@ func (s *StreamingResultUserTypeMapMethodClientStream) Recv() (map[string]*strea
 	res := NewStreamingResultUserTypeMapMethodMapStringUserTypeOK(body)
 	return res, nil
 }
+
+// RecvWithContext reads instances of
+// "map[string]*streamingresultusertypemapservice.UserType" from the
+// "StreamingResultUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingResultUserTypeMapMethodClientStream) RecvWithContext(ctx context.Context) (map[string]*streamingresultusertypemapservice.UserType, error) {
+	return s.Recv()
+}
 `
 
 var StreamingResultNoPayloadClientEndpointCode = `// StreamingResultNoPayloadMethod returns an endpoint that makes HTTP requests
@@ -865,13 +1169,11 @@ func (c *Client) StreamingResultNoPayloadMethod() goa.Endpoint {
 	var (
 		decodeResponse = DecodeStreamingResultNoPayloadMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildStreamingResultNoPayloadMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -880,6 +1182,8 @@ func (c *Client) StreamingResultNoPayloadMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("StreamingResultNoPayloadService", "StreamingResultNoPayloadMethod", err)
 		}
 		if c.configurer.StreamingResultNoPayloadMethodFn != nil {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
 			conn = c.configurer.StreamingResultNoPayloadMethodFn(conn, cancel)
 		}
 		go func() {
@@ -906,7 +1210,7 @@ func NewStreamingPayloadMethodHandler(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	upgrader goahttp.Upgrader,
 	configurer goahttp.ConnConfigureFunc,
 ) http.Handler {
@@ -920,7 +1224,7 @@ func NewStreamingPayloadMethodHandler(
 		ctx = context.WithValue(ctx, goa.ServiceKey, "StreamingPayloadService")
 		payload, err := decodeRequest(r)
 		if err != nil {
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -935,14 +1239,24 @@ func NewStreamingPayloadMethodHandler(
 				w:          w,
 				r:          r,
 			},
-			Payload: payload.(*streamingpayloadservice.Payload),
+			Payload: payload,
 		}
 		_, err = endpoint(ctx, v)
 		if err != nil {
-			if _, ok := err.(websocket.HandshakeError); ok {
+			var stream *StreamingPayloadMethodServerStream
+			if wrapper, ok := v.Stream.(interface{ Unwrap() any }); ok {
+				stream = wrapper.Unwrap().(*StreamingPayloadMethodServerStream)
+			} else {
+				stream = v.Stream.(*StreamingPayloadMethodServerStream)
+			}
+			if stream != nil && stream.conn != nil {
+				// Response writer has been hijacked, do not encode the error
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
 				return
 			}
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -959,6 +1273,13 @@ func (s *StreamingPayloadMethodServerStream) SendAndClose(v *streamingpayloadser
 	res := v
 	body := NewStreamingPayloadMethodResponseBody(res)
 	return s.conn.WriteJSON(body)
+}
+
+// SendAndCloseWithContext streams instances of
+// "streamingpayloadservice.UserType" to the "StreamingPayloadMethod" endpoint
+// websocket connection with context and closes the connection.
+func (s *StreamingPayloadMethodServerStream) SendAndCloseWithContext(ctx context.Context, v *streamingpayloadservice.UserType) error {
+	return s.SendAndClose(v)
 }
 `
 
@@ -977,6 +1298,7 @@ func (s *StreamingPayloadMethodServerStream) Recv() (*streamingpayloadservice.Re
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -984,8 +1306,8 @@ func (s *StreamingPayloadMethodServerStream) Recv() (*streamingpayloadservice.Re
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -994,6 +1316,12 @@ func (s *StreamingPayloadMethodServerStream) Recv() (*streamingpayloadservice.Re
 		return rv, io.EOF
 	}
 	return NewStreamingPayloadMethodStreamingBody(msg), nil
+}
+
+// RecvWithContext reads instances of "streamingpayloadservice.Request" from
+// the "StreamingPayloadMethod" endpoint websocket connection with context.
+func (s *StreamingPayloadMethodServerStream) RecvWithContext(ctx context.Context) (*streamingpayloadservice.Request, error) {
+	return s.Recv()
 }
 `
 
@@ -1004,7 +1332,7 @@ func (c *Client) StreamingPayloadMethod() goa.Endpoint {
 		encodeRequest  = EncodeStreamingPayloadMethodRequest(c.encoder)
 		decodeResponse = DecodeStreamingPayloadMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildStreamingPayloadMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
@@ -1013,8 +1341,6 @@ func (c *Client) StreamingPayloadMethod() goa.Endpoint {
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -1023,7 +1349,7 @@ func (c *Client) StreamingPayloadMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("StreamingPayloadService", "StreamingPayloadMethod", err)
 		}
 		if c.configurer.StreamingPayloadMethodFn != nil {
-			conn = c.configurer.StreamingPayloadMethodFn(conn, cancel)
+			conn = c.configurer.StreamingPayloadMethodFn(conn, nil)
 		}
 		stream := &StreamingPayloadMethodClientStream{conn: conn}
 		return stream, nil
@@ -1036,6 +1362,12 @@ var StreamingPayloadClientStreamSendCode = `// Send streams instances of "stream
 func (s *StreamingPayloadMethodClientStream) Send(v *streamingpayloadservice.Request) error {
 	body := NewStreamingPayloadMethodStreamingBody(v)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of "streamingpayloadservice.Request" to
+// the "StreamingPayloadMethod" endpoint websocket connection with context.
+func (s *StreamingPayloadMethodClientStream) SendWithContext(ctx context.Context, v *streamingpayloadservice.Request) error {
+	return s.Send(v)
 }
 `
 
@@ -1064,6 +1396,13 @@ func (s *StreamingPayloadMethodClientStream) CloseAndRecv() (*streamingpayloadse
 	res := NewStreamingPayloadMethodUserTypeOK(&body)
 	return res, nil
 }
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadMethod" endpoint websocket connection and reads instances
+// of "streamingpayloadservice.UserType" from the connection with context.
+func (s *StreamingPayloadMethodClientStream) CloseAndRecvWithContext(ctx context.Context) (*streamingpayloadservice.UserType, error) {
+	return s.CloseAndRecv()
+}
 `
 
 var StreamingPayloadNoPayloadServerHandlerInitCode = `// NewStreamingPayloadNoPayloadMethodHandler creates a HTTP handler which loads
@@ -1075,7 +1414,7 @@ func NewStreamingPayloadNoPayloadMethodHandler(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	upgrader goahttp.Upgrader,
 	configurer goahttp.ConnConfigureFunc,
 ) http.Handler {
@@ -1100,10 +1439,20 @@ func NewStreamingPayloadNoPayloadMethodHandler(
 		}
 		_, err = endpoint(ctx, v)
 		if err != nil {
-			if _, ok := err.(websocket.HandshakeError); ok {
+			var stream *StreamingPayloadNoPayloadMethodServerStream
+			if wrapper, ok := v.Stream.(interface{ Unwrap() any }); ok {
+				stream = wrapper.Unwrap().(*StreamingPayloadNoPayloadMethodServerStream)
+			} else {
+				stream = v.Stream.(*StreamingPayloadNoPayloadMethodServerStream)
+			}
+			if stream != nil && stream.conn != nil {
+				// Response writer has been hijacked, do not encode the error
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
 				return
 			}
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -1119,13 +1468,11 @@ func (c *Client) StreamingPayloadNoPayloadMethod() goa.Endpoint {
 	var (
 		decodeResponse = DecodeStreamingPayloadNoPayloadMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildStreamingPayloadNoPayloadMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -1134,7 +1481,7 @@ func (c *Client) StreamingPayloadNoPayloadMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("StreamingPayloadNoPayloadService", "StreamingPayloadNoPayloadMethod", err)
 		}
 		if c.configurer.StreamingPayloadNoPayloadMethodFn != nil {
-			conn = c.configurer.StreamingPayloadNoPayloadMethodFn(conn, cancel)
+			conn = c.configurer.StreamingPayloadNoPayloadMethodFn(conn, nil)
 		}
 		stream := &StreamingPayloadNoPayloadMethodClientStream{conn: conn}
 		return stream, nil
@@ -1147,6 +1494,13 @@ var StreamingPayloadNoPayloadClientStreamSendCode = `// Send streams instances o
 func (s *StreamingPayloadNoPayloadMethodClientStream) Send(v *streamingpayloadnopayloadservice.Request) error {
 	body := NewStreamingPayloadNoPayloadMethodStreamingBody(v)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "streamingpayloadnopayloadservice.Request" to the
+// "StreamingPayloadNoPayloadMethod" endpoint websocket connection with context.
+func (s *StreamingPayloadNoPayloadMethodClientStream) SendWithContext(ctx context.Context, v *streamingpayloadnopayloadservice.Request) error {
+	return s.Send(v)
 }
 `
 
@@ -1175,6 +1529,14 @@ func (s *StreamingPayloadNoPayloadMethodClientStream) CloseAndRecv() (*streaming
 	res := NewStreamingPayloadNoPayloadMethodUserTypeOK(&body)
 	return res, nil
 }
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadNoPayloadMethod" endpoint websocket connection and reads
+// instances of "streamingpayloadnopayloadservice.UserType" from the connection
+// with context.
+func (s *StreamingPayloadNoPayloadMethodClientStream) CloseAndRecvWithContext(ctx context.Context) (*streamingpayloadnopayloadservice.UserType, error) {
+	return s.CloseAndRecv()
+}
 `
 
 var StreamingPayloadNoResultServerStreamRecvCode = `// Recv reads instances of "string" from the "StreamingPayloadNoResultMethod"
@@ -1192,6 +1554,7 @@ func (s *StreamingPayloadNoResultMethodServerStream) Recv() (string, error) {
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1199,8 +1562,8 @@ func (s *StreamingPayloadNoResultMethodServerStream) Recv() (string, error) {
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -1210,14 +1573,44 @@ func (s *StreamingPayloadNoResultMethodServerStream) Recv() (string, error) {
 	}
 	return *msg, nil
 }
+
+// RecvWithContext reads instances of "string" from the
+// "StreamingPayloadNoResultMethod" endpoint websocket connection with context.
+func (s *StreamingPayloadNoResultMethodServerStream) RecvWithContext(ctx context.Context) (string, error) {
+	return s.Recv()
+}
 `
 
 var StreamingPayloadNoResultServerStreamCloseCode = `// Close closes the "StreamingPayloadNoResultMethod" endpoint websocket
 // connection.
 func (s *StreamingPayloadNoResultMethodServerStream) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.close()
+	})
+	return s.closeErr
+}
+
+// close opens the websocket connection when needed, sends its normal close
+// message, and closes it.
+func (s *StreamingPayloadNoResultMethodServerStream) close() error {
 	var err error
-	if s.conn == nil {
-		return nil
+	// Upgrade the HTTP connection to a websocket connection only once. Connection
+	// upgrade is done here so that authorization logic in the endpoint is executed
+	// before calling the actual service method which may call Close().
+	s.once.Do(func() {
+		var conn *websocket.Conn
+		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
+		if err != nil {
+			s.upgradeErr = err
+			return
+		}
+		if s.configurer != nil {
+			conn = s.configurer(conn, s.cancel)
+		}
+		s.conn = conn
+	})
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	if err = s.conn.WriteControl(
 		websocket.CloseMessage,
@@ -1235,6 +1628,12 @@ var StreamingPayloadNoResultClientStreamSendCode = `// Send streams instances of
 func (s *StreamingPayloadNoResultMethodClientStream) Send(v string) error {
 	return s.conn.WriteJSON(v)
 }
+
+// SendWithContext streams instances of "string" to the
+// "StreamingPayloadNoResultMethod" endpoint websocket connection with context.
+func (s *StreamingPayloadNoResultMethodClientStream) SendWithContext(ctx context.Context, v string) error {
+	return s.Send(v)
+}
 `
 
 var StreamingPayloadNoResultClientStreamCloseCode = `// Close closes the "StreamingPayloadNoResultMethod" endpoint websocket
@@ -1249,115 +1648,6 @@ func (s *StreamingPayloadNoResultMethodClientStream) Close() error {
 }
 `
 
-var StreamingPayloadResultWithViewsServerStreamSendCode = `// SendAndClose streams instances of
-// "streamingpayloadresultwithviewsservice.Usertype" to the
-// "StreamingPayloadResultWithViewsMethod" endpoint websocket connection and
-// closes the connection.
-func (s *StreamingPayloadResultWithViewsMethodServerStream) SendAndClose(v *streamingpayloadresultwithviewsservice.Usertype) error {
-	defer s.conn.Close()
-	res := streamingpayloadresultwithviewsservice.NewViewedUsertype(v, s.view)
-	var body interface{}
-	switch s.view {
-	case "tiny":
-		body = NewStreamingPayloadResultWithViewsMethodResponseBodyTiny(res.Projected)
-	case "extended":
-		body = NewStreamingPayloadResultWithViewsMethodResponseBodyExtended(res.Projected)
-	case "default", "":
-		body = NewStreamingPayloadResultWithViewsMethodResponseBody(res.Projected)
-	}
-	return s.conn.WriteJSON(body)
-}
-`
-
-var StreamingPayloadResultWithViewsServerStreamRecvCode = `// Recv reads instances of "float32" from the
-// "StreamingPayloadResultWithViewsMethod" endpoint websocket connection.
-func (s *StreamingPayloadResultWithViewsMethodServerStream) Recv() (float32, error) {
-	var (
-		rv  float32
-		msg *float32
-		err error
-	)
-	// Upgrade the HTTP connection to a websocket connection only once. Connection
-	// upgrade is done here so that authorization logic in the endpoint is executed
-	// before calling the actual service method which may call Recv().
-	s.once.Do(func() {
-		var conn *websocket.Conn
-		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
-		if err != nil {
-			return
-		}
-		if s.configurer != nil {
-			conn = s.configurer(conn, s.cancel)
-		}
-		s.conn = conn
-	})
-	if err != nil {
-		return rv, err
-	}
-	if err = s.conn.ReadJSON(&msg); err != nil {
-		return rv, err
-	}
-	if msg == nil {
-		return rv, io.EOF
-	}
-	return *msg, nil
-}
-`
-
-var StreamingPayloadResultWithViewsServerStreamSetViewCode = `// SetView sets the view to render the
-// streamingpayloadresultwithviewsservice.Usertype type before sending to the
-// "StreamingPayloadResultWithViewsMethod" endpoint websocket connection.
-func (s *StreamingPayloadResultWithViewsMethodServerStream) SetView(view string) {
-	s.view = view
-}
-`
-
-var StreamingPayloadResultWithViewsClientStreamSendCode = `// Send streams instances of "float32" to the
-// "StreamingPayloadResultWithViewsMethod" endpoint websocket connection.
-func (s *StreamingPayloadResultWithViewsMethodClientStream) Send(v float32) error {
-	return s.conn.WriteJSON(v)
-}
-`
-
-var StreamingPayloadResultWithViewsClientStreamRecvCode = `// CloseAndRecv stops sending messages to the
-// "StreamingPayloadResultWithViewsMethod" endpoint websocket connection and
-// reads instances of "streamingpayloadresultwithviewsservice.Usertype" from
-// the connection.
-func (s *StreamingPayloadResultWithViewsMethodClientStream) CloseAndRecv() (*streamingpayloadresultwithviewsservice.Usertype, error) {
-	var (
-		rv   *streamingpayloadresultwithviewsservice.Usertype
-		body StreamingPayloadResultWithViewsMethodResponseBody
-		err  error
-	)
-	defer s.conn.Close()
-	// Send a nil payload to the server implying end of message
-	if err = s.conn.WriteJSON(nil); err != nil {
-		return rv, err
-	}
-	err = s.conn.ReadJSON(&body)
-	if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-		s.conn.Close()
-		return rv, io.EOF
-	}
-	if err != nil {
-		return rv, err
-	}
-	res := NewStreamingPayloadResultWithViewsMethodUsertypeOK(&body)
-	vres := &streamingpayloadresultwithviewsserviceviews.Usertype{res, s.view}
-	if err := streamingpayloadresultwithviewsserviceviews.ValidateUsertype(vres); err != nil {
-		return rv, goahttp.ErrValidationError("StreamingPayloadResultWithViewsService", "StreamingPayloadResultWithViewsMethod", err)
-	}
-	return streamingpayloadresultwithviewsservice.NewUsertype(vres), nil
-}
-`
-
-var StreamingPayloadResultWithViewsClientStreamSetViewCode = `// SetView sets the view to render the float32 type before sending to the
-// "StreamingPayloadResultWithViewsMethod" endpoint websocket connection.
-func (s *StreamingPayloadResultWithViewsMethodClientStream) SetView(view string) {
-	s.view = view
-}
-`
-
 var StreamingPayloadResultWithExplicitViewServerStreamSendCode = `// SendAndClose streams instances of
 // "streamingpayloadresultwithexplicitviewservice.Usertype" to the
 // "StreamingPayloadResultWithExplicitViewMethod" endpoint websocket connection
@@ -1367,6 +1657,14 @@ func (s *StreamingPayloadResultWithExplicitViewMethodServerStream) SendAndClose(
 	res := streamingpayloadresultwithexplicitviewservice.NewViewedUsertype(v, "extended")
 	body := NewStreamingPayloadResultWithExplicitViewMethodResponseBodyExtended(res.Projected)
 	return s.conn.WriteJSON(body)
+}
+
+// SendAndCloseWithContext streams instances of
+// "streamingpayloadresultwithexplicitviewservice.Usertype" to the
+// "StreamingPayloadResultWithExplicitViewMethod" endpoint websocket connection
+// with context and closes the connection.
+func (s *StreamingPayloadResultWithExplicitViewMethodServerStream) SendAndCloseWithContext(ctx context.Context, v *streamingpayloadresultwithexplicitviewservice.Usertype) error {
+	return s.SendAndClose(v)
 }
 `
 
@@ -1385,6 +1683,7 @@ func (s *StreamingPayloadResultWithExplicitViewMethodServerStream) Recv() (float
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1392,8 +1691,8 @@ func (s *StreamingPayloadResultWithExplicitViewMethodServerStream) Recv() (float
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -1403,12 +1702,26 @@ func (s *StreamingPayloadResultWithExplicitViewMethodServerStream) Recv() (float
 	}
 	return *msg, nil
 }
+
+// RecvWithContext reads instances of "float32" from the
+// "StreamingPayloadResultWithExplicitViewMethod" endpoint websocket connection
+// with context.
+func (s *StreamingPayloadResultWithExplicitViewMethodServerStream) RecvWithContext(ctx context.Context) (float32, error) {
+	return s.Recv()
+}
 `
 
 var StreamingPayloadResultWithExplicitViewClientStreamSendCode = `// Send streams instances of "float32" to the
 // "StreamingPayloadResultWithExplicitViewMethod" endpoint websocket connection.
 func (s *StreamingPayloadResultWithExplicitViewMethodClientStream) Send(v float32) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "float32" to the
+// "StreamingPayloadResultWithExplicitViewMethod" endpoint websocket connection
+// with context.
+func (s *StreamingPayloadResultWithExplicitViewMethodClientStream) SendWithContext(ctx context.Context, v float32) error {
+	return s.Send(v)
 }
 `
 
@@ -1419,7 +1732,7 @@ var StreamingPayloadResultWithExplicitViewClientStreamRecvCode = `// CloseAndRec
 func (s *StreamingPayloadResultWithExplicitViewMethodClientStream) CloseAndRecv() (*streamingpayloadresultwithexplicitviewservice.Usertype, error) {
 	var (
 		rv   *streamingpayloadresultwithexplicitviewservice.Usertype
-		body StreamingPayloadResultWithExplicitViewMethodResponseBody
+		body StreamingPayloadResultWithExplicitViewMethodResponseBodyExtended
 		err  error
 	)
 	defer s.conn.Close()
@@ -1436,125 +1749,20 @@ func (s *StreamingPayloadResultWithExplicitViewMethodClientStream) CloseAndRecv(
 		return rv, err
 	}
 	res := NewStreamingPayloadResultWithExplicitViewMethodUsertypeOK(&body)
-	vres := &streamingpayloadresultwithexplicitviewserviceviews.Usertype{res, "extended"}
+	vres := &streamingpayloadresultwithexplicitviewserviceviews.Usertype{Projected: res, View: "extended"}
 	if err := streamingpayloadresultwithexplicitviewserviceviews.ValidateUsertype(vres); err != nil {
 		return rv, goahttp.ErrValidationError("StreamingPayloadResultWithExplicitViewService", "StreamingPayloadResultWithExplicitViewMethod", err)
 	}
 	return streamingpayloadresultwithexplicitviewservice.NewUsertype(vres), nil
 }
-`
 
-var StreamingPayloadResultCollectionWithViewsServerStreamSendCode = `// SendAndClose streams instances of
-// "streamingpayloadresultcollectionwithviewsservice.UsertypeCollection" to the
-// "StreamingPayloadResultCollectionWithViewsMethod" endpoint websocket
-// connection and closes the connection.
-func (s *StreamingPayloadResultCollectionWithViewsMethodServerStream) SendAndClose(v streamingpayloadresultcollectionwithviewsservice.UsertypeCollection) error {
-	defer s.conn.Close()
-	res := streamingpayloadresultcollectionwithviewsservice.NewViewedUsertypeCollection(v, s.view)
-	var body interface{}
-	switch s.view {
-	case "tiny":
-		body = NewUsertypeResponseTinyCollection(res.Projected)
-	case "extended":
-		body = NewUsertypeResponseExtendedCollection(res.Projected)
-	case "default", "":
-		body = NewUsertypeResponseCollection(res.Projected)
-	}
-	return s.conn.WriteJSON(body)
-}
-`
-
-var StreamingPayloadResultCollectionWithViewsServerStreamRecvCode = `// Recv reads instances of "interface{}" from the
-// "StreamingPayloadResultCollectionWithViewsMethod" endpoint websocket
-// connection.
-func (s *StreamingPayloadResultCollectionWithViewsMethodServerStream) Recv() (interface{}, error) {
-	var (
-		rv  interface{}
-		msg *interface{}
-		err error
-	)
-	// Upgrade the HTTP connection to a websocket connection only once. Connection
-	// upgrade is done here so that authorization logic in the endpoint is executed
-	// before calling the actual service method which may call Recv().
-	s.once.Do(func() {
-		var conn *websocket.Conn
-		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
-		if err != nil {
-			return
-		}
-		if s.configurer != nil {
-			conn = s.configurer(conn, s.cancel)
-		}
-		s.conn = conn
-	})
-	if err != nil {
-		return rv, err
-	}
-	if err = s.conn.ReadJSON(&msg); err != nil {
-		return rv, err
-	}
-	if msg == nil {
-		return rv, io.EOF
-	}
-	return *msg, nil
-}
-`
-
-var StreamingPayloadResultCollectionWithViewsServerStreamSetViewCode = `// SetView sets the view to render the
-// streamingpayloadresultcollectionwithviewsservice.UsertypeCollection type
-// before sending to the "StreamingPayloadResultCollectionWithViewsMethod"
-// endpoint websocket connection.
-func (s *StreamingPayloadResultCollectionWithViewsMethodServerStream) SetView(view string) {
-	s.view = view
-}
-`
-
-var StreamingPayloadResultCollectionWithViewsClientStreamSendCode = `// Send streams instances of "interface{}" to the
-// "StreamingPayloadResultCollectionWithViewsMethod" endpoint websocket
-// connection.
-func (s *StreamingPayloadResultCollectionWithViewsMethodClientStream) Send(v interface{}) error {
-	return s.conn.WriteJSON(v)
-}
-`
-
-var StreamingPayloadResultCollectionWithViewsClientStreamRecvCode = `// CloseAndRecv stops sending messages to the
-// "StreamingPayloadResultCollectionWithViewsMethod" endpoint websocket
-// connection and reads instances of
-// "streamingpayloadresultcollectionwithviewsservice.UsertypeCollection" from
-// the connection.
-func (s *StreamingPayloadResultCollectionWithViewsMethodClientStream) CloseAndRecv() (streamingpayloadresultcollectionwithviewsservice.UsertypeCollection, error) {
-	var (
-		rv   streamingpayloadresultcollectionwithviewsservice.UsertypeCollection
-		body StreamingPayloadResultCollectionWithViewsMethodResponseBody
-		err  error
-	)
-	defer s.conn.Close()
-	// Send a nil payload to the server implying end of message
-	if err = s.conn.WriteJSON(nil); err != nil {
-		return rv, err
-	}
-	err = s.conn.ReadJSON(&body)
-	if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-		s.conn.Close()
-		return rv, io.EOF
-	}
-	if err != nil {
-		return rv, err
-	}
-	res := NewStreamingPayloadResultCollectionWithViewsMethodUsertypeCollectionOK(body)
-	vres := streamingpayloadresultcollectionwithviewsserviceviews.UsertypeCollection{res, s.view}
-	if err := streamingpayloadresultcollectionwithviewsserviceviews.ValidateUsertypeCollection(vres); err != nil {
-		return rv, goahttp.ErrValidationError("StreamingPayloadResultCollectionWithViewsService", "StreamingPayloadResultCollectionWithViewsMethod", err)
-	}
-	return streamingpayloadresultcollectionwithviewsservice.NewUsertypeCollection(vres), nil
-}
-`
-
-var StreamingPayloadResultCollectionWithViewsClientStreamSetViewCode = `// SetView sets the view to render the interface{} type before sending to the
-// "StreamingPayloadResultCollectionWithViewsMethod" endpoint websocket
-// connection.
-func (s *StreamingPayloadResultCollectionWithViewsMethodClientStream) SetView(view string) {
-	s.view = view
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadResultWithExplicitViewMethod" endpoint websocket connection
+// and reads instances of
+// "streamingpayloadresultwithexplicitviewservice.Usertype" from the connection
+// with context.
+func (s *StreamingPayloadResultWithExplicitViewMethodClientStream) CloseAndRecvWithContext(ctx context.Context) (*streamingpayloadresultwithexplicitviewservice.Usertype, error) {
+	return s.CloseAndRecv()
 }
 `
 
@@ -1568,15 +1776,23 @@ func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) Sen
 	body := NewUsertypeResponseTinyCollection(res.Projected)
 	return s.conn.WriteJSON(body)
 }
+
+// SendAndCloseWithContext streams instances of
+// "streamingpayloadresultcollectionwithexplicitviewservice.UsertypeCollection"
+// to the "StreamingPayloadResultCollectionWithExplicitViewMethod" endpoint
+// websocket connection with context and closes the connection.
+func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) SendAndCloseWithContext(ctx context.Context, v streamingpayloadresultcollectionwithexplicitviewservice.UsertypeCollection) error {
+	return s.SendAndClose(v)
+}
 `
 
-var StreamingPayloadResultCollectionWithExplicitViewServerStreamRecvCode = `// Recv reads instances of "interface{}" from the
+var StreamingPayloadResultCollectionWithExplicitViewServerStreamRecvCode = `// Recv reads instances of "any" from the
 // "StreamingPayloadResultCollectionWithExplicitViewMethod" endpoint websocket
 // connection.
-func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) Recv() (interface{}, error) {
+func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) Recv() (any, error) {
 	var (
-		rv  interface{}
-		msg *interface{}
+		rv  any
+		msg *any
 		err error
 	)
 	// Upgrade the HTTP connection to a websocket connection only once. Connection
@@ -1586,6 +1802,7 @@ func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) Rec
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1593,8 +1810,8 @@ func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) Rec
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -1604,13 +1821,27 @@ func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) Rec
 	}
 	return *msg, nil
 }
+
+// RecvWithContext reads instances of "any" from the
+// "StreamingPayloadResultCollectionWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *StreamingPayloadResultCollectionWithExplicitViewMethodServerStream) RecvWithContext(ctx context.Context) (any, error) {
+	return s.Recv()
+}
 `
 
-var StreamingPayloadResultCollectionWithExplicitViewClientStreamSendCode = `// Send streams instances of "interface{}" to the
+var StreamingPayloadResultCollectionWithExplicitViewClientStreamSendCode = `// Send streams instances of "any" to the
 // "StreamingPayloadResultCollectionWithExplicitViewMethod" endpoint websocket
 // connection.
-func (s *StreamingPayloadResultCollectionWithExplicitViewMethodClientStream) Send(v interface{}) error {
+func (s *StreamingPayloadResultCollectionWithExplicitViewMethodClientStream) Send(v any) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "any" to the
+// "StreamingPayloadResultCollectionWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *StreamingPayloadResultCollectionWithExplicitViewMethodClientStream) SendWithContext(ctx context.Context, v any) error {
+	return s.Send(v)
 }
 `
 
@@ -1622,7 +1853,7 @@ var StreamingPayloadResultCollectionWithExplicitViewClientStreamRecvCode = `// C
 func (s *StreamingPayloadResultCollectionWithExplicitViewMethodClientStream) CloseAndRecv() (streamingpayloadresultcollectionwithexplicitviewservice.UsertypeCollection, error) {
 	var (
 		rv   streamingpayloadresultcollectionwithexplicitviewservice.UsertypeCollection
-		body StreamingPayloadResultCollectionWithExplicitViewMethodResponseBody
+		body UsertypeResponseTinyCollection
 		err  error
 	)
 	defer s.conn.Close()
@@ -1639,11 +1870,20 @@ func (s *StreamingPayloadResultCollectionWithExplicitViewMethodClientStream) Clo
 		return rv, err
 	}
 	res := NewStreamingPayloadResultCollectionWithExplicitViewMethodUsertypeCollectionOK(body)
-	vres := streamingpayloadresultcollectionwithexplicitviewserviceviews.UsertypeCollection{res, "tiny"}
+	vres := streamingpayloadresultcollectionwithexplicitviewserviceviews.UsertypeCollection{Projected: res, View: "tiny"}
 	if err := streamingpayloadresultcollectionwithexplicitviewserviceviews.ValidateUsertypeCollection(vres); err != nil {
 		return rv, goahttp.ErrValidationError("StreamingPayloadResultCollectionWithExplicitViewService", "StreamingPayloadResultCollectionWithExplicitViewMethod", err)
 	}
 	return streamingpayloadresultcollectionwithexplicitviewservice.NewUsertypeCollection(vres), nil
+}
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadResultCollectionWithExplicitViewMethod" endpoint websocket
+// connection and reads instances of
+// "streamingpayloadresultcollectionwithexplicitviewservice.UsertypeCollection"
+// from the connection with context.
+func (s *StreamingPayloadResultCollectionWithExplicitViewMethodClientStream) CloseAndRecvWithContext(ctx context.Context) (streamingpayloadresultcollectionwithexplicitviewservice.UsertypeCollection, error) {
+	return s.CloseAndRecv()
 }
 `
 
@@ -1654,6 +1894,13 @@ func (s *StreamingPayloadPrimitiveMethodServerStream) SendAndClose(v string) err
 	defer s.conn.Close()
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendAndCloseWithContext streams instances of "string" to the
+// "StreamingPayloadPrimitiveMethod" endpoint websocket connection with context
+// and closes the connection.
+func (s *StreamingPayloadPrimitiveMethodServerStream) SendAndCloseWithContext(ctx context.Context, v string) error {
+	return s.SendAndClose(v)
 }
 `
 
@@ -1672,6 +1919,7 @@ func (s *StreamingPayloadPrimitiveMethodServerStream) Recv() (string, error) {
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1679,8 +1927,8 @@ func (s *StreamingPayloadPrimitiveMethodServerStream) Recv() (string, error) {
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -1690,12 +1938,24 @@ func (s *StreamingPayloadPrimitiveMethodServerStream) Recv() (string, error) {
 	}
 	return *msg, nil
 }
+
+// RecvWithContext reads instances of "string" from the
+// "StreamingPayloadPrimitiveMethod" endpoint websocket connection with context.
+func (s *StreamingPayloadPrimitiveMethodServerStream) RecvWithContext(ctx context.Context) (string, error) {
+	return s.Recv()
+}
 `
 
 var StreamingPayloadPrimitiveClientStreamSendCode = `// Send streams instances of "string" to the "StreamingPayloadPrimitiveMethod"
 // endpoint websocket connection.
 func (s *StreamingPayloadPrimitiveMethodClientStream) Send(v string) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "string" to the
+// "StreamingPayloadPrimitiveMethod" endpoint websocket connection with context.
+func (s *StreamingPayloadPrimitiveMethodClientStream) SendWithContext(ctx context.Context, v string) error {
+	return s.Send(v)
 }
 `
 
@@ -1723,6 +1983,13 @@ func (s *StreamingPayloadPrimitiveMethodClientStream) CloseAndRecv() (string, er
 	}
 	return body, nil
 }
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadPrimitiveMethod" endpoint websocket connection and reads
+// instances of "string" from the connection with context.
+func (s *StreamingPayloadPrimitiveMethodClientStream) CloseAndRecvWithContext(ctx context.Context) (string, error) {
+	return s.CloseAndRecv()
+}
 `
 
 var StreamingPayloadPrimitiveArrayServerStreamSendCode = `// SendAndClose streams instances of "[]string" to the
@@ -1732,6 +1999,13 @@ func (s *StreamingPayloadPrimitiveArrayMethodServerStream) SendAndClose(v []stri
 	defer s.conn.Close()
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendAndCloseWithContext streams instances of "[]string" to the
+// "StreamingPayloadPrimitiveArrayMethod" endpoint websocket connection with
+// context and closes the connection.
+func (s *StreamingPayloadPrimitiveArrayMethodServerStream) SendAndCloseWithContext(ctx context.Context, v []string) error {
+	return s.SendAndClose(v)
 }
 `
 
@@ -1750,6 +2024,7 @@ func (s *StreamingPayloadPrimitiveArrayMethodServerStream) Recv() ([]int32, erro
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1757,8 +2032,8 @@ func (s *StreamingPayloadPrimitiveArrayMethodServerStream) Recv() ([]int32, erro
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -1768,12 +2043,26 @@ func (s *StreamingPayloadPrimitiveArrayMethodServerStream) Recv() ([]int32, erro
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "[]int32" from the
+// "StreamingPayloadPrimitiveArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadPrimitiveArrayMethodServerStream) RecvWithContext(ctx context.Context) ([]int32, error) {
+	return s.Recv()
+}
 `
 
 var StreamingPayloadPrimitiveArrayClientStreamSendCode = `// Send streams instances of "[]int32" to the
 // "StreamingPayloadPrimitiveArrayMethod" endpoint websocket connection.
 func (s *StreamingPayloadPrimitiveArrayMethodClientStream) Send(v []int32) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "[]int32" to the
+// "StreamingPayloadPrimitiveArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadPrimitiveArrayMethodClientStream) SendWithContext(ctx context.Context, v []int32) error {
+	return s.Send(v)
 }
 `
 
@@ -1801,6 +2090,13 @@ func (s *StreamingPayloadPrimitiveArrayMethodClientStream) CloseAndRecv() ([]str
 	}
 	return body, nil
 }
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadPrimitiveArrayMethod" endpoint websocket connection and
+// reads instances of "[]string" from the connection with context.
+func (s *StreamingPayloadPrimitiveArrayMethodClientStream) CloseAndRecvWithContext(ctx context.Context) ([]string, error) {
+	return s.CloseAndRecv()
+}
 `
 
 var StreamingPayloadPrimitiveMapServerStreamSendCode = `// SendAndClose streams instances of "map[int]int" to the
@@ -1810,6 +2106,13 @@ func (s *StreamingPayloadPrimitiveMapMethodServerStream) SendAndClose(v map[int]
 	defer s.conn.Close()
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendAndCloseWithContext streams instances of "map[int]int" to the
+// "StreamingPayloadPrimitiveMapMethod" endpoint websocket connection with
+// context and closes the connection.
+func (s *StreamingPayloadPrimitiveMapMethodServerStream) SendAndCloseWithContext(ctx context.Context, v map[int]int) error {
+	return s.SendAndClose(v)
 }
 `
 
@@ -1828,6 +2131,7 @@ func (s *StreamingPayloadPrimitiveMapMethodServerStream) Recv() (map[string]int3
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1835,8 +2139,8 @@ func (s *StreamingPayloadPrimitiveMapMethodServerStream) Recv() (map[string]int3
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -1846,12 +2150,26 @@ func (s *StreamingPayloadPrimitiveMapMethodServerStream) Recv() (map[string]int3
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "map[string]int32" from the
+// "StreamingPayloadPrimitiveMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadPrimitiveMapMethodServerStream) RecvWithContext(ctx context.Context) (map[string]int32, error) {
+	return s.Recv()
+}
 `
 
 var StreamingPayloadPrimitiveMapClientStreamSendCode = `// Send streams instances of "map[string]int32" to the
 // "StreamingPayloadPrimitiveMapMethod" endpoint websocket connection.
 func (s *StreamingPayloadPrimitiveMapMethodClientStream) Send(v map[string]int32) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "map[string]int32" to the
+// "StreamingPayloadPrimitiveMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadPrimitiveMapMethodClientStream) SendWithContext(ctx context.Context, v map[string]int32) error {
+	return s.Send(v)
 }
 `
 
@@ -1879,6 +2197,13 @@ func (s *StreamingPayloadPrimitiveMapMethodClientStream) CloseAndRecv() (map[int
 	}
 	return body, nil
 }
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadPrimitiveMapMethod" endpoint websocket connection and reads
+// instances of "map[int]int" from the connection with context.
+func (s *StreamingPayloadPrimitiveMapMethodClientStream) CloseAndRecvWithContext(ctx context.Context) (map[int]int, error) {
+	return s.CloseAndRecv()
+}
 `
 
 var StreamingPayloadUserTypeArrayServerStreamSendCode = `// SendAndClose streams instances of "string" to the
@@ -1888,6 +2213,13 @@ func (s *StreamingPayloadUserTypeArrayMethodServerStream) SendAndClose(v string)
 	defer s.conn.Close()
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendAndCloseWithContext streams instances of "string" to the
+// "StreamingPayloadUserTypeArrayMethod" endpoint websocket connection with
+// context and closes the connection.
+func (s *StreamingPayloadUserTypeArrayMethodServerStream) SendAndCloseWithContext(ctx context.Context, v string) error {
+	return s.SendAndClose(v)
 }
 `
 
@@ -1907,6 +2239,7 @@ func (s *StreamingPayloadUserTypeArrayMethodServerStream) Recv() ([]*streamingpa
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1914,8 +2247,8 @@ func (s *StreamingPayloadUserTypeArrayMethodServerStream) Recv() ([]*streamingpa
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -1925,6 +2258,14 @@ func (s *StreamingPayloadUserTypeArrayMethodServerStream) Recv() ([]*streamingpa
 	}
 	return NewStreamingPayloadUserTypeArrayMethodArray(body), nil
 }
+
+// RecvWithContext reads instances of
+// "[]*streamingpayloadusertypearrayservice.RequestType" from the
+// "StreamingPayloadUserTypeArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadUserTypeArrayMethodServerStream) RecvWithContext(ctx context.Context) ([]*streamingpayloadusertypearrayservice.RequestType, error) {
+	return s.Recv()
+}
 `
 
 var StreamingPayloadUserTypeArrayClientStreamSendCode = `// Send streams instances of
@@ -1933,6 +2274,14 @@ var StreamingPayloadUserTypeArrayClientStreamSendCode = `// Send streams instanc
 func (s *StreamingPayloadUserTypeArrayMethodClientStream) Send(v []*streamingpayloadusertypearrayservice.RequestType) error {
 	body := NewRequestType(v)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "[]*streamingpayloadusertypearrayservice.RequestType" to the
+// "StreamingPayloadUserTypeArrayMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadUserTypeArrayMethodClientStream) SendWithContext(ctx context.Context, v []*streamingpayloadusertypearrayservice.RequestType) error {
+	return s.Send(v)
 }
 `
 
@@ -1960,6 +2309,13 @@ func (s *StreamingPayloadUserTypeArrayMethodClientStream) CloseAndRecv() (string
 	}
 	return body, nil
 }
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadUserTypeArrayMethod" endpoint websocket connection and
+// reads instances of "string" from the connection with context.
+func (s *StreamingPayloadUserTypeArrayMethodClientStream) CloseAndRecvWithContext(ctx context.Context) (string, error) {
+	return s.CloseAndRecv()
+}
 `
 
 var StreamingPayloadUserTypeMapServerStreamSendCode = `// SendAndClose streams instances of "[]string" to the
@@ -1969,6 +2325,13 @@ func (s *StreamingPayloadUserTypeMapMethodServerStream) SendAndClose(v []string)
 	defer s.conn.Close()
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendAndCloseWithContext streams instances of "[]string" to the
+// "StreamingPayloadUserTypeMapMethod" endpoint websocket connection with
+// context and closes the connection.
+func (s *StreamingPayloadUserTypeMapMethodServerStream) SendAndCloseWithContext(ctx context.Context, v []string) error {
+	return s.SendAndClose(v)
 }
 `
 
@@ -1988,6 +2351,7 @@ func (s *StreamingPayloadUserTypeMapMethodServerStream) Recv() (map[string]*stre
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -1995,8 +2359,8 @@ func (s *StreamingPayloadUserTypeMapMethodServerStream) Recv() (map[string]*stre
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -2006,6 +2370,14 @@ func (s *StreamingPayloadUserTypeMapMethodServerStream) Recv() (map[string]*stre
 	}
 	return NewStreamingPayloadUserTypeMapMethodMap(body), nil
 }
+
+// RecvWithContext reads instances of
+// "map[string]*streamingpayloadusertypemapservice.RequestType" from the
+// "StreamingPayloadUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadUserTypeMapMethodServerStream) RecvWithContext(ctx context.Context) (map[string]*streamingpayloadusertypemapservice.RequestType, error) {
+	return s.Recv()
+}
 `
 
 var StreamingPayloadUserTypeMapClientStreamSendCode = `// Send streams instances of
@@ -2014,6 +2386,14 @@ var StreamingPayloadUserTypeMapClientStreamSendCode = `// Send streams instances
 func (s *StreamingPayloadUserTypeMapMethodClientStream) Send(v map[string]*streamingpayloadusertypemapservice.RequestType) error {
 	body := NewMapStringRequestType(v)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "map[string]*streamingpayloadusertypemapservice.RequestType" to the
+// "StreamingPayloadUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *StreamingPayloadUserTypeMapMethodClientStream) SendWithContext(ctx context.Context, v map[string]*streamingpayloadusertypemapservice.RequestType) error {
+	return s.Send(v)
 }
 `
 
@@ -2041,6 +2421,13 @@ func (s *StreamingPayloadUserTypeMapMethodClientStream) CloseAndRecv() ([]string
 	}
 	return body, nil
 }
+
+// CloseAndRecvWithContext stops sending messages to the
+// "StreamingPayloadUserTypeMapMethod" endpoint websocket connection and reads
+// instances of "[]string" from the connection with context.
+func (s *StreamingPayloadUserTypeMapMethodClientStream) CloseAndRecvWithContext(ctx context.Context) ([]string, error) {
+	return s.CloseAndRecv()
+}
 `
 
 var BidirectionalStreamingServerHandlerInitCode = `// NewBidirectionalStreamingMethodHandler creates a HTTP handler which loads
@@ -2052,7 +2439,7 @@ func NewBidirectionalStreamingMethodHandler(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	upgrader goahttp.Upgrader,
 	configurer goahttp.ConnConfigureFunc,
 ) http.Handler {
@@ -2066,7 +2453,7 @@ func NewBidirectionalStreamingMethodHandler(
 		ctx = context.WithValue(ctx, goa.ServiceKey, "BidirectionalStreamingService")
 		payload, err := decodeRequest(r)
 		if err != nil {
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -2081,14 +2468,24 @@ func NewBidirectionalStreamingMethodHandler(
 				w:          w,
 				r:          r,
 			},
-			Payload: payload.(*bidirectionalstreamingservice.Payload),
+			Payload: payload,
 		}
 		_, err = endpoint(ctx, v)
 		if err != nil {
-			if _, ok := err.(websocket.HandshakeError); ok {
+			var stream *BidirectionalStreamingMethodServerStream
+			if wrapper, ok := v.Stream.(interface{ Unwrap() any }); ok {
+				stream = wrapper.Unwrap().(*BidirectionalStreamingMethodServerStream)
+			} else {
+				stream = v.Stream.(*BidirectionalStreamingMethodServerStream)
+			}
+			if stream != nil && stream.conn != nil {
+				// Response writer has been hijacked, do not encode the error
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
 				return
 			}
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -2108,6 +2505,7 @@ func (s *BidirectionalStreamingMethodServerStream) Send(v *bidirectionalstreamin
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2115,12 +2513,19 @@ func (s *BidirectionalStreamingMethodServerStream) Send(v *bidirectionalstreamin
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	body := NewBidirectionalStreamingMethodResponseBody(res)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "bidirectionalstreamingservice.UserType" to the
+// "BidirectionalStreamingMethod" endpoint websocket connection with context.
+func (s *BidirectionalStreamingMethodServerStream) SendWithContext(ctx context.Context, v *bidirectionalstreamingservice.UserType) error {
+	return s.Send(v)
 }
 `
 
@@ -2139,6 +2544,7 @@ func (s *BidirectionalStreamingMethodServerStream) Recv() (*bidirectionalstreami
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2146,8 +2552,8 @@ func (s *BidirectionalStreamingMethodServerStream) Recv() (*bidirectionalstreami
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -2157,14 +2563,45 @@ func (s *BidirectionalStreamingMethodServerStream) Recv() (*bidirectionalstreami
 	}
 	return NewBidirectionalStreamingMethodStreamingBody(msg), nil
 }
+
+// RecvWithContext reads instances of "bidirectionalstreamingservice.Request"
+// from the "BidirectionalStreamingMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingMethodServerStream) RecvWithContext(ctx context.Context) (*bidirectionalstreamingservice.Request, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingServerStreamCloseCode = `// Close closes the "BidirectionalStreamingMethod" endpoint websocket
 // connection.
 func (s *BidirectionalStreamingMethodServerStream) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.close()
+	})
+	return s.closeErr
+}
+
+// close opens the websocket connection when needed, sends its normal close
+// message, and closes it.
+func (s *BidirectionalStreamingMethodServerStream) close() error {
 	var err error
-	if s.conn == nil {
-		return nil
+	// Upgrade the HTTP connection to a websocket connection only once. Connection
+	// upgrade is done here so that authorization logic in the endpoint is executed
+	// before calling the actual service method which may call Close().
+	s.once.Do(func() {
+		var conn *websocket.Conn
+		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
+		if err != nil {
+			s.upgradeErr = err
+			return
+		}
+		if s.configurer != nil {
+			conn = s.configurer(conn, s.cancel)
+		}
+		s.conn = conn
+	})
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	if err = s.conn.WriteControl(
 		websocket.CloseMessage,
@@ -2185,7 +2622,7 @@ func (c *Client) BidirectionalStreamingMethod() goa.Endpoint {
 		encodeRequest  = EncodeBidirectionalStreamingMethodRequest(c.encoder)
 		decodeResponse = DecodeBidirectionalStreamingMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildBidirectionalStreamingMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
@@ -2194,8 +2631,6 @@ func (c *Client) BidirectionalStreamingMethod() goa.Endpoint {
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -2204,7 +2639,7 @@ func (c *Client) BidirectionalStreamingMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("BidirectionalStreamingService", "BidirectionalStreamingMethod", err)
 		}
 		if c.configurer.BidirectionalStreamingMethodFn != nil {
-			conn = c.configurer.BidirectionalStreamingMethodFn(conn, cancel)
+			conn = c.configurer.BidirectionalStreamingMethodFn(conn, nil)
 		}
 		stream := &BidirectionalStreamingMethodClientStream{conn: conn}
 		return stream, nil
@@ -2217,6 +2652,13 @@ var BidirectionalStreamingClientStreamSendCode = `// Send streams instances of "
 func (s *BidirectionalStreamingMethodClientStream) Send(v *bidirectionalstreamingservice.Request) error {
 	body := NewBidirectionalStreamingMethodStreamingBody(v)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of "bidirectionalstreamingservice.Request"
+// to the "BidirectionalStreamingMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingMethodClientStream) SendWithContext(ctx context.Context, v *bidirectionalstreamingservice.Request) error {
+	return s.Send(v)
 }
 `
 
@@ -2237,6 +2679,13 @@ func (s *BidirectionalStreamingMethodClientStream) Recv() (*bidirectionalstreami
 	}
 	res := NewBidirectionalStreamingMethodUserTypeOK(&body)
 	return res, nil
+}
+
+// RecvWithContext reads instances of "bidirectionalstreamingservice.UserType"
+// from the "BidirectionalStreamingMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingMethodClientStream) RecvWithContext(ctx context.Context) (*bidirectionalstreamingservice.UserType, error) {
+	return s.Recv()
 }
 `
 
@@ -2262,7 +2711,7 @@ func NewBidirectionalStreamingNoPayloadMethodHandler(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	upgrader goahttp.Upgrader,
 	configurer goahttp.ConnConfigureFunc,
 ) http.Handler {
@@ -2287,10 +2736,20 @@ func NewBidirectionalStreamingNoPayloadMethodHandler(
 		}
 		_, err = endpoint(ctx, v)
 		if err != nil {
-			if _, ok := err.(websocket.HandshakeError); ok {
+			var stream *BidirectionalStreamingNoPayloadMethodServerStream
+			if wrapper, ok := v.Stream.(interface{ Unwrap() any }); ok {
+				stream = wrapper.Unwrap().(*BidirectionalStreamingNoPayloadMethodServerStream)
+			} else {
+				stream = v.Stream.(*BidirectionalStreamingNoPayloadMethodServerStream)
+			}
+			if stream != nil && stream.conn != nil {
+				// Response writer has been hijacked, do not encode the error
+				if errhandler != nil {
+					errhandler(ctx, w, err)
+				}
 				return
 			}
-			if err := encodeError(ctx, w, err); err != nil {
+			if err := encodeError(ctx, w, err); err != nil && errhandler != nil {
 				errhandler(ctx, w, err)
 			}
 			return
@@ -2302,9 +2761,33 @@ func NewBidirectionalStreamingNoPayloadMethodHandler(
 var BidirectionalStreamingNoPayloadServerStreamCloseCode = `// Close closes the "BidirectionalStreamingNoPayloadMethod" endpoint websocket
 // connection.
 func (s *BidirectionalStreamingNoPayloadMethodServerStream) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.close()
+	})
+	return s.closeErr
+}
+
+// close opens the websocket connection when needed, sends its normal close
+// message, and closes it.
+func (s *BidirectionalStreamingNoPayloadMethodServerStream) close() error {
 	var err error
-	if s.conn == nil {
-		return nil
+	// Upgrade the HTTP connection to a websocket connection only once. Connection
+	// upgrade is done here so that authorization logic in the endpoint is executed
+	// before calling the actual service method which may call Close().
+	s.once.Do(func() {
+		var conn *websocket.Conn
+		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
+		if err != nil {
+			s.upgradeErr = err
+			return
+		}
+		if s.configurer != nil {
+			conn = s.configurer(conn, s.cancel)
+		}
+		s.conn = conn
+	})
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	if err = s.conn.WriteControl(
 		websocket.CloseMessage,
@@ -2324,13 +2807,11 @@ func (c *Client) BidirectionalStreamingNoPayloadMethod() goa.Endpoint {
 	var (
 		decodeResponse = DecodeBidirectionalStreamingNoPayloadMethodResponse(c.decoder, c.RestoreResponseBody)
 	)
-	return func(ctx context.Context, v interface{}) (interface{}, error) {
+	return func(ctx context.Context, v any) (any, error) {
 		req, err := c.BuildBidirectionalStreamingNoPayloadMethodRequest(ctx, v)
 		if err != nil {
 			return nil, err
 		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
 		conn, resp, err := c.dialer.DialContext(ctx, req.URL.String(), req.Header)
 		if err != nil {
 			if resp != nil {
@@ -2339,7 +2820,7 @@ func (c *Client) BidirectionalStreamingNoPayloadMethod() goa.Endpoint {
 			return nil, goahttp.ErrRequestError("BidirectionalStreamingNoPayloadService", "BidirectionalStreamingNoPayloadMethod", err)
 		}
 		if c.configurer.BidirectionalStreamingNoPayloadMethodFn != nil {
-			conn = c.configurer.BidirectionalStreamingNoPayloadMethodFn(conn, cancel)
+			conn = c.configurer.BidirectionalStreamingNoPayloadMethodFn(conn, nil)
 		}
 		stream := &BidirectionalStreamingNoPayloadMethodClientStream{conn: conn}
 		return stream, nil
@@ -2352,6 +2833,14 @@ var BidirectionalStreamingNoPayloadClientStreamSendCode = `// Send streams insta
 func (s *BidirectionalStreamingNoPayloadMethodClientStream) Send(v *bidirectionalstreamingnopayloadservice.Request) error {
 	body := NewBidirectionalStreamingNoPayloadMethodStreamingBody(v)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "bidirectionalstreamingnopayloadservice.Request" to the
+// "BidirectionalStreamingNoPayloadMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingNoPayloadMethodClientStream) SendWithContext(ctx context.Context, v *bidirectionalstreamingnopayloadservice.Request) error {
+	return s.Send(v)
 }
 `
 
@@ -2374,6 +2863,14 @@ func (s *BidirectionalStreamingNoPayloadMethodClientStream) Recv() (*bidirection
 	res := NewBidirectionalStreamingNoPayloadMethodUserTypeOK(&body)
 	return res, nil
 }
+
+// RecvWithContext reads instances of
+// "bidirectionalstreamingnopayloadservice.UserType" from the
+// "BidirectionalStreamingNoPayloadMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingNoPayloadMethodClientStream) RecvWithContext(ctx context.Context) (*bidirectionalstreamingnopayloadservice.UserType, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingNoPayloadClientStreamCloseCode = `// Close closes the "BidirectionalStreamingNoPayloadMethod" endpoint websocket
@@ -2385,157 +2882,6 @@ func (s *BidirectionalStreamingNoPayloadMethodClientStream) Close() error {
 		return err
 	}
 	return s.conn.Close()
-}
-`
-
-var BidirectionalStreamingResultWithViewsServerStreamSendCode = `// Send streams instances of
-// "bidirectionalstreamingresultwithviewsservice.Usertype" to the
-// "BidirectionalStreamingResultWithViewsMethod" endpoint websocket connection.
-func (s *BidirectionalStreamingResultWithViewsMethodServerStream) Send(v *bidirectionalstreamingresultwithviewsservice.Usertype) error {
-	var err error
-	// Upgrade the HTTP connection to a websocket connection only once. Connection
-	// upgrade is done here so that authorization logic in the endpoint is executed
-	// before calling the actual service method which may call Send().
-	s.once.Do(func() {
-		respHdr := make(http.Header)
-		respHdr.Add("goa-view", s.view)
-		var conn *websocket.Conn
-		conn, err = s.upgrader.Upgrade(s.w, s.r, respHdr)
-		if err != nil {
-			return
-		}
-		if s.configurer != nil {
-			conn = s.configurer(conn, s.cancel)
-		}
-		s.conn = conn
-	})
-	if err != nil {
-		return err
-	}
-	res := bidirectionalstreamingresultwithviewsservice.NewViewedUsertype(v, s.view)
-	var body interface{}
-	switch s.view {
-	case "tiny":
-		body = NewBidirectionalStreamingResultWithViewsMethodResponseBodyTiny(res.Projected)
-	case "extended":
-		body = NewBidirectionalStreamingResultWithViewsMethodResponseBodyExtended(res.Projected)
-	case "default", "":
-		body = NewBidirectionalStreamingResultWithViewsMethodResponseBody(res.Projected)
-	}
-	return s.conn.WriteJSON(body)
-}
-`
-
-var BidirectionalStreamingResultWithViewsServerStreamRecvCode = `// Recv reads instances of "float32" from the
-// "BidirectionalStreamingResultWithViewsMethod" endpoint websocket connection.
-func (s *BidirectionalStreamingResultWithViewsMethodServerStream) Recv() (float32, error) {
-	var (
-		rv  float32
-		msg *float32
-		err error
-	)
-	// Upgrade the HTTP connection to a websocket connection only once. Connection
-	// upgrade is done here so that authorization logic in the endpoint is executed
-	// before calling the actual service method which may call Recv().
-	s.once.Do(func() {
-		var conn *websocket.Conn
-		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
-		if err != nil {
-			return
-		}
-		if s.configurer != nil {
-			conn = s.configurer(conn, s.cancel)
-		}
-		s.conn = conn
-	})
-	if err != nil {
-		return rv, err
-	}
-	if err = s.conn.ReadJSON(&msg); err != nil {
-		return rv, err
-	}
-	if msg == nil {
-		return rv, io.EOF
-	}
-	return *msg, nil
-}
-`
-
-var BidirectionalStreamingResultWithViewsServerStreamCloseCode = `// Close closes the "BidirectionalStreamingResultWithViewsMethod" endpoint
-// websocket connection.
-func (s *BidirectionalStreamingResultWithViewsMethodServerStream) Close() error {
-	var err error
-	if s.conn == nil {
-		return nil
-	}
-	if err = s.conn.WriteControl(
-		websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "server closing connection"),
-		time.Now().Add(time.Second),
-	); err != nil {
-		return err
-	}
-	return s.conn.Close()
-}
-`
-
-var BidirectionalStreamingResultWithViewsServerStreamSetViewCode = `// SetView sets the view to render the
-// bidirectionalstreamingresultwithviewsservice.Usertype type before sending to
-// the "BidirectionalStreamingResultWithViewsMethod" endpoint websocket
-// connection.
-func (s *BidirectionalStreamingResultWithViewsMethodServerStream) SetView(view string) {
-	s.view = view
-}
-`
-
-var BidirectionalStreamingResultWithViewsClientStreamSendCode = `// Send streams instances of "float32" to the
-// "BidirectionalStreamingResultWithViewsMethod" endpoint websocket connection.
-func (s *BidirectionalStreamingResultWithViewsMethodClientStream) Send(v float32) error {
-	return s.conn.WriteJSON(v)
-}
-`
-
-var BidirectionalStreamingResultWithViewsClientStreamRecvCode = `// Recv reads instances of
-// "bidirectionalstreamingresultwithviewsservice.Usertype" from the
-// "BidirectionalStreamingResultWithViewsMethod" endpoint websocket connection.
-func (s *BidirectionalStreamingResultWithViewsMethodClientStream) Recv() (*bidirectionalstreamingresultwithviewsservice.Usertype, error) {
-	var (
-		rv   *bidirectionalstreamingresultwithviewsservice.Usertype
-		body BidirectionalStreamingResultWithViewsMethodResponseBody
-		err  error
-	)
-	err = s.conn.ReadJSON(&body)
-	if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-		return rv, io.EOF
-	}
-	if err != nil {
-		return rv, err
-	}
-	res := NewBidirectionalStreamingResultWithViewsMethodUsertypeOK(&body)
-	vres := &bidirectionalstreamingresultwithviewsserviceviews.Usertype{res, s.view}
-	if err := bidirectionalstreamingresultwithviewsserviceviews.ValidateUsertype(vres); err != nil {
-		return rv, goahttp.ErrValidationError("BidirectionalStreamingResultWithViewsService", "BidirectionalStreamingResultWithViewsMethod", err)
-	}
-	return bidirectionalstreamingresultwithviewsservice.NewUsertype(vres), nil
-}
-`
-
-var BidirectionalStreamingResultWithViewsClientStreamCloseCode = `// Close closes the "BidirectionalStreamingResultWithViewsMethod" endpoint
-// websocket connection.
-func (s *BidirectionalStreamingResultWithViewsMethodClientStream) Close() error {
-	var err error
-	// Send a nil payload to the server implying client closing connection.
-	if err = s.conn.WriteJSON(nil); err != nil {
-		return err
-	}
-	return s.conn.Close()
-}
-`
-
-var BidirectionalStreamingResultWithViewsClientStreamSetViewCode = `// SetView sets the view to render the float32 type before sending to the
-// "BidirectionalStreamingResultWithViewsMethod" endpoint websocket connection.
-func (s *BidirectionalStreamingResultWithViewsMethodClientStream) SetView(view string) {
-	s.view = view
 }
 `
 
@@ -2552,6 +2898,7 @@ func (s *BidirectionalStreamingResultWithExplicitViewMethodServerStream) Send(v 
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2559,12 +2906,20 @@ func (s *BidirectionalStreamingResultWithExplicitViewMethodServerStream) Send(v 
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := bidirectionalstreamingresultwithexplicitviewservice.NewViewedUsertype(v, "extended")
 	body := NewBidirectionalStreamingResultWithExplicitViewMethodResponseBodyExtended(res.Projected)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "bidirectionalstreamingresultwithexplicitviewservice.Usertype" to the
+// "BidirectionalStreamingResultWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *BidirectionalStreamingResultWithExplicitViewMethodServerStream) SendWithContext(ctx context.Context, v *bidirectionalstreamingresultwithexplicitviewservice.Usertype) error {
+	return s.Send(v)
 }
 `
 
@@ -2584,6 +2939,7 @@ func (s *BidirectionalStreamingResultWithExplicitViewMethodServerStream) Recv() 
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2591,8 +2947,8 @@ func (s *BidirectionalStreamingResultWithExplicitViewMethodServerStream) Recv() 
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -2602,6 +2958,13 @@ func (s *BidirectionalStreamingResultWithExplicitViewMethodServerStream) Recv() 
 	}
 	return *msg, nil
 }
+
+// RecvWithContext reads instances of "float32" from the
+// "BidirectionalStreamingResultWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *BidirectionalStreamingResultWithExplicitViewMethodServerStream) RecvWithContext(ctx context.Context) (float32, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingResultWithExplicitViewClientStreamSendCode = `// Send streams instances of "float32" to the
@@ -2609,6 +2972,13 @@ var BidirectionalStreamingResultWithExplicitViewClientStreamSendCode = `// Send 
 // connection.
 func (s *BidirectionalStreamingResultWithExplicitViewMethodClientStream) Send(v float32) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "float32" to the
+// "BidirectionalStreamingResultWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *BidirectionalStreamingResultWithExplicitViewMethodClientStream) SendWithContext(ctx context.Context, v float32) error {
+	return s.Send(v)
 }
 `
 
@@ -2619,7 +2989,7 @@ var BidirectionalStreamingResultWithExplicitViewClientStreamRecvCode = `// Recv 
 func (s *BidirectionalStreamingResultWithExplicitViewMethodClientStream) Recv() (*bidirectionalstreamingresultwithexplicitviewservice.Usertype, error) {
 	var (
 		rv   *bidirectionalstreamingresultwithexplicitviewservice.Usertype
-		body BidirectionalStreamingResultWithExplicitViewMethodResponseBody
+		body BidirectionalStreamingResultWithExplicitViewMethodResponseBodyExtended
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -2630,138 +3000,19 @@ func (s *BidirectionalStreamingResultWithExplicitViewMethodClientStream) Recv() 
 		return rv, err
 	}
 	res := NewBidirectionalStreamingResultWithExplicitViewMethodUsertypeOK(&body)
-	vres := &bidirectionalstreamingresultwithexplicitviewserviceviews.Usertype{res, "extended"}
+	vres := &bidirectionalstreamingresultwithexplicitviewserviceviews.Usertype{Projected: res, View: "extended"}
 	if err := bidirectionalstreamingresultwithexplicitviewserviceviews.ValidateUsertype(vres); err != nil {
 		return rv, goahttp.ErrValidationError("BidirectionalStreamingResultWithExplicitViewService", "BidirectionalStreamingResultWithExplicitViewMethod", err)
 	}
 	return bidirectionalstreamingresultwithexplicitviewservice.NewUsertype(vres), nil
 }
-`
 
-var BidirectionalStreamingResultCollectionWithViewsServerStreamSendCode = `// Send streams instances of
-// "bidirectionalstreamingresultcollectionwithviewsservice.UsertypeCollection"
-// to the "BidirectionalStreamingResultCollectionWithViewsMethod" endpoint
-// websocket connection.
-func (s *BidirectionalStreamingResultCollectionWithViewsMethodServerStream) Send(v bidirectionalstreamingresultcollectionwithviewsservice.UsertypeCollection) error {
-	var err error
-	// Upgrade the HTTP connection to a websocket connection only once. Connection
-	// upgrade is done here so that authorization logic in the endpoint is executed
-	// before calling the actual service method which may call Send().
-	s.once.Do(func() {
-		respHdr := make(http.Header)
-		respHdr.Add("goa-view", s.view)
-		var conn *websocket.Conn
-		conn, err = s.upgrader.Upgrade(s.w, s.r, respHdr)
-		if err != nil {
-			return
-		}
-		if s.configurer != nil {
-			conn = s.configurer(conn, s.cancel)
-		}
-		s.conn = conn
-	})
-	if err != nil {
-		return err
-	}
-	res := bidirectionalstreamingresultcollectionwithviewsservice.NewViewedUsertypeCollection(v, s.view)
-	var body interface{}
-	switch s.view {
-	case "tiny":
-		body = NewUsertypeResponseTinyCollection(res.Projected)
-	case "extended":
-		body = NewUsertypeResponseExtendedCollection(res.Projected)
-	case "default", "":
-		body = NewUsertypeResponseCollection(res.Projected)
-	}
-	return s.conn.WriteJSON(body)
-}
-`
-
-var BidirectionalStreamingResultCollectionWithViewsServerStreamRecvCode = `// Recv reads instances of "interface{}" from the
-// "BidirectionalStreamingResultCollectionWithViewsMethod" endpoint websocket
-// connection.
-func (s *BidirectionalStreamingResultCollectionWithViewsMethodServerStream) Recv() (interface{}, error) {
-	var (
-		rv  interface{}
-		msg *interface{}
-		err error
-	)
-	// Upgrade the HTTP connection to a websocket connection only once. Connection
-	// upgrade is done here so that authorization logic in the endpoint is executed
-	// before calling the actual service method which may call Recv().
-	s.once.Do(func() {
-		var conn *websocket.Conn
-		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
-		if err != nil {
-			return
-		}
-		if s.configurer != nil {
-			conn = s.configurer(conn, s.cancel)
-		}
-		s.conn = conn
-	})
-	if err != nil {
-		return rv, err
-	}
-	if err = s.conn.ReadJSON(&msg); err != nil {
-		return rv, err
-	}
-	if msg == nil {
-		return rv, io.EOF
-	}
-	return *msg, nil
-}
-`
-
-var BidirectionalStreamingResultCollectionWithViewsServerStreamSetViewCode = `// SetView sets the view to render the
-// bidirectionalstreamingresultcollectionwithviewsservice.UsertypeCollection
-// type before sending to the
-// "BidirectionalStreamingResultCollectionWithViewsMethod" endpoint websocket
-// connection.
-func (s *BidirectionalStreamingResultCollectionWithViewsMethodServerStream) SetView(view string) {
-	s.view = view
-}
-`
-
-var BidirectionalStreamingResultCollectionWithViewsClientStreamSendCode = `// Send streams instances of "interface{}" to the
-// "BidirectionalStreamingResultCollectionWithViewsMethod" endpoint websocket
-// connection.
-func (s *BidirectionalStreamingResultCollectionWithViewsMethodClientStream) Send(v interface{}) error {
-	return s.conn.WriteJSON(v)
-}
-`
-
-var BidirectionalStreamingResultCollectionWithViewsClientStreamRecvCode = `// Recv reads instances of
-// "bidirectionalstreamingresultcollectionwithviewsservice.UsertypeCollection"
-// from the "BidirectionalStreamingResultCollectionWithViewsMethod" endpoint
-// websocket connection.
-func (s *BidirectionalStreamingResultCollectionWithViewsMethodClientStream) Recv() (bidirectionalstreamingresultcollectionwithviewsservice.UsertypeCollection, error) {
-	var (
-		rv   bidirectionalstreamingresultcollectionwithviewsservice.UsertypeCollection
-		body BidirectionalStreamingResultCollectionWithViewsMethodResponseBody
-		err  error
-	)
-	err = s.conn.ReadJSON(&body)
-	if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-		return rv, io.EOF
-	}
-	if err != nil {
-		return rv, err
-	}
-	res := NewBidirectionalStreamingResultCollectionWithViewsMethodUsertypeCollectionOK(body)
-	vres := bidirectionalstreamingresultcollectionwithviewsserviceviews.UsertypeCollection{res, s.view}
-	if err := bidirectionalstreamingresultcollectionwithviewsserviceviews.ValidateUsertypeCollection(vres); err != nil {
-		return rv, goahttp.ErrValidationError("BidirectionalStreamingResultCollectionWithViewsService", "BidirectionalStreamingResultCollectionWithViewsMethod", err)
-	}
-	return bidirectionalstreamingresultcollectionwithviewsservice.NewUsertypeCollection(vres), nil
-}
-`
-
-var BidirectionalStreamingResultCollectionWithViewsClientStreamSetViewCode = `// SetView sets the view to render the interface{} type before sending to the
-// "BidirectionalStreamingResultCollectionWithViewsMethod" endpoint websocket
-// connection.
-func (s *BidirectionalStreamingResultCollectionWithViewsMethodClientStream) SetView(view string) {
-	s.view = view
+// RecvWithContext reads instances of
+// "bidirectionalstreamingresultwithexplicitviewservice.Usertype" from the
+// "BidirectionalStreamingResultWithExplicitViewMethod" endpoint websocket
+// connection with context.
+func (s *BidirectionalStreamingResultWithExplicitViewMethodClientStream) RecvWithContext(ctx context.Context) (*bidirectionalstreamingresultwithexplicitviewservice.Usertype, error) {
+	return s.Recv()
 }
 `
 
@@ -2778,6 +3029,7 @@ func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStrea
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2785,22 +3037,30 @@ func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStrea
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := bidirectionalstreamingresultcollectionwithexplicitviewservice.NewViewedUsertypeCollection(v, "tiny")
 	body := NewUsertypeResponseTinyCollection(res.Projected)
 	return s.conn.WriteJSON(body)
 }
+
+// SendWithContext streams instances of
+// "bidirectionalstreamingresultcollectionwithexplicitviewservice.UsertypeCollection"
+// to the "BidirectionalStreamingResultCollectionWithExplicitViewMethod"
+// endpoint websocket connection with context.
+func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStream) SendWithContext(ctx context.Context, v bidirectionalstreamingresultcollectionwithexplicitviewservice.UsertypeCollection) error {
+	return s.Send(v)
+}
 `
 
-var BidirectionalStreamingResultCollectionWithExplicitViewServerStreamRecvCode = `// Recv reads instances of "interface{}" from the
+var BidirectionalStreamingResultCollectionWithExplicitViewServerStreamRecvCode = `// Recv reads instances of "any" from the
 // "BidirectionalStreamingResultCollectionWithExplicitViewMethod" endpoint
 // websocket connection.
-func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStream) Recv() (interface{}, error) {
+func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStream) Recv() (any, error) {
 	var (
-		rv  interface{}
-		msg *interface{}
+		rv  any
+		msg *any
 		err error
 	)
 	// Upgrade the HTTP connection to a websocket connection only once. Connection
@@ -2810,6 +3070,7 @@ func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStrea
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2817,8 +3078,8 @@ func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStrea
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -2828,13 +3089,27 @@ func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStrea
 	}
 	return *msg, nil
 }
+
+// RecvWithContext reads instances of "any" from the
+// "BidirectionalStreamingResultCollectionWithExplicitViewMethod" endpoint
+// websocket connection with context.
+func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodServerStream) RecvWithContext(ctx context.Context) (any, error) {
+	return s.Recv()
+}
 `
 
-var BidirectionalStreamingResultCollectionWithExplicitViewClientStreamSendCode = `// Send streams instances of "interface{}" to the
+var BidirectionalStreamingResultCollectionWithExplicitViewClientStreamSendCode = `// Send streams instances of "any" to the
 // "BidirectionalStreamingResultCollectionWithExplicitViewMethod" endpoint
 // websocket connection.
-func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodClientStream) Send(v interface{}) error {
+func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodClientStream) Send(v any) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "any" to the
+// "BidirectionalStreamingResultCollectionWithExplicitViewMethod" endpoint
+// websocket connection with context.
+func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodClientStream) SendWithContext(ctx context.Context, v any) error {
+	return s.Send(v)
 }
 `
 
@@ -2845,7 +3120,7 @@ var BidirectionalStreamingResultCollectionWithExplicitViewClientStreamRecvCode =
 func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodClientStream) Recv() (bidirectionalstreamingresultcollectionwithexplicitviewservice.UsertypeCollection, error) {
 	var (
 		rv   bidirectionalstreamingresultcollectionwithexplicitviewservice.UsertypeCollection
-		body BidirectionalStreamingResultCollectionWithExplicitViewMethodResponseBody
+		body UsertypeResponseTinyCollection
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -2856,11 +3131,19 @@ func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodClientStrea
 		return rv, err
 	}
 	res := NewBidirectionalStreamingResultCollectionWithExplicitViewMethodUsertypeCollectionOK(body)
-	vres := bidirectionalstreamingresultcollectionwithexplicitviewserviceviews.UsertypeCollection{res, "tiny"}
+	vres := bidirectionalstreamingresultcollectionwithexplicitviewserviceviews.UsertypeCollection{Projected: res, View: "tiny"}
 	if err := bidirectionalstreamingresultcollectionwithexplicitviewserviceviews.ValidateUsertypeCollection(vres); err != nil {
 		return rv, goahttp.ErrValidationError("BidirectionalStreamingResultCollectionWithExplicitViewService", "BidirectionalStreamingResultCollectionWithExplicitViewMethod", err)
 	}
 	return bidirectionalstreamingresultcollectionwithexplicitviewservice.NewUsertypeCollection(vres), nil
+}
+
+// RecvWithContext reads instances of
+// "bidirectionalstreamingresultcollectionwithexplicitviewservice.UsertypeCollection"
+// from the "BidirectionalStreamingResultCollectionWithExplicitViewMethod"
+// endpoint websocket connection with context.
+func (s *BidirectionalStreamingResultCollectionWithExplicitViewMethodClientStream) RecvWithContext(ctx context.Context) (bidirectionalstreamingresultcollectionwithexplicitviewservice.UsertypeCollection, error) {
+	return s.Recv()
 }
 `
 
@@ -2875,6 +3158,7 @@ func (s *BidirectionalStreamingPrimitiveMethodServerStream) Send(v string) error
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2882,11 +3166,18 @@ func (s *BidirectionalStreamingPrimitiveMethodServerStream) Send(v string) error
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendWithContext streams instances of "string" to the
+// "BidirectionalStreamingPrimitiveMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingPrimitiveMethodServerStream) SendWithContext(ctx context.Context, v string) error {
+	return s.Send(v)
 }
 `
 
@@ -2905,6 +3196,7 @@ func (s *BidirectionalStreamingPrimitiveMethodServerStream) Recv() (string, erro
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2912,8 +3204,8 @@ func (s *BidirectionalStreamingPrimitiveMethodServerStream) Recv() (string, erro
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&msg); err != nil {
 		return rv, err
@@ -2923,12 +3215,26 @@ func (s *BidirectionalStreamingPrimitiveMethodServerStream) Recv() (string, erro
 	}
 	return *msg, nil
 }
+
+// RecvWithContext reads instances of "string" from the
+// "BidirectionalStreamingPrimitiveMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingPrimitiveMethodServerStream) RecvWithContext(ctx context.Context) (string, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingPrimitiveClientStreamSendCode = `// Send streams instances of "string" to the
 // "BidirectionalStreamingPrimitiveMethod" endpoint websocket connection.
 func (s *BidirectionalStreamingPrimitiveMethodClientStream) Send(v string) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "string" to the
+// "BidirectionalStreamingPrimitiveMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingPrimitiveMethodClientStream) SendWithContext(ctx context.Context, v string) error {
+	return s.Send(v)
 }
 `
 
@@ -2949,6 +3255,13 @@ func (s *BidirectionalStreamingPrimitiveMethodClientStream) Recv() (string, erro
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "string" from the
+// "BidirectionalStreamingPrimitiveMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingPrimitiveMethodClientStream) RecvWithContext(ctx context.Context) (string, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingPrimitiveArrayServerStreamSendCode = `// Send streams instances of "[]string" to the
@@ -2962,6 +3275,7 @@ func (s *BidirectionalStreamingPrimitiveArrayMethodServerStream) Send(v []string
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2969,11 +3283,18 @@ func (s *BidirectionalStreamingPrimitiveArrayMethodServerStream) Send(v []string
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendWithContext streams instances of "[]string" to the
+// "BidirectionalStreamingPrimitiveArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveArrayMethodServerStream) SendWithContext(ctx context.Context, v []string) error {
+	return s.Send(v)
 }
 `
 
@@ -2992,6 +3313,7 @@ func (s *BidirectionalStreamingPrimitiveArrayMethodServerStream) Recv() ([]int32
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -2999,8 +3321,8 @@ func (s *BidirectionalStreamingPrimitiveArrayMethodServerStream) Recv() ([]int32
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -3010,12 +3332,26 @@ func (s *BidirectionalStreamingPrimitiveArrayMethodServerStream) Recv() ([]int32
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "[]int32" from the
+// "BidirectionalStreamingPrimitiveArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveArrayMethodServerStream) RecvWithContext(ctx context.Context) ([]int32, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingPrimitiveArrayClientStreamSendCode = `// Send streams instances of "[]int32" to the
 // "BidirectionalStreamingPrimitiveArrayMethod" endpoint websocket connection.
 func (s *BidirectionalStreamingPrimitiveArrayMethodClientStream) Send(v []int32) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "[]int32" to the
+// "BidirectionalStreamingPrimitiveArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveArrayMethodClientStream) SendWithContext(ctx context.Context, v []int32) error {
+	return s.Send(v)
 }
 `
 
@@ -3036,6 +3372,13 @@ func (s *BidirectionalStreamingPrimitiveArrayMethodClientStream) Recv() ([]strin
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "[]string" from the
+// "BidirectionalStreamingPrimitiveArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveArrayMethodClientStream) RecvWithContext(ctx context.Context) ([]string, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingPrimitiveMapServerStreamSendCode = `// Send streams instances of "map[int]int" to the
@@ -3049,6 +3392,7 @@ func (s *BidirectionalStreamingPrimitiveMapMethodServerStream) Send(v map[int]in
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -3056,11 +3400,18 @@ func (s *BidirectionalStreamingPrimitiveMapMethodServerStream) Send(v map[int]in
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	return s.conn.WriteJSON(res)
+}
+
+// SendWithContext streams instances of "map[int]int" to the
+// "BidirectionalStreamingPrimitiveMapMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveMapMethodServerStream) SendWithContext(ctx context.Context, v map[int]int) error {
+	return s.Send(v)
 }
 `
 
@@ -3079,6 +3430,7 @@ func (s *BidirectionalStreamingPrimitiveMapMethodServerStream) Recv() (map[strin
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -3086,8 +3438,8 @@ func (s *BidirectionalStreamingPrimitiveMapMethodServerStream) Recv() (map[strin
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -3097,12 +3449,26 @@ func (s *BidirectionalStreamingPrimitiveMapMethodServerStream) Recv() (map[strin
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "map[string]int32" from the
+// "BidirectionalStreamingPrimitiveMapMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveMapMethodServerStream) RecvWithContext(ctx context.Context) (map[string]int32, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingPrimitiveMapClientStreamSendCode = `// Send streams instances of "map[string]int32" to the
 // "BidirectionalStreamingPrimitiveMapMethod" endpoint websocket connection.
 func (s *BidirectionalStreamingPrimitiveMapMethodClientStream) Send(v map[string]int32) error {
 	return s.conn.WriteJSON(v)
+}
+
+// SendWithContext streams instances of "map[string]int32" to the
+// "BidirectionalStreamingPrimitiveMapMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveMapMethodClientStream) SendWithContext(ctx context.Context, v map[string]int32) error {
+	return s.Send(v)
 }
 `
 
@@ -3123,6 +3489,13 @@ func (s *BidirectionalStreamingPrimitiveMapMethodClientStream) Recv() (map[int]i
 	}
 	return body, nil
 }
+
+// RecvWithContext reads instances of "map[int]int" from the
+// "BidirectionalStreamingPrimitiveMapMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingPrimitiveMapMethodClientStream) RecvWithContext(ctx context.Context) (map[int]int, error) {
+	return s.Recv()
+}
 `
 
 var BidirectionalStreamingUserTypeArrayServerStreamSendCode = `// Send streams instances of
@@ -3137,6 +3510,7 @@ func (s *BidirectionalStreamingUserTypeArrayMethodServerStream) Send(v []*bidire
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -3144,12 +3518,20 @@ func (s *BidirectionalStreamingUserTypeArrayMethodServerStream) Send(v []*bidire
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	body := NewBidirectionalStreamingUserTypeArrayMethodResponseBody(res)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "[]*bidirectionalstreamingusertypearrayservice.ResultType" to the
+// "BidirectionalStreamingUserTypeArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingUserTypeArrayMethodServerStream) SendWithContext(ctx context.Context, v []*bidirectionalstreamingusertypearrayservice.ResultType) error {
+	return s.Send(v)
 }
 `
 
@@ -3169,6 +3551,7 @@ func (s *BidirectionalStreamingUserTypeArrayMethodServerStream) Recv() ([]*bidir
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -3176,8 +3559,8 @@ func (s *BidirectionalStreamingUserTypeArrayMethodServerStream) Recv() ([]*bidir
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -3186,6 +3569,14 @@ func (s *BidirectionalStreamingUserTypeArrayMethodServerStream) Recv() ([]*bidir
 		return rv, io.EOF
 	}
 	return NewBidirectionalStreamingUserTypeArrayMethodArray(body), nil
+}
+
+// RecvWithContext reads instances of
+// "[]*bidirectionalstreamingusertypearrayservice.RequestType" from the
+// "BidirectionalStreamingUserTypeArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingUserTypeArrayMethodServerStream) RecvWithContext(ctx context.Context) ([]*bidirectionalstreamingusertypearrayservice.RequestType, error) {
+	return s.Recv()
 }
 `
 
@@ -3196,6 +3587,14 @@ func (s *BidirectionalStreamingUserTypeArrayMethodClientStream) Send(v []*bidire
 	body := NewRequestType(v)
 	return s.conn.WriteJSON(body)
 }
+
+// SendWithContext streams instances of
+// "[]*bidirectionalstreamingusertypearrayservice.RequestType" to the
+// "BidirectionalStreamingUserTypeArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingUserTypeArrayMethodClientStream) SendWithContext(ctx context.Context, v []*bidirectionalstreamingusertypearrayservice.RequestType) error {
+	return s.Send(v)
+}
 `
 
 var BidirectionalStreamingUserTypeArrayClientStreamRecvCode = `// Recv reads instances of
@@ -3204,7 +3603,7 @@ var BidirectionalStreamingUserTypeArrayClientStreamRecvCode = `// Recv reads ins
 func (s *BidirectionalStreamingUserTypeArrayMethodClientStream) Recv() ([]*bidirectionalstreamingusertypearrayservice.ResultType, error) {
 	var (
 		rv   []*bidirectionalstreamingusertypearrayservice.ResultType
-		body BidirectionalStreamingUserTypeArrayMethodResponseBody
+		body []*ResultTypeResponse
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -3216,6 +3615,14 @@ func (s *BidirectionalStreamingUserTypeArrayMethodClientStream) Recv() ([]*bidir
 	}
 	res := NewBidirectionalStreamingUserTypeArrayMethodResultTypeOK(body)
 	return res, nil
+}
+
+// RecvWithContext reads instances of
+// "[]*bidirectionalstreamingusertypearrayservice.ResultType" from the
+// "BidirectionalStreamingUserTypeArrayMethod" endpoint websocket connection
+// with context.
+func (s *BidirectionalStreamingUserTypeArrayMethodClientStream) RecvWithContext(ctx context.Context) ([]*bidirectionalstreamingusertypearrayservice.ResultType, error) {
+	return s.Recv()
 }
 `
 
@@ -3231,6 +3638,7 @@ func (s *BidirectionalStreamingUserTypeMapMethodServerStream) Send(v map[string]
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -3238,12 +3646,20 @@ func (s *BidirectionalStreamingUserTypeMapMethodServerStream) Send(v map[string]
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return err
+	if s.upgradeErr != nil {
+		return s.upgradeErr
 	}
 	res := v
 	body := NewBidirectionalStreamingUserTypeMapMethodResponseBody(res)
 	return s.conn.WriteJSON(body)
+}
+
+// SendWithContext streams instances of
+// "map[string]*bidirectionalstreamingusertypemapservice.ResultType" to the
+// "BidirectionalStreamingUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingUserTypeMapMethodServerStream) SendWithContext(ctx context.Context, v map[string]*bidirectionalstreamingusertypemapservice.ResultType) error {
+	return s.Send(v)
 }
 `
 
@@ -3263,6 +3679,7 @@ func (s *BidirectionalStreamingUserTypeMapMethodServerStream) Recv() (map[string
 		var conn *websocket.Conn
 		conn, err = s.upgrader.Upgrade(s.w, s.r, nil)
 		if err != nil {
+			s.upgradeErr = err
 			return
 		}
 		if s.configurer != nil {
@@ -3270,8 +3687,8 @@ func (s *BidirectionalStreamingUserTypeMapMethodServerStream) Recv() (map[string
 		}
 		s.conn = conn
 	})
-	if err != nil {
-		return rv, err
+	if s.upgradeErr != nil {
+		return rv, s.upgradeErr
 	}
 	if err = s.conn.ReadJSON(&body); err != nil {
 		return rv, err
@@ -3280,6 +3697,14 @@ func (s *BidirectionalStreamingUserTypeMapMethodServerStream) Recv() (map[string
 		return rv, io.EOF
 	}
 	return NewBidirectionalStreamingUserTypeMapMethodMap(body), nil
+}
+
+// RecvWithContext reads instances of
+// "map[string]*bidirectionalstreamingusertypemapservice.RequestType" from the
+// "BidirectionalStreamingUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingUserTypeMapMethodServerStream) RecvWithContext(ctx context.Context) (map[string]*bidirectionalstreamingusertypemapservice.RequestType, error) {
+	return s.Recv()
 }
 `
 
@@ -3290,6 +3715,14 @@ func (s *BidirectionalStreamingUserTypeMapMethodClientStream) Send(v map[string]
 	body := NewMapStringRequestType(v)
 	return s.conn.WriteJSON(body)
 }
+
+// SendWithContext streams instances of
+// "map[string]*bidirectionalstreamingusertypemapservice.RequestType" to the
+// "BidirectionalStreamingUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingUserTypeMapMethodClientStream) SendWithContext(ctx context.Context, v map[string]*bidirectionalstreamingusertypemapservice.RequestType) error {
+	return s.Send(v)
+}
 `
 
 var BidirectionalStreamingUserTypeMapClientStreamRecvCode = `// Recv reads instances of
@@ -3298,7 +3731,7 @@ var BidirectionalStreamingUserTypeMapClientStreamRecvCode = `// Recv reads insta
 func (s *BidirectionalStreamingUserTypeMapMethodClientStream) Recv() (map[string]*bidirectionalstreamingusertypemapservice.ResultType, error) {
 	var (
 		rv   map[string]*bidirectionalstreamingusertypemapservice.ResultType
-		body BidirectionalStreamingUserTypeMapMethodResponseBody
+		body map[string]*ResultTypeResponse
 		err  error
 	)
 	err = s.conn.ReadJSON(&body)
@@ -3310,5 +3743,13 @@ func (s *BidirectionalStreamingUserTypeMapMethodClientStream) Recv() (map[string
 	}
 	res := NewBidirectionalStreamingUserTypeMapMethodMapStringResultTypeOK(body)
 	return res, nil
+}
+
+// RecvWithContext reads instances of
+// "map[string]*bidirectionalstreamingusertypemapservice.ResultType" from the
+// "BidirectionalStreamingUserTypeMapMethod" endpoint websocket connection with
+// context.
+func (s *BidirectionalStreamingUserTypeMapMethodClientStream) RecvWithContext(ctx context.Context) (map[string]*bidirectionalstreamingusertypemapservice.ResultType, error) {
+	return s.Recv()
 }
 `

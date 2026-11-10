@@ -1,0 +1,12 @@
+func transform() {
+	var target *UnionString2
+	switch string(source.Kind()) {
+	case "String":
+		actual, _ := source.AsString()
+		obj := UnionString2String(actual)
+
+		var u UnionString2
+		u.SetString((UnionString2String)(obj))
+		target = &u
+	}
+}

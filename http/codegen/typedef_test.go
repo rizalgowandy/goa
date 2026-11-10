@@ -1,7 +1,10 @@
 package codegen
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/expr"
@@ -77,9 +80,43 @@ func TestGoTypeDef(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
 			def := goTypeDef(codegen.NewNameScope(), c.Attr, c.UsePtr, c.UseDefault)
-			if def != c.Def {
-				t.Errorf("invalid type definition:\ngot:\n%s\n\nexpected:\n%s\n\ndiff:\n%s\n", def, c.Def, codegen.Diff(t, def, c.Def))
-			}
+			assert.Equal(t, c.Def, def)
+		})
+	}
+}
+
+func TestGoTypeDefUnionPresence(t *testing.T) {
+	union := &expr.Union{
+		TypeName: "Scope",
+		Values: []*expr.NamedAttributeExpr{
+			{Name: "description", Attribute: &expr.AttributeExpr{Type: expr.String}},
+			{Name: "aliases", Attribute: &expr.AttributeExpr{Type: &expr.Array{
+				ElemType: &expr.AttributeExpr{Type: expr.String},
+			}}},
+		},
+	}
+	attribute := &expr.AttributeExpr{
+		Type: &expr.Object{
+			{Name: "optional", Attribute: &expr.AttributeExpr{Type: union}},
+			{Name: "required", Attribute: &expr.AttributeExpr{Type: union}},
+		},
+		Validation: &expr.ValidationExpr{Required: []string{"required"}},
+	}
+
+	tests := []struct {
+		name            string
+		pointer         bool
+		optionalPointer bool
+		requiredPointer bool
+	}{
+		{name: "marshal", optionalPointer: true},
+		{name: "validate", pointer: true, optionalPointer: true, requiredPointer: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			def := goTypeDef(codegen.NewNameScope(), attribute, test.pointer, false)
+			assert.Equal(t, test.optionalPointer, strings.Contains(def, "Optional *Scope"))
+			assert.Equal(t, test.requiredPointer, strings.Contains(def, "Required *Scope"))
 		})
 	}
 }
@@ -90,11 +127,11 @@ var (
 	Default *int ` + "`" + `form:"default,omitempty" json:"default,omitempty" xml:"default,omitempty"` + "`" + `
 	Optional *float32 ` + "`" + `form:"optional,omitempty" json:"optional,omitempty" xml:"optional,omitempty"` + "`" + `
 	Bytes []byte ` + "`" + `form:"bytes,omitempty" json:"bytes,omitempty" xml:"bytes,omitempty"` + "`" + `
-	Any interface{} ` + "`" + `form:"any,omitempty" json:"any,omitempty" xml:"any,omitempty"` + "`" + `
+	Any any ` + "`" + `form:"any,omitempty" json:"any,omitempty" xml:"any,omitempty"` + "`" + `
 	RequiredBytes []byte ` + "`" + `form:"required_bytes" json:"required_bytes" xml:"required_bytes"` + "`" + `
-	RequiredAny interface{} ` + "`" + `form:"required_any" json:"required_any" xml:"required_any"` + "`" + `
+	RequiredAny any ` + "`" + `form:"required_any" json:"required_any" xml:"required_any"` + "`" + `
 	DefaultBytes []byte ` + "`" + `form:"default_bytes,omitempty" json:"default_bytes,omitempty" xml:"default_bytes,omitempty"` + "`" + `
-	DefaultAny interface{} ` + "`" + `form:"default_any,omitempty" json:"default_any,omitempty" xml:"default_any,omitempty"` + "`" + `
+	DefaultAny any ` + "`" + `form:"default_any,omitempty" json:"default_any,omitempty" xml:"default_any,omitempty"` + "`" + `
 	CustomType *pkg.String ` + "`" + `form:"custom_type,omitempty" json:"custom_type,omitempty" xml:"custom_type,omitempty"` + "`" + `
 	CustomTag *string ` + "`" + `foo:"bar"` + "`" + `
 }`
@@ -104,11 +141,11 @@ var (
 	Default int ` + "`" + `form:"default" json:"default" xml:"default"` + "`" + `
 	Optional *float32 ` + "`" + `form:"optional,omitempty" json:"optional,omitempty" xml:"optional,omitempty"` + "`" + `
 	Bytes []byte ` + "`" + `form:"bytes,omitempty" json:"bytes,omitempty" xml:"bytes,omitempty"` + "`" + `
-	Any interface{} ` + "`" + `form:"any,omitempty" json:"any,omitempty" xml:"any,omitempty"` + "`" + `
+	Any any ` + "`" + `form:"any,omitempty" json:"any,omitempty" xml:"any,omitempty"` + "`" + `
 	RequiredBytes []byte ` + "`" + `form:"required_bytes" json:"required_bytes" xml:"required_bytes"` + "`" + `
-	RequiredAny interface{} ` + "`" + `form:"required_any" json:"required_any" xml:"required_any"` + "`" + `
+	RequiredAny any ` + "`" + `form:"required_any" json:"required_any" xml:"required_any"` + "`" + `
 	DefaultBytes []byte ` + "`" + `form:"default_bytes" json:"default_bytes" xml:"default_bytes"` + "`" + `
-	DefaultAny interface{} ` + "`" + `form:"default_any" json:"default_any" xml:"default_any"` + "`" + `
+	DefaultAny any ` + "`" + `form:"default_any" json:"default_any" xml:"default_any"` + "`" + `
 	CustomType *pkg.String ` + "`" + `form:"custom_type,omitempty" json:"custom_type,omitempty" xml:"custom_type,omitempty"` + "`" + `
 	CustomTag *string ` + "`" + `foo:"bar"` + "`" + `
 }`
@@ -118,11 +155,11 @@ var (
 	Default *int ` + "`" + `form:"default,omitempty" json:"default,omitempty" xml:"default,omitempty"` + "`" + `
 	Optional *float32 ` + "`" + `form:"optional,omitempty" json:"optional,omitempty" xml:"optional,omitempty"` + "`" + `
 	Bytes []byte ` + "`" + `form:"bytes,omitempty" json:"bytes,omitempty" xml:"bytes,omitempty"` + "`" + `
-	Any interface{} ` + "`" + `form:"any,omitempty" json:"any,omitempty" xml:"any,omitempty"` + "`" + `
+	Any any ` + "`" + `form:"any,omitempty" json:"any,omitempty" xml:"any,omitempty"` + "`" + `
 	RequiredBytes []byte ` + "`" + `form:"required_bytes,omitempty" json:"required_bytes,omitempty" xml:"required_bytes,omitempty"` + "`" + `
-	RequiredAny interface{} ` + "`" + `form:"required_any,omitempty" json:"required_any,omitempty" xml:"required_any,omitempty"` + "`" + `
+	RequiredAny any ` + "`" + `form:"required_any,omitempty" json:"required_any,omitempty" xml:"required_any,omitempty"` + "`" + `
 	DefaultBytes []byte ` + "`" + `form:"default_bytes,omitempty" json:"default_bytes,omitempty" xml:"default_bytes,omitempty"` + "`" + `
-	DefaultAny interface{} ` + "`" + `form:"default_any,omitempty" json:"default_any,omitempty" xml:"default_any,omitempty"` + "`" + `
+	DefaultAny any ` + "`" + `form:"default_any,omitempty" json:"default_any,omitempty" xml:"default_any,omitempty"` + "`" + `
 	CustomType *pkg.String ` + "`" + `form:"custom_type,omitempty" json:"custom_type,omitempty" xml:"custom_type,omitempty"` + "`" + `
 	CustomTag *string ` + "`" + `foo:"bar"` + "`" + `
 }`

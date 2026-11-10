@@ -47,13 +47,20 @@ func TestWrapDoer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
+			daemon := xraytest.NewDaemon(t)
+
 			expMsgs := 0 // expected number of messages to be sent to X-Ray daemon
 			if tc.Segment {
 				expMsgs = 2
-				xrayConn, err := net.Dial("udp", udplisten)
+				xrayConn, err := net.Dial("udp", daemon.Addr)
 				if err != nil {
 					t.Fatalf("error creating xray daemon connection: %v", err)
 				}
+				defer func() {
+					if closeErr := xrayConn.Close(); closeErr != nil {
+						t.Errorf("close connection: %v", closeErr)
+					}
+				}()
 				segment := xray.NewSegment(segmentName, traceID, spanID, xrayConn)
 				// add an xray segment to the context
 				ctx := context.WithValue(context.Background(), xray.SegKey, segment)
@@ -61,8 +68,14 @@ func TestWrapDoer(t *testing.T) {
 			}
 
 			doer := newTestDoer(t, tc.Segment, tc.StatusCode)
-			messages := xraytest.ReadUDP(t, udplisten, expMsgs, func() {
-				WrapDoer(doer).Do(req)
+			messages := daemon.Read(t, expMsgs, func() {
+				resp, err := WrapDoer(doer).Do(req)
+				if resp != nil && resp.Body != nil {
+					defer func() { _ = resp.Body.Close() }()
+				}
+				if err != nil && !tc.Error {
+					t.Fatalf("error executing request: %v", err)
+				}
 			})
 			if expMsgs == 0 {
 				return

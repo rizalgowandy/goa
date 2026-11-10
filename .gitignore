@@ -1,6 +1,7 @@
 # Golang tools artifacts
-**/*.coverprofile
 **/*.test
+coverage.out
+test-report.json
 
 # Executables and test outputs
 cmd/goa/goa
@@ -12,3 +13,14 @@ cmd/goa/goa
 *~
 *.orig
 *.swp
+
+# DeepSource cruft
+cover.out
+
+# MacOS cruft
+**/.DS_Store
+
+jsonrpc/integration_tests/tests/testdata/runs/*
+
+.kiro/
+.claude/worktrees/

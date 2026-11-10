@@ -1,0 +1,61 @@
+// NewMethodPayloadWithNestedTypesPayload builds
+// *servicepayloadwithnestedtypes.MethodPayloadWithNestedTypesPayload from
+// *service_payload_with_nested_typespb.MethodPayloadWithNestedTypesRequest.
+func NewMethodPayloadWithNestedTypesPayload(message *service_payload_with_nested_typespb.MethodPayloadWithNestedTypesRequest) *servicepayloadwithnestedtypes.MethodPayloadWithNestedTypesPayload {
+	v := &servicepayloadwithnestedtypes.MethodPayloadWithNestedTypesPayload{}
+	if message.AParams != nil {
+		v.AParams = transformProtoAParamsToAParams(message.AParams)
+	}
+	if message.BParams != nil {
+		v.BParams = transformProtoBParamsToBParams(message.BParams)
+	}
+	return v
+}
+
+// NewProtoMethodPayloadWithNestedTypesResponse builds
+// *service_payload_with_nested_typespb.MethodPayloadWithNestedTypesResponse
+// from metadata values.
+func NewProtoMethodPayloadWithNestedTypesResponse() *service_payload_with_nested_typespb.MethodPayloadWithNestedTypesResponse {
+	message := &service_payload_with_nested_typespb.MethodPayloadWithNestedTypesResponse{}
+	return message
+}
+
+// transformProtoAParamsToAParams builds a value of type
+// *servicepayloadwithnestedtypes.AParams from a value of type
+// *service_payload_with_nested_typespb.AParams.
+func transformProtoAParamsToAParams(v *service_payload_with_nested_typespb.AParams) *servicepayloadwithnestedtypes.AParams {
+	res := &servicepayloadwithnestedtypes.AParams{}
+	if v.A != nil {
+		res.A = make(map[string][]string, len(v.A))
+		for key, val := range v.A {
+			tk := key
+			var tv []string
+			if val != nil {
+				tv = make([]string, len(val.Field))
+				for i, val := range val.Field {
+					tv[i] = val
+				}
+			}
+			res.A[tk] = tv
+		}
+	}
+
+	return res
+}
+
+// transformProtoBParamsToBParams builds a value of type
+// *servicepayloadwithnestedtypes.BParams from a value of type
+// *service_payload_with_nested_typespb.BParams.
+func transformProtoBParamsToBParams(v *service_payload_with_nested_typespb.BParams) *servicepayloadwithnestedtypes.BParams {
+	res := &servicepayloadwithnestedtypes.BParams{}
+	if v.B != nil {
+		res.B = make(map[string]string, len(v.B))
+		for key, val := range v.B {
+			tk := key
+			tv := val
+			res.B[tk] = tv
+		}
+	}
+
+	return res
+}

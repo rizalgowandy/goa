@@ -1,21 +1,22 @@
+// This file renders section templates into files. Go source is checked and
+// formatted before writing; file callbacks receive the completed file on disk.
 package codegen
 
 import (
 	"bytes"
 	"fmt"
 	"go/ast"
-	"go/format"
 	"go/parser"
+	"go/printer"
 	"go/scanner"
 	"go/token"
 	"io"
-	"io/ioutil"
+	"maps"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 	"text/template"
 
-	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/imports"
 )
 
@@ -49,11 +50,18 @@ type (
 		// renders the section text.
 		Source string
 		// FuncMap lists the functions used to render the templates.
-		FuncMap map[string]interface{}
+		FuncMap map[string]any
 		// Data used as input of template.
-		Data interface{}
+		Data any
+	}
+
+	sectionTemplateKey struct {
+		name   string
+		source string
 	}
 )
+
+var cachedSectionTemplates sync.Map
 
 // Section returns the section templates with the given name or nil if not found.
 func (f *File) Section(name string) []*SectionTemplate {
@@ -83,103 +91,135 @@ func (f *File) Render(dir string) (string, error) {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return "", err
 	}
 
-	file, err := os.OpenFile(
-		path,
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY,
-		0644,
-	)
+	content, err := f.source(path)
 	if err != nil {
 		return "", err
 	}
-	for _, s := range f.SectionTemplates {
-		if err := s.Write(file); err != nil {
-			return "", err
-		}
-	}
-	if err := file.Close(); err != nil {
+	if err := os.WriteFile(path, content, 0644); err != nil {
 		return "", err
 	}
-
-	// Format Go source files
-	if filepath.Ext(path) == ".go" {
-		if err := finalizeGoSource(path); err != nil {
-			return "", err
-		}
-	}
-
-	// Run finalizer if any
 	if f.FinalizeFunc != nil {
 		if err := f.FinalizeFunc(path); err != nil {
 			return "", err
 		}
 	}
-
 	return path, nil
+}
+
+// Source executes the section templates and formats Go source, returning fresh
+// bytes without reading or writing files or invoking FinalizeFunc. SkipExist
+// affects only Render; Source always produces the declared file's content.
+// Template functions retain their own behavior and may return an error.
+func (f *File) Source() ([]byte, error) {
+	return f.source(f.Path)
 }
 
 // Write writes the section to the given writer.
 func (s *SectionTemplate) Write(w io.Writer) error {
-	funcs := TemplateFuncs()
-	for k, v := range s.FuncMap {
-		funcs[k] = v
+	if len(s.FuncMap) == 0 {
+		key := sectionTemplateKey{name: s.Name, source: s.Source}
+		if cached, ok := cachedSectionTemplates.Load(key); ok {
+			return cached.(*template.Template).Execute(w, s.Data)
+		}
+		tmpl := template.Must(template.New(s.Name).Funcs(TemplateFuncs()).Parse(s.Source))
+		cachedSectionTemplates.Store(key, tmpl)
+		return tmpl.Execute(w, s.Data)
 	}
+	funcs := TemplateFuncs()
+	maps.Copy(funcs, s.FuncMap)
 	tmpl := template.Must(template.New(s.Name).Funcs(funcs).Parse(s.Source))
 	return tmpl.Execute(w, s.Data)
 }
 
-// finalizeGoSource removes unneeded imports from the given Go source file and
-// runs go fmt on it.
-func finalizeGoSource(path string) error {
-	// Make sure file parses and print content if it does not.
+// finalizeGoSource processes Go source entirely in memory without file I/O
+func finalizeGoSource(path string, content []byte) ([]byte, error) {
+	// Parse the content
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	file, err := parser.ParseFile(fset, path, content, parser.ParseComments)
 	if err != nil {
-		content, _ := ioutil.ReadFile(path)
 		var buf bytes.Buffer
 		scanner.PrintError(&buf, err)
-		return fmt.Errorf("%s\n========\nContent:\n%s", buf.String(), content)
+		return nil, fmt.Errorf("%s\n========\nContent:\n%s", buf.String(), content)
 	}
 
-	// Clean unused imports
-	imps := astutil.Imports(fset, file)
-	for _, group := range imps {
-		for _, imp := range group {
-			path := strings.Trim(imp.Path.Value, `"`)
-			if !astutil.UsesImport(file, path) {
-				if imp.Name != nil {
-					astutil.DeleteNamedImport(fset, file, imp.Name.Name, path)
-				} else {
-					astutil.DeleteImport(fset, file, path)
-				}
-			}
-		}
-	}
+	// Clean unused imports using optimized single-pass detection
+	impMap := buildImportMap(file)
+	detectUsedImports(file, impMap)
+	removeUnusedImports(fset, file, impMap)
 	ast.SortImports(fset, file)
-	w, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return err
-	}
-	if err := format.Node(w, fset, file); err != nil {
-		return err
-	}
-	w.Close()
 
-	// Format code using goimport standard
-	bs, err := ioutil.ReadFile(path)
-	if err != nil {
-		return err
+	// Print the cleaned, sorted file once.
+	var formatted bytes.Buffer
+	config := printer.Config{Mode: printer.UseSpaces | printer.TabIndent, Tabwidth: 8}
+	if err := config.Fprint(&formatted, fset, file); err != nil {
+		return nil, err
 	}
+
 	opt := imports.Options{
 		Comments:   true,
 		FormatOnly: true,
 	}
-	bs, err = imports.Process(path, bs, &opt)
-	if err != nil {
-		return err
+
+	// imports.Process with FormatOnly only restructures the package/import
+	// header. When the file has multiple non-import declarations and no //line
+	// directives, format only the header through the first non-import
+	// declaration and splice it with the already-printed body.
+	firstNonImport := 0
+	for firstNonImport < len(file.Decls) {
+		gen, ok := file.Decls[firstNonImport].(*ast.GenDecl)
+		if !ok || gen.Tok != token.IMPORT {
+			break
+		}
+		firstNonImport++
 	}
-	return ioutil.WriteFile(path, bs, os.ModePerm)
+	if firstNonImport+1 < len(file.Decls) && !bytes.Contains(content, []byte("//line ")) {
+		endLine := fset.Position(file.Decls[firstNonImport].End()).Line
+		var headComments []*ast.CommentGroup
+		for _, cg := range file.Comments {
+			if fset.Position(cg.Pos()).Line <= endLine {
+				headComments = append(headComments, cg)
+			}
+		}
+		headFile := *file
+		headFile.Decls = file.Decls[:firstNonImport+1]
+		headFile.Comments = headComments
+		var headRaw bytes.Buffer
+		if err := config.Fprint(&headRaw, fset, &headFile); err != nil {
+			return nil, err
+		}
+		fullBytes := formatted.Bytes()
+		if bytes.HasPrefix(fullBytes, headRaw.Bytes()) {
+			headFormatted, err := imports.Process(path, headRaw.Bytes(), &opt)
+			if err != nil {
+				return nil, err
+			}
+			tail := fullBytes[headRaw.Len():]
+			result := make([]byte, 0, len(headFormatted)+len(tail))
+			result = append(result, headFormatted...)
+			result = append(result, tail...)
+			return result, nil
+		}
+	}
+
+	return imports.Process(path, formatted.Bytes(), &opt)
+}
+
+// source shares template execution and Go formatting with disk rendering while
+// retaining the caller's filename in syntax errors.
+func (f *File) source(path string) ([]byte, error) {
+	var buf bytes.Buffer
+	for _, s := range f.SectionTemplates {
+		if err := s.Write(&buf); err != nil {
+			return nil, err
+		}
+	}
+	content := buf.Bytes()
+	if filepath.Ext(path) == ".go" {
+		return finalizeGoSource(path, content)
+	}
+	return content, nil
 }

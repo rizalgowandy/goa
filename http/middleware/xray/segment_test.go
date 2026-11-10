@@ -11,6 +11,7 @@ import (
 
 	"github.com/pkg/errors"
 	"goa.design/goa/v3/middleware/xray"
+	"goa.design/goa/v3/middleware/xray/xraytest"
 )
 
 func TestRecordError(t *testing.T) {
@@ -137,7 +138,7 @@ func TestRecordRequest(t *testing.T) {
 
 	for k, c := range cases {
 		t.Run(k, func(t *testing.T) {
-			req, _ := http.NewRequest(method, c.Request.URL.String(), nil)
+			req, _ := http.NewRequest(method, c.Request.URL.String(), http.NoBody)
 			req.Header.Set("User-Agent", c.Request.UserAgent)
 			req.Header.Set("X-Forwarded-For", c.Request.IP)
 			req.RemoteAddr = c.Request.RemoteAddr
@@ -189,14 +190,20 @@ func TestRecordRequest(t *testing.T) {
 func TestRace(t *testing.T) {
 	var (
 		rErr   = errors.New("oh no")
-		req, _ = http.NewRequest("GET", "https://goa.design", nil)
+		req, _ = http.NewRequest("GET", "https://goa.design", http.NoBody)
 		resp   = httptest.NewRecorder().Result()
 	)
 
-	conn, err := net.Dial("udp", udplisten)
+	daemon := xraytest.NewDaemon(t)
+	conn, err := net.Dial("udp", daemon.Addr)
 	if err != nil {
 		t.Fatalf("failed to connect to daemon - %s", err)
 	}
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("close connection: %v", closeErr)
+		}
+	}()
 	s := &HTTPSegment{
 		Segment: xray.NewSegment("hello", xray.NewTraceID(), xray.NewID(), conn),
 	}
@@ -225,7 +232,7 @@ func TestRace(t *testing.T) {
 		wg.Done()
 	}
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		wg.Add(1)
 		go raceFct()
 	}

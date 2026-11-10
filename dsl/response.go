@@ -5,28 +5,41 @@ import (
 	"goa.design/goa/v3/expr"
 )
 
-// Response describes a HTTP or a gRPC response. Response describes both success
-// and error responses. When describing an error response the first argument is
-// the name of the error.
+// Response describes a HTTP, JSON-RPC or gRPC response. Response describes both
+// success and error responses. When describing an error response the first
+// argument is the name of the error.
 //
 // While a service method may only define a single result type, Response may
 // appear multiple times to define multiple success HTTP responses. In this case
 // the Tag expression makes it possible to identify a result type attribute and
 // a corresponding string value used to select the proper success response (each
-// success response is associated with a different tag value). gRPC responses
-// may only define one success response.
+// success response is associated with a different tag value). JSON-RPC and
+// gRPC responses may only define one success response.
 //
 // Response may appear in a service expression to define error responses common
 // to all the service methods. Response may also appear in a method expression
 // to define both success and error responses specific to the method. In both
-// cases Response must appear in the transport specific DSL (i.e. in a HTTP or
-// gRPC subexpression).
+// cases Response must appear in the transport specific DSL (i.e. in a HTTP,
+// JSON-RPC or gRPC subexpression).
 //
 // Response accepts one to three arguments. Success response accepts a status
 // code as first argument. If the first argument is a status code then a
 // function may be given as the second argument. This function may provide a
 // description and describes how to map the result type attributes to transport
-// specific constructs (e.g. HTTP headers and body, gRPC metadata and message).
+// specific constructs (e.g. HTTP headers and body, JSON-RPC ID and result,
+// gRPC metadata and message).
+//
+// JSON-RPC Responses:
+//
+// For JSON-RPC, Response configures how the method result is mapped to the
+// JSON-RPC response structure. The JSON-RPC protocol defines a fixed envelope
+// with "id", "result" and "error" fields.
+//
+//   - Success responses: The entire method result is used as the "result" field
+//   - Error responses: Map errors to JSON-RPC error codes using Response
+//   - The response "id" automatically matches the request "id" if present
+//   - Header and Cookie cannot appear in a JSON-RPC Response because a batch or
+//     stream may carry several messages in one HTTP response
 //
 // The valid invocations for successful response are thus:
 //
@@ -48,58 +61,65 @@ import (
 //
 // * Response(status, error_name, func)
 //
-// By default (i.e. if Response only defines a status code) then:
+// By default:
 //
-//    - success HTTP responses use code 200 (OK) and error HTTP responses use code 400 (BadRequest)
-//    - success gRPC responses use code 0 (OK) and error gRPC response use code 2 (Unknown)
-//    - The result type attributes are all mapped to the HTTP response body or gRPC response message.
+//   - success HTTP responses use code 200 (OK) and error HTTP responses use code 500 (Internal Server Error)
+//   - error JSON-RPC responses use code -32603 (Internal error)
+//   - success gRPC responses use code 0 (OK) and error gRPC responses use code 2 (Unknown)
+//   - The result type attributes are all mapped to the HTTP response body,
+//     JSON-RPC result, or gRPC response message.
 //
 // Example:
 //
-//    Method("create", func() {
-//        Payload(CreatePayload)
-//        Result(CreateResult)
-//        Error("an_error")
+//	Method("create", func() {
+//	    Payload(CreatePayload)
+//	    Result(CreateResult)
+//	    Error("an_error")
 //
-//        HTTP(func() {
-//            Response(StatusAccepted, func() { // HTTP status code set using argument
-//                Description("Response used for async creations")
-//                Tag("outcome", "accepted") // Tag identifies a result type attribute and corresponding
-//                                           // value for this response to be selected.
-//                Header("taskHref")         // map "taskHref" attribute to header, all others to body
-//            })
+//	    HTTP(func() {
+//	        Response(StatusAccepted, func() { // HTTP status code set using argument
+//	            Description("Response used for async creations")
+//	            Tag("outcome", "accepted") // Tag identifies a result type attribute and corresponding
+//	                                       // value for this response to be selected.
+//	            Header("taskHref")         // map "taskHref" attribute to header, all others to body
+//	        })
 //
-//            Response(StatusCreated, func () {
-//                Tag("outcome", "created")  // CreateResult type to describe body
-//            })
+//	        Response(StatusCreated, func () {
+//	            Tag("outcome", "created")  // CreateResult type to describe body
+//	        })
 //
-//            Response(func() {
-//                Description("Response used when item already exists")
-//                Code(StatusNoContent) // HTTP status code set using Code
-//                Body(Empty)           // Override method result type
-//            })
+//	        Response(func() {
+//	            Description("Response used when item already exists")
+//	            Code(StatusNoContent) // HTTP status code set using Code
+//	            Body(Empty)           // Override method result type
+//	        })
 //
-//            Response("an_error", StatusConflict) // Override default of 400
-//        })
+//	        Response("an_error", StatusConflict) // Override default of 400
+//	    })
 //
-//        GRPC(func() {
-//            Response(CodeOK, func() {
-//                Metadata("taskHref") // map "taskHref" attribute to metadata, all others to message
-//            })
+//	    JSONRPC(func() {
+//	        Response("an_error", RPCInvalidParams, func() {
+//	            Description("Invalid parameters provided")
+//	        })
+//	    })
 //
-//            Response("an_error", CodeInternal, func() {
-//                Description("Error returned for internal errors")
-//            })
-//        })
-//    })
+//	    GRPC(func() {
+//	        Response(CodeOK, func() {
+//	            Metadata("taskHref") // map "taskHref" attribute to metadata, all others to message
+//	        })
 //
-func Response(val interface{}, args ...interface{}) {
+//	        Response("an_error", CodeInternal, func() {
+//	            Description("Error returned for internal errors")
+//	        })
+//	    })
+//	})
+func Response(val any, args ...any) {
 	name, ok := val.(string)
 	if !ok && len(args) > 0 {
 		name, ok = args[0].(string)
 		if ok {
 			arg := args[0]
-			args = append([]interface{}{val}, args[1:]...)
+			args = append([]any{val}, args[1:]...)
 			val = arg
 		}
 	}
@@ -109,7 +129,7 @@ func Response(val interface{}, args ...interface{}) {
 			eval.InvalidArgError("name of error", val)
 			return
 		}
-		if e := httpError(name, t, args...); e != nil {
+		if e := httpOrJSONRPCError(name, t, args...); e != nil {
 			t.API.HTTP.Errors = append(t.API.HTTP.Errors, e)
 		}
 	case *expr.HTTPExpr:
@@ -117,7 +137,7 @@ func Response(val interface{}, args ...interface{}) {
 			eval.InvalidArgError("name of error", val)
 			return
 		}
-		if e := httpError(name, t, args...); e != nil {
+		if e := httpOrJSONRPCError(name, t, args...); e != nil {
 			t.Errors = append(t.Errors, e)
 		}
 	case *expr.GRPCExpr:
@@ -128,33 +148,22 @@ func Response(val interface{}, args ...interface{}) {
 		if e := grpcError(name, t, args...); e != nil {
 			t.Errors = append(t.Errors, e)
 		}
+	case *expr.JSONRPCExpr:
+		if !ok {
+			eval.InvalidArgError("name of error", val)
+			return
+		}
+		if e := httpOrJSONRPCError(name, t, args...); e != nil {
+			t.Errors = append(t.Errors, e)
+		}
 	case *expr.HTTPServiceExpr:
 		if !ok {
 			eval.InvalidArgError("name of error", val)
 			return
 		}
-		if e := httpError(name, t, args...); e != nil {
+		if e := httpOrJSONRPCError(name, t, args...); e != nil {
 			t.HTTPErrors = append(t.HTTPErrors, e)
 		}
-	case *expr.HTTPEndpointExpr:
-		if ok {
-			if e := httpError(name, t, args...); e != nil {
-				t.HTTPErrors = append(t.HTTPErrors, e)
-			}
-			return
-		}
-		code, fn := parseResponseArgs(val, args...)
-		if code == 0 {
-			code = expr.StatusOK
-		}
-		resp := &expr.HTTPResponseExpr{
-			StatusCode: code,
-			Parent:     t,
-		}
-		if fn != nil {
-			eval.Execute(fn, resp)
-		}
-		t.Responses = append(t.Responses, resp)
 	case *expr.GRPCServiceExpr:
 		if !ok {
 			eval.InvalidArgError("name of error", val)
@@ -163,6 +172,27 @@ func Response(val interface{}, args ...interface{}) {
 		if e := grpcError(name, t, args...); e != nil {
 			t.GRPCErrors = append(t.GRPCErrors, e)
 		}
+	case *expr.HTTPEndpointExpr:
+		if ok {
+			if e := httpOrJSONRPCError(name, t, args...); e != nil {
+				t.HTTPErrors = append(t.HTTPErrors, e)
+			}
+			return
+		}
+		code, fn := parseResponseArgs(val, args...)
+		_, codeSet := val.(int)
+		if !codeSet {
+			code = expr.StatusOK
+		}
+		resp := &expr.HTTPResponseExpr{
+			StatusCode:    code,
+			StatusCodeSet: codeSet,
+			Parent:        t,
+		}
+		if fn != nil {
+			eval.Execute(fn, resp)
+		}
+		t.Responses = append(t.Responses, resp)
 	case *expr.GRPCEndpointExpr:
 		if ok {
 			// error response
@@ -189,27 +219,33 @@ func Response(val interface{}, args ...interface{}) {
 //
 // Code must appear in a Response expression.
 //
-// Code accepts one argument: the HTTP or gRPC status code.
+// Code accepts one argument: the HTTP, JSON-RPC or gRPC status code.
 func Code(code int) {
 	switch t := eval.Current().(type) {
 	case *expr.HTTPResponseExpr:
 		t.StatusCode = code
+		t.StatusCodeSet = true
+	case *expr.HTTPErrorExpr:
+		t.Response.StatusCode = code
+		t.Response.StatusCodeSet = true
 	case *expr.GRPCResponseExpr:
 		t.StatusCode = code
+	case *expr.GRPCErrorExpr:
+		t.Response.StatusCode = code
 	default:
 		eval.IncompatibleDSL()
 	}
 }
 
-func grpcError(n string, p eval.Expression, args ...interface{}) *expr.GRPCErrorExpr {
+func grpcError(n string, p eval.Expression, args ...any) *expr.GRPCErrorExpr {
 	if len(args) == 0 {
-		eval.ReportError("not enough arguments, use Response(name, status), Response(name, status, func()) or Response(name, func())")
+		eval.TooFewArgError()
 		return nil
 	}
 	var (
 		code int
 		fn   func()
-		val  interface{}
+		val  any
 	)
 	val = args[0]
 	args = args[1:]
@@ -221,21 +257,23 @@ func grpcError(n string, p eval.Expression, args ...interface{}) *expr.GRPCError
 		StatusCode: code,
 		Parent:     p,
 	}
+	mapping := &expr.GRPCErrorExpr{
+		ErrorExpr: errorForResponse(n, p),
+		Name:      n,
+		Response:  resp,
+	}
 	if fn != nil {
-		eval.Execute(fn, resp)
+		eval.Execute(fn, mapping)
 	}
-	return &expr.GRPCErrorExpr{
-		Name:     n,
-		Response: resp,
-	}
+	return mapping
 }
 
-func parseResponseArgs(val interface{}, args ...interface{}) (code int, fn func()) {
+func parseResponseArgs(val any, args ...any) (code int, fn func()) {
 	switch t := val.(type) {
 	case int:
 		code = t
 		if len(args) > 1 {
-			eval.ReportError("too many arguments given to Response (%d)", len(args)+1)
+			eval.TooManyArgError()
 			return
 		}
 		if len(args) == 1 {
@@ -248,7 +286,7 @@ func parseResponseArgs(val interface{}, args ...interface{}) (code int, fn func(
 		}
 	case func():
 		if len(args) > 0 {
-			eval.InvalidArgError("int (HTTP status code)", val)
+			eval.TooManyArgError()
 			return
 		}
 		fn = t
@@ -259,31 +297,60 @@ func parseResponseArgs(val interface{}, args ...interface{}) (code int, fn func(
 	return
 }
 
-func httpError(n string, p eval.Expression, args ...interface{}) *expr.HTTPErrorExpr {
+func httpOrJSONRPCError(n string, p eval.Expression, args ...any) *expr.HTTPErrorExpr {
 	if len(args) == 0 {
-		eval.ReportError("not enough arguments, use Response(name, status), Response(name, status, func()) or Response(name, func())")
+		eval.TooFewArgError()
 		return nil
 	}
 	var (
 		code int
 		fn   func()
-		val  interface{}
+		val  any
 	)
 	val = args[0]
 	args = args[1:]
 	code, fn = parseResponseArgs(val, args...)
-	if code == 0 {
+	_, codeSet := val.(int)
+	if !codeSet {
 		code = expr.StatusBadRequest
 	}
 	resp := &expr.HTTPResponseExpr{
-		StatusCode: code,
-		Parent:     p,
+		StatusCode:    code,
+		StatusCodeSet: codeSet,
+		Parent:        p,
+	}
+	mapping := &expr.HTTPErrorExpr{
+		ErrorExpr: errorForResponse(n, p),
+		Name:      n,
+		Response:  resp,
+	}
+	if !codeSet && mapping.IsJSONRPC() {
+		resp.StatusCode = expr.RPCInternalError
 	}
 	if fn != nil {
-		eval.Execute(fn, resp)
+		eval.Execute(fn, mapping)
 	}
-	return &expr.HTTPErrorExpr{
-		Name:     n,
-		Response: resp,
+	return mapping
+}
+
+// errorForResponse returns the declared error available where a transport
+// response is defined. The response callback uses this error immediately, so
+// inherited API and service mappings must resolve it before endpoint creation.
+func errorForResponse(name string, parent eval.Expression) *expr.ErrorExpr {
+	switch actual := parent.(type) {
+	case *expr.HTTPEndpointExpr:
+		return actual.MethodExpr.Error(name)
+	case *expr.GRPCEndpointExpr:
+		return actual.MethodExpr.Error(name)
+	case *expr.HTTPServiceExpr:
+		return actual.Error(name)
+	case *expr.GRPCServiceExpr:
+		return actual.Error(name)
+	case *expr.RootExpr:
+		return actual.Error(name)
+	case *expr.HTTPExpr, *expr.JSONRPCExpr, *expr.GRPCExpr:
+		return expr.Root.Error(name)
+	default:
+		return nil
 	}
 }

@@ -26,6 +26,9 @@ type (
 	fixedSampler int
 )
 
+// Let tests override the random number generator.
+var intn = rand.Intn
+
 const (
 	// adaptive upper bound has granularity in case caller becomes extremely busy.
 	adaptiveUpperBoundInt   = 10000
@@ -88,11 +91,11 @@ func (s *adaptiveSampler) Sample() bool {
 	}
 
 	// currentRate is never zero.
-	return currentRate == adaptiveUpperBoundInt || rand.Intn(adaptiveUpperBoundInt) < currentRate
+	return currentRate == adaptiveUpperBoundInt || intn(adaptiveUpperBoundInt) < currentRate
 }
 
 // Sample implementation for fixed percentage
 func (s fixedSampler) Sample() bool {
 	samplingPercent := int(s)
-	return samplingPercent > 0 && (samplingPercent == 100 || rand.Intn(100) < samplingPercent)
+	return samplingPercent > 0 && (samplingPercent == 100 || intn(100) < samplingPercent)
 }

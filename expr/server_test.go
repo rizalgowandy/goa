@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -111,7 +112,8 @@ func TestServerExprValidate(t *testing.T) {
 			Hosts:    tc.hosts,
 			Services: tc.services,
 		}
-		if actual := s.Validate().(*eval.ValidationErrors); len(tc.expected.Errors) != len(actual.Errors) {
+		var actual *eval.ValidationErrors
+		if errors.As(s.Validate(), &actual); len(tc.expected.Errors) != len(actual.Errors) {
 			t.Errorf("%s: expected the number of error values to match %d got %d ", k, len(tc.expected.Errors), len(actual.Errors))
 		} else {
 			for i, err := range actual.Errors {
@@ -145,7 +147,7 @@ func TestHostExprValidate(t *testing.T) {
 		invalidSchemeURIs = []URIExpr{
 			invalidSchemeURI,
 		}
-		objectPrimitive = func(d interface{}, v *ValidationExpr) *Object {
+		objectPrimitive = func(d any, v *ValidationExpr) *Object {
 			return &Object{
 				{
 					Name: foo,
@@ -157,7 +159,7 @@ func TestHostExprValidate(t *testing.T) {
 				},
 			}
 		}
-		objectNonPrimitive = func(d interface{}) *Object {
+		objectNonPrimitive = func(d any) *Object {
 			return &Object{
 				{
 					Name: bar,
@@ -247,7 +249,7 @@ func TestHostExprValidate(t *testing.T) {
 		"uri variable has no default value and no enum varidation values": {
 			uris: validURIs,
 			variables: attribute(objectPrimitive(nil, &ValidationExpr{
-				Values: []interface{}{},
+				Values: []any{},
 			})),
 			expected: &eval.ValidationErrors{
 				Errors: []error{
@@ -262,7 +264,8 @@ func TestHostExprValidate(t *testing.T) {
 			URIs:      tc.uris,
 			Variables: tc.variables,
 		}
-		if actual := h.Validate().(*eval.ValidationErrors); len(tc.expected.Errors) != len(actual.Errors) {
+		var actual *eval.ValidationErrors
+		if errors.As(h.Validate(), &actual); len(tc.expected.Errors) != len(actual.Errors) {
 			t.Errorf("%s: expected the number of error values to match %d got %d ", k, len(tc.expected.Errors), len(actual.Errors))
 		} else {
 			for i, err := range actual.Errors {

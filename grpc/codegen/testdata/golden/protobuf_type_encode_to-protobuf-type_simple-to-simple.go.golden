@@ -1,0 +1,10 @@
+func transform() {
+	target := &proto.Simple{
+		RequiredString: &source.RequiredString,
+		DefaultBool:    &source.DefaultBool,
+	}
+	if source.Integer != nil {
+		integer := int32(*source.Integer)
+		target.Integer = &integer
+	}
+}

@@ -4,8 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"goa.design/goa/v3/codegen"
-	"goa.design/goa/v3/expr"
 	"goa.design/goa/v3/grpc/codegen/testdata"
 )
 
@@ -30,7 +32,6 @@ type (
 )
 
 func TestStreaming(t *testing.T) {
-	//var empty string
 	cases := []*testCase{
 		// streaming result
 		{"server-streaming", testdata.ServerStreamingUserTypeDSL, []*sectionExpectation{
@@ -67,6 +68,9 @@ func TestStreaming(t *testing.T) {
 			{"server-stream-send", &testdata.ServerStreamingMapServerSendCode},
 			{"client-stream-recv", &testdata.ServerStreamingMapClientRecvCode},
 		}},
+		{"server-streaming-shared-result", testdata.ServerStreamingSharedResultRPCDSL, []*sectionExpectation{
+			{"client-stream-recv", &testdata.ServerStreamingServerRPCSharedResultRecvCode},
+		}},
 
 		// streaming payload
 
@@ -101,18 +105,18 @@ func TestStreaming(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			RunGRPCDSL(t, c.DSL)
-			serverfs := ServerFiles("", expr.Root)
+			root := RunGRPCDSL(t, c.DSL)
+			services := CreateGRPCServices(root)
+			serverfs := serverFiles(services)
 			if len(serverfs) < 2 {
 				t.Fatalf("got %d server files, expected 2", len(serverfs))
 			}
-			clientfs := ClientFiles("", expr.Root)
+			clientfs := clientFiles(services)
 			if len(clientfs) < 2 {
 				t.Fatalf("got %d client files, expected 2", len(clientfs))
 			}
 			for _, s := range c.Sections {
 				var (
-					code     string
 					path     string
 					sections []*codegen.SectionTemplate
 				)
@@ -124,8 +128,9 @@ func TestStreaming(t *testing.T) {
 					path = clientfs[0].Path
 				}
 				seclen := len(sections)
-				if seclen > 0 {
-					code = codegen.SectionCode(t, sections[0])
+				code := make([]string, 0, seclen)
+				for _, section := range sections {
+					code = append(code, codegen.SectionCode(t, section))
 				}
 				switch {
 				case seclen == 0 && s.Code == nil:
@@ -137,11 +142,92 @@ func TestStreaming(t *testing.T) {
 					// Test failed: section exists in file, but no code expected.
 					t.Errorf("invalid code for %s: got %d %s sections, expected 0.\n%s", path, seclen, s.Name, code)
 				default:
-					if code != *s.Code {
-						t.Errorf("invalid code for %s %s section, got:\n%s\ngot vs. expected:\n%s", path, s.Name, code, codegen.Diff(t, code, *s.Code))
-					}
+					gen := strings.Join(code, "\n")
+					assert.Equal(t, *s.Code, gen, "invalid code for %s %s section", path, s.Name)
 				}
 			}
 		})
 	}
+}
+
+func TestStreamingPayloadEnvelopeWithUnionPayload(t *testing.T) {
+	root := RunGRPCDSL(t, testdata.ClientStreamingRPCWithUnionPayloadDSL)
+	services := CreateGRPCServices(root)
+
+	clientfs := clientFiles(services)
+	require.Len(t, clientfs, 2)
+	serverfs := serverFiles(services)
+	require.Len(t, serverfs, 2)
+	protofs := protoFiles(services)
+	require.Len(t, protofs, 1)
+
+	requestEncoder := codegen.SectionsCode(t, clientfs[1].Section("request-encoder"))
+	assert.Contains(t, requestEncoder, "InitialPayload")
+	assert.Contains(t, requestEncoder, "MethodClientStreamingRPCWithUnionPayloadStreamingRequest")
+
+	clientSend := codegen.SectionsCode(t, clientfs[0].Section("client-stream-send"))
+	assert.Contains(t, clientSend, "StreamItem")
+	assert.Contains(t, clientSend, "UploadChunk")
+
+	serverInterface := codegen.SectionsCode(t, serverfs[0].Section("server-grpc-interface"))
+	assert.Contains(t, serverInterface, "message, err := stream.Recv()")
+	assert.Contains(t, serverInterface, "Decode(ctx, reqpb)")
+
+	requestDecoder := codegen.SectionsCode(t, serverfs[1].Section("request-decoder"))
+	assert.Contains(t, requestDecoder, "InitialPayload")
+	assert.Contains(t, requestDecoder, "stream_item")
+	assert.Contains(t, requestDecoder, "NewMethodClientStreamingRPCWithUnionPayloadPayload(message)")
+
+	proto := sectionCode(t, protofs[0].SectionTemplates[1:]...)
+	assert.Contains(t, proto, "message MethodClientStreamingRPCWithUnionPayloadStreamingRequest")
+	assert.Contains(t, proto, "oneof body")
+	assert.Contains(t, proto, "MethodClientStreamingRPCWithUnionPayloadRequest initial_payload")
+	assert.Contains(t, proto, "MethodClientStreamingRPCWithUnionPayloadStreamItem stream_item")
+
+	fpath := codegen.CreateTempFile(t, proto)
+	assert.NoError(t, protoc(defaultProtocCmd, fpath))
+}
+
+func TestStreamingPayloadLegacyCompat(t *testing.T) {
+	root := RunGRPCDSL(t, testdata.BidirectionalStreamingRPCWithPayloadLegacyCompatDSL)
+	services := CreateGRPCServices(root)
+
+	serverfs := serverFiles(services)
+	require.Len(t, serverfs, 2)
+	clientfs := clientFiles(services)
+	require.Len(t, clientfs, 2)
+
+	// The server stream tracks the protocol spoken by the client.
+	structCode := codegen.SectionsCode(t, serverfs[0].Section("server-stream-struct-type"))
+	assert.Contains(t, structCode, "legacy bool")
+
+	// The server stream reads raw stream item frames from legacy clients.
+	serverRecv := codegen.SectionsCode(t, serverfs[0].Section("server-stream-recv"))
+	assert.Contains(t, serverRecv, "if s.legacy {")
+	assert.Contains(t, serverRecv, "RecvMsg")
+
+	// The handler only waits for an initial payload frame from envelope clients.
+	serverInterface := codegen.SectionsCode(t, serverfs[0].Section("server-grpc-interface"))
+	assert.Contains(t, serverInterface, "goagrpc.UsesStreamEnvelope(ctx)")
+	assert.Contains(t, serverInterface, "legacy:")
+
+	// The request decoder dispatches to a legacy decoder that reads the
+	// payload from request metadata.
+	requestDecoder := codegen.SectionsCode(t, serverfs[1].Section("request-decoder"))
+	assert.Contains(t, requestDecoder, "LegacyRequest(ctx, md)")
+	assert.Contains(t, requestDecoder, `md.Get("a")`)
+	service := services.Get("ServiceBidirectionalStreamingRPCWithPayloadLegacyCompat")
+	legacyConstructor := service.Endpoints[0].Request.LegacyDecode.ServerConvert.Init.Declaration.Name()
+	assert.Contains(t, requestDecoder, legacyConstructor+"(")
+
+	// Generated clients declare the envelope protocol in request metadata.
+	requestEncoder := codegen.SectionsCode(t, clientfs[1].Section("request-encoder"))
+	assert.Contains(t, requestEncoder, "goagrpc.StreamProtocolMetadataKey")
+
+	// The wire contract for envelope clients is unchanged.
+	protofs := protoFiles(services)
+	require.Len(t, protofs, 1)
+	proto := sectionCode(t, protofs[0].SectionTemplates[1:]...)
+	assert.Contains(t, proto, "oneof body")
+	assert.Contains(t, proto, "initial_payload")
 }

@@ -1,11 +1,12 @@
 package eval
 
 import (
+	"errors"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"unicode"
 )
 
 // RunDSL iterates through the root expressions and calls WalkSets on each to
@@ -71,14 +72,14 @@ func Execute(fn func(), def Expression) bool {
 	}
 	var startCount int
 	if Context.Errors != nil {
-		startCount = len(Context.Errors.(MultiError))
+		startCount = len(Context.Errors)
 	}
 	Context.Stack = append(Context.Stack, def)
 	fn()
 	Context.Stack = Context.Stack[:len(Context.Stack)-1]
 	var endCount int
 	if Context.Errors != nil {
-		endCount = len(Context.Errors.(MultiError))
+		endCount = len(Context.Errors)
 	}
 	return endCount <= startCount
 }
@@ -95,7 +96,7 @@ func Current() Expression {
 
 // ReportError records a DSL error for reporting post DSL execution. It accepts
 // a format and values a la fmt.Printf.
-func ReportError(fm string, vals ...interface{}) {
+func ReportError(fm string, vals ...any) {
 	var suffix string
 	if cur := Context.Stack.Current(); cur != nil {
 		if name := cur.EvalName(); name != "" {
@@ -116,14 +117,25 @@ func ReportError(fm string, vals ...interface{}) {
 // IncompatibleDSL should be called by DSL functions when they are invoked in an
 // incorrect context (e.g. "Params" in "Service").
 func IncompatibleDSL() {
-	elems := strings.Split(caller(), ".")
-	ReportError("invalid use of %s", elems[len(elems)-1])
+	ReportError("invalid use of %s", caller())
 }
 
 // InvalidArgError records an invalid argument error. It is used by DSL
 // functions that take dynamic arguments.
-func InvalidArgError(expected string, actual interface{}) {
+func InvalidArgError(expected string, actual any) {
 	ReportError("cannot use %#v (type %s) as type %s", actual, reflect.TypeOf(actual), expected)
+}
+
+// TooFewArgError records a too few arguments error. It is used by DSL
+// functions that take dynamic arguments.
+func TooFewArgError() {
+	ReportError("too few arguments given to %s", caller())
+}
+
+// TooManyArgError records a too many arguments error. It is used by DSL
+// functions that take dynamic arguments.
+func TooManyArgError() {
+	ReportError("too many arguments given to %s", caller())
 }
 
 // ValidationErrors records the errors encountered when running Validate.
@@ -136,7 +148,12 @@ type ValidationErrors struct {
 func (verr *ValidationErrors) Error() string {
 	msg := make([]string, len(verr.Errors))
 	for i, err := range verr.Errors {
-		msg[i] = fmt.Sprintf("%s: %s", verr.Expressions[i].EvalName(), err)
+		expr := verr.Expressions[i]
+		if file, line, ok := validationErrorLocation(expr); ok {
+			msg[i] = fmt.Sprintf("[%s:%d] %s: %s", file, line, expr.EvalName(), err)
+		} else {
+			msg[i] = fmt.Sprintf("%s: %s", expr.EvalName(), err)
+		}
 	}
 	return strings.Join(msg, "\n")
 }
@@ -151,14 +168,15 @@ func (verr *ValidationErrors) Merge(err *ValidationErrors) {
 }
 
 // Add adds a validation error to the target.
-func (verr *ValidationErrors) Add(def Expression, format string, vals ...interface{}) {
+func (verr *ValidationErrors) Add(def Expression, format string, vals ...any) {
 	verr.AddError(def, fmt.Errorf(format, vals...))
 }
 
 // AddError adds a validation error to the target. It "flattens" validation
 // errors so that the recorded errors are never ValidationErrors themselves.
 func (verr *ValidationErrors) AddError(def Expression, err error) {
-	if v, ok := err.(*ValidationErrors); ok {
+	var v *ValidationErrors
+	if errors.As(err, &v) {
 		verr.Errors = append(verr.Errors, v.Errors...)
 		verr.Expressions = append(verr.Expressions, v.Expressions...)
 		return
@@ -169,7 +187,7 @@ func (verr *ValidationErrors) AddError(def Expression, err error) {
 
 // runSet executes the DSL for all expressions in the given set. The expression
 // DSLs may append to the set as they execute.
-func runSet(set ExpressionSet) error {
+func runSet(set ExpressionSet) {
 	executed := 0
 	recursed := 0
 	for executed < len(set) {
@@ -184,15 +202,15 @@ func runSet(set ExpressionSet) error {
 			}
 		}
 		if recursed > 100 {
-			return fmt.Errorf("too many generated expressions, infinite loop?")
+			Context.Record(&Error{GoError: fmt.Errorf("too many generated expressions, infinite loop?")})
+			return
 		}
 	}
-	return nil
 }
 
 // prepareSet runs the pre validation steps on all the set expressions that
 // define one.
-func prepareSet(set ExpressionSet) error {
+func prepareSet(set ExpressionSet) {
 	for _, def := range set {
 		if def == nil {
 			continue
@@ -201,11 +219,10 @@ func prepareSet(set ExpressionSet) error {
 			p.Prepare()
 		}
 	}
-	return nil
 }
 
 // validateSet runs the validation on all the set expressions that define one.
-func validateSet(set ExpressionSet) error {
+func validateSet(set ExpressionSet) {
 	errors := &ValidationErrors{}
 	for _, def := range set {
 		if def == nil {
@@ -220,11 +237,10 @@ func validateSet(set ExpressionSet) error {
 	if len(errors.Errors) > 0 {
 		Context.Record(&Error{GoError: errors})
 	}
-	return Context.Errors
 }
 
 // finalizeSet runs the finalizer on all the set expressions that define one.
-func finalizeSet(set ExpressionSet) error {
+func finalizeSet(set ExpressionSet) {
 	for _, def := range set {
 		if def == nil {
 			continue
@@ -233,18 +249,30 @@ func finalizeSet(set ExpressionSet) error {
 			f.Finalize()
 		}
 	}
-	return nil
 }
 
 // caller returns the name of calling function.
 func caller() string {
-	pc, file, _, ok := runtime.Caller(2)
-	if ok && filepath.Base(file) == "current.go" {
-		pc, _, _, ok = runtime.Caller(3)
+	var latest string
+	for skip := 2; skip <= 5; skip++ {
+		pc, _, _, ok := runtime.Caller(skip)
+		if !ok {
+			break
+		}
+		name := runtime.FuncForPC(pc).Name()
+		if !strings.HasPrefix(name, "goa.design/goa/v3/dsl.") {
+			break
+		}
+		caller := strings.Split(strings.TrimPrefix(name, "goa.design/goa/v3/dsl."), ".")[0]
+		for _, first := range caller {
+			if unicode.IsUpper(first) {
+				latest = caller
+			}
+			break
+		}
 	}
-	if !ok {
-		return "<unknown>"
+	if latest != "" {
+		return latest
 	}
-
-	return runtime.FuncForPC(pc).Name()
+	return "<unknown>"
 }

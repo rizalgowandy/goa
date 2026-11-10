@@ -1,8 +1,11 @@
 package expr
 
+import "goa.design/goa/v3/eval"
+
 type (
 	// GRPCExpr contains the API level gRPC specific expressions.
 	GRPCExpr struct {
+		eval.DSLFunc
 		// Services contains the gRPC services created by the DSL.
 		Services []*GRPCServiceExpr
 		// Errors lists the error gRPC error responses defined globally.
@@ -34,6 +37,13 @@ func (g *GRPCExpr) ServiceFor(s *ServiceExpr) *GRPCServiceExpr {
 }
 
 // EvalName returns the name printed in case of evaluation error.
-func (g *GRPCExpr) EvalName() string {
+func (*GRPCExpr) EvalName() string {
 	return "API GRPC"
+}
+
+// Prepare initializes the error responses.
+func (g *GRPCExpr) Prepare() {
+	for _, er := range g.Errors {
+		er.Response.Prepare()
+	}
 }

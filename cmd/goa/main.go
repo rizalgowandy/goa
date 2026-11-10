@@ -5,6 +5,7 @@ import (
 	"go/build"
 	"os"
 	"strings"
+	"time"
 
 	"flag"
 
@@ -17,25 +18,26 @@ func main() {
 		path   string
 		offset int
 	)
-	{
-		if len(os.Args) == 1 {
-			usage()
-		}
+	if len(os.Args) == 1 {
+		usage()
+		return
+	}
 
-		switch os.Args[1] {
-		case "version":
-			fmt.Println("Goa version " + goa.Version())
-			os.Exit(0)
-		case "gen", "example":
-			if len(os.Args) == 2 {
-				usage()
-			}
-			cmd = os.Args[1]
-			path = os.Args[2]
-			offset = 2
-		default:
+	switch os.Args[1] {
+	case "version":
+		fmt.Println("Goa version " + goa.Version())
+		os.Exit(0)
+	case "gen", "example":
+		if len(os.Args) == 2 {
 			usage()
+			return
 		}
+		cmd = os.Args[1]
+		path = os.Args[2]
+		offset = 2
+	default:
+		usage()
+		return
 	}
 
 	var (
@@ -51,7 +53,10 @@ func main() {
 		fset.BoolVar(&debug, "debug", false, "Print debug information")
 
 		fset.Usage = usage
-		fset.Parse(os.Args[offset+1:])
+		if err := fset.Parse(os.Args[offset+1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
 
 		output = *o
 		if output == "" {
@@ -59,7 +64,10 @@ func main() {
 		}
 	}
 
-	gen(cmd, path, output, debug)
+	if err := gen(cmd, path, output, debug); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 }
 
 // help with tests
@@ -68,42 +76,68 @@ var (
 	gen   = generate
 )
 
-func generate(cmd, path, output string, debug bool) {
+func generate(cmd, path, output string, debug bool) error {
 	var (
 		files []string
 		err   error
 		tmp   *Generator
+		startTotal, startImport, startNewGen,
+		startWrite, startCompile, startRun time.Time
 	)
 
+	startTotal = time.Now()
+	if debug {
+		fmt.Fprintf(os.Stderr, "[TIMING] Starting goa generation\n")
+	}
+
+	startImport = time.Now()
 	if _, err = build.Import(path, ".", 0); err != nil {
 		goto fail
 	}
-
-	tmp = NewGenerator(cmd, path, output)
-	if !debug {
-		defer tmp.Remove()
+	if debug {
+		fmt.Fprintf(os.Stderr, "[TIMING] build.Import took %v\n", time.Since(startImport))
 	}
 
+	startNewGen = time.Now()
+	tmp = NewGenerator(cmd, path, output, debug)
+	if debug {
+		fmt.Fprintf(os.Stderr, "[TIMING] NewGenerator took %v\n", time.Since(startNewGen))
+	}
+
+	startWrite = time.Now()
 	if err = tmp.Write(debug); err != nil {
 		goto fail
 	}
-
-	if err = tmp.Compile(); err != nil {
-		goto fail
+	if debug {
+		fmt.Fprintf(os.Stderr, "[TIMING] Write (generate main.go) took %v\n", time.Since(startWrite))
 	}
 
-	if files, err = tmp.Run(); err != nil {
+	startCompile = time.Now()
+	if err = tmp.Compile(debug); err != nil {
 		goto fail
 	}
+	if debug {
+		fmt.Fprintf(os.Stderr, "[TIMING] Compile (go get + go build) took %v\n", time.Since(startCompile))
+	}
 
+	startRun = time.Now()
+	if files, err = tmp.Run(debug); err != nil {
+		goto fail
+	}
+	if debug {
+		fmt.Fprintf(os.Stderr, "[TIMING] Run (execute binary) took %v\n", time.Since(startRun))
+		fmt.Fprintf(os.Stderr, "[TIMING] Total generation time: %v\n", time.Since(startTotal))
+	}
 	fmt.Println(strings.Join(files, "\n"))
-	return
+	if !debug {
+		tmp.Remove()
+	}
+	return nil
 fail:
-	fmt.Fprintln(os.Stderr, err.Error())
 	if !debug && tmp != nil {
 		tmp.Remove()
 	}
-	os.Exit(1)
+	return err
 }
 
 func help() {
@@ -139,5 +173,4 @@ Example:
   goa gen goa.design/examples/cellar/design -o gendir
 
 `)
-	os.Exit(1)
 }

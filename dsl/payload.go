@@ -5,7 +5,7 @@ import (
 	"goa.design/goa/v3/expr"
 )
 
-// Payload defines the data type of an method input. Payload also makes the
+// Payload defines the data type of a method input. Payload also makes the
 // input required.
 //
 // Payload must appear in a Method expression.
@@ -18,67 +18,67 @@ import (
 //
 // The valid usage for Payload are thus:
 //
-//    Payload(Type)
+//	Payload(Type)
 //
-//    Payload(func())
+//	Payload(func())
 //
-//    Payload(Type, "description")
+//	Payload(Type, "description")
 //
-//    Payload(Type, func())
+//	Payload(Type, func())
 //
-//    Payload(Type, "description", func())
+//	Payload(Type, "description", func())
 //
 // Examples:
 //
-//    Method("upper"), func() {
-//        // Use primitive type.
-//        Payload(String)
-//    }
+//	Method("upper", func() {
+//	    // Use primitive type.
+//	    Payload(String)
+//	})
 //
-//    Method("upper"), func() {
-//        // Use primitive type.and description
-//        Payload(String, "string to convert to uppercase")
-//    }
+//	Method("upper", func() {
+//	    // Use primitive type.and description
+//	    Payload(String, "string to convert to uppercase")
+//	})
 //
-//    Method("upper"), func() {
-//        // Use primitive type, description and validations
-//        Payload(String, "string to convert to uppercase", func() {
-//            Pattern("^[a-z]")
-//        })
-//    }
+//	Method("upper", func() {
+//	    // Use primitive type, description and validations
+//	    Payload(String, "string to convert to uppercase", func() {
+//	        Pattern("^[a-z]")
+//	    })
+//	})
 //
-//    Method("add", func() {
-//        // Define payload data structure inline
-//        Payload(func() {
-//            Description("Left and right operands to add")
-//            Attribute("left", Int32, "Left operand")
-//            Attribute("right", Int32, "Left operand")
-//            Required("left", "right")
-//        })
-//    })
+//	Method("add", func() {
+//	    // Define payload data structure inline
+//	    Payload(func() {
+//	        Description("Left and right operands to add")
+//	        Attribute("left", Int32, "Left operand")
+//	        Attribute("right", Int32, "Left operand")
+//	        Required("left", "right")
+//	    })
+//	})
 //
-//    Method("add", func() {
-//        // Define payload type by reference to user type
-//        Payload(Operands)
-//    })
+//	Method("add", func() {
+//	    // Define payload type by reference to user type
+//	    Payload(Operands)
+//	})
 //
-//    Method("divide", func() {
-//        // Specify additional required attributes on user type.
-//        Payload(Operands, func() {
-//            Required("left", "right")
-//        })
-//    })
-//
-func Payload(val interface{}, args ...interface{}) {
+//	Method("divide", func() {
+//	    // Specify additional required attributes on user type.
+//	    Payload(Operands, func() {
+//	        Required("left", "right")
+//	    })
+//	})
+func Payload(val any, args ...any) {
 	if len(args) > 2 {
-		eval.ReportError("too many arguments")
+		eval.TooManyArgError()
+		return
 	}
 	e, ok := eval.Current().(*expr.MethodExpr)
 	if !ok {
 		eval.IncompatibleDSL()
 		return
 	}
-	e.Payload = methodDSL("Payload", val, args...)
+	e.Payload = methodDSL(e, "Payload", val, args...)
 }
 
 // StreamingPayload defines a method that accepts a stream of instances of the
@@ -88,52 +88,72 @@ func Payload(val interface{}, args ...interface{}) {
 //
 // The arguments to a StreamingPayload DSL is same as the Payload DSL.
 //
+// StreamingPayload requires a transport that supports client-to-server
+// streaming. gRPC supports it directly. Ordinary HTTP methods use a WebSocket
+// through a GET endpoint. JSON-RPC methods do not support StreamingPayload.
+// For gRPC methods that define both Payload and StreamingPayload, the ordinary
+// method payload is sent once as the initial typed stream frame and the
+// StreamingPayload values are sent as subsequent stream item frames.
+//
 // Examples:
 //
-//    // Method payload is the JWT token and the method streaming payload is a
-//    // stream of strings.
-//    Method("upper", func() {
-//        Payload(func() {
-//            Token("token", String, func() {
-//                Description("JWT used for authentication")
-//            })
-//        })
-//        StreamingPayload(String)
-//    })
+//	// Method payload is the JWT token and the method streaming payload is a
+//	// stream of strings.
+//	Method("upper", func() {
+//	    Payload(func() {
+//	        Token("token", String, func() {
+//	            Description("JWT used for authentication")
+//	        })
+//	    })
+//	    StreamingPayload(String)
+//	})
 //
-//    // Method streaming payload is a stream of string with validation set
-//    // on each
-//    Method("upper"), func() {
-//        StreamingPayload(String, "string to convert to uppercase", func() {
-//            Pattern("^[a-z]")
-//        })
-//    }
+//	// Method streaming payload is a stream of string with validation set
+//	// on each
+//	Method("upper"), func() {
+//	    StreamingPayload(String, "string to convert to uppercase", func() {
+//	        Pattern("^[a-z]")
+//	    })
+//	}
 //
-//    // Method payload is a stream of objects defined inline
-//    Method("add", func() {
-//        StreamingPayload(func() {
-//            Description("Left and right operands to add")
-//            Attribute("left", Int32, "Left operand")
-//            Attribute("right", Int32, "Left operand")
-//            Required("left", "right")
-//        })
-//    })
+//	// Method payload is a stream of objects defined inline
+//	Method("add", func() {
+//	    StreamingPayload(func() {
+//	        Description("Left and right operands to add")
+//	        Attribute("left", Int32, "Left operand")
+//	        Attribute("right", Int32, "Left operand")
+//	        Required("left", "right")
+//	    })
+//	})
 //
-//    // Method payload is a stream of user type
-//    Method("add", func() {
-//        StreamingPayload(Operands)
-//    })
+//	// Method payload is a stream of user type
+//	Method("add", func() {
+//	    StreamingPayload(Operands)
+//	})
 //
-func StreamingPayload(val interface{}, args ...interface{}) {
+//	// WebSocket method with bidirectional streaming
+//	Method("chat", func() {
+//	    StreamingPayload(func() {
+//	        Attribute("message", String)
+//	        Attribute("timestamp", String, Format(FormatDateTime))
+//	        Required("message", "timestamp")
+//	    })
+//	    StreamingResult(ChatMessage)
+//	    HTTP(func() {
+//	        GET("/chat/ws")
+//	    })
+//	})
+func StreamingPayload(val any, args ...any) {
 	if len(args) > 2 {
-		eval.ReportError("too many arguments")
+		eval.TooManyArgError()
+		return
 	}
 	e, ok := eval.Current().(*expr.MethodExpr)
 	if !ok {
 		eval.IncompatibleDSL()
 		return
 	}
-	e.StreamingPayload = methodDSL("StreamingPayload", val, args...)
+	e.StreamingPayload = methodDSL(e, "StreamingPayload", val, args...)
 	if e.Stream == expr.ServerStreamKind {
 		e.Stream = expr.BidirectionalStreamKind
 	} else {
@@ -141,7 +161,7 @@ func StreamingPayload(val interface{}, args ...interface{}) {
 	}
 }
 
-func methodDSL(suffix string, p interface{}, args ...interface{}) *expr.AttributeExpr {
+func methodDSL(m *expr.MethodExpr, suffix string, p any, args ...any) *expr.AttributeExpr {
 	var (
 		att *expr.AttributeExpr
 		fn  func()
@@ -155,17 +175,34 @@ func methodDSL(suffix string, p interface{}, args ...interface{}) *expr.Attribut
 			// Do not duplicate type if it is not customized
 			return &expr.AttributeExpr{Type: actual}
 		}
-		att = &expr.AttributeExpr{Type: expr.Dup(actual)}
+		dupped := expr.DupForDSL(actual)
+		att = &expr.AttributeExpr{Type: dupped}
+		if f, ok := args[len(args)-1].(func()); ok {
+			numreqs := 0
+			if att.Validation != nil {
+				numreqs = len(att.Validation.Required)
+			}
+			eval.Execute(f, att)
+			if att.Validation != nil && len(att.Validation.Required) != numreqs {
+				// If the DSL modifies the type attributes "requiredness"
+				// then rename the type to avoid collisions.
+				if renamer, ok := dupped.(interface {
+					Rename(string)
+				}); ok {
+					renamer.Rename(actual.Name() + "_" + m.Name + "_" + suffix)
+				}
+			}
+		}
 	case expr.DataType:
 		att = &expr.AttributeExpr{Type: actual}
 	default:
-		eval.ReportError("invalid %s argument, must be a type or a function", suffix)
+		eval.InvalidArgError("type or function", p)
 		return nil
 	}
 	if len(args) >= 1 {
 		if f, ok := args[len(args)-1].(func()); ok {
 			if fn != nil {
-				eval.ReportError("invalid arguments in %s call, must be (type), (func), (type, func), (type, desc) or (type, desc, func)", suffix)
+				eval.InvalidArgError("(type), (func), (type, func), (type, desc) or (type, desc, func)", f)
 			}
 			fn = f
 		}

@@ -1,0 +1,98 @@
+// NewProtoMethodUnaryRPCWithErrorsRequest builds
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsRequest from string.
+func NewProtoMethodUnaryRPCWithErrorsRequest(payload string) *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsRequest {
+	message := &service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsRequest{}
+	message.Field = new(string)
+	*message.Field = payload
+	return message
+}
+
+// NewMethodUnaryRPCWithErrorsResult builds string from
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsResponse.
+func NewMethodUnaryRPCWithErrorsResult(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsResponse) string {
+	result := *message.Field
+	return result
+}
+
+// NewMethodUnaryRPCWithErrorsInternalError builds
+// *serviceunaryrpcwitherrors.AnotherError from
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsInternalError.
+func NewMethodUnaryRPCWithErrorsInternalError(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsInternalError) *serviceunaryrpcwitherrors.AnotherError {
+	er := &serviceunaryrpcwitherrors.AnotherError{
+		Name: *message.Name,
+	}
+	if message.Description != nil {
+		er.Description = message.Description
+	}
+	return er
+}
+
+// NewMethodUnaryRPCWithErrorsBadRequestError builds
+// *serviceunaryrpcwitherrors.AnotherError from
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsBadRequestError.
+func NewMethodUnaryRPCWithErrorsBadRequestError(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsBadRequestError) *serviceunaryrpcwitherrors.AnotherError {
+	er := &serviceunaryrpcwitherrors.AnotherError{
+		Name: *message.Name,
+	}
+	if message.Description != nil {
+		er.Description = message.Description
+	}
+	return er
+}
+
+// NewMethodUnaryRPCWithErrorsCustomErrorError builds
+// *serviceunaryrpcwitherrors.ErrorType from
+// *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsCustomErrorError.
+func NewMethodUnaryRPCWithErrorsCustomErrorError(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsCustomErrorError) *serviceunaryrpcwitherrors.ErrorType {
+	er := &serviceunaryrpcwitherrors.ErrorType{}
+	if message.A != nil {
+		er.A = message.A
+	}
+	return er
+}
+
+// ValidateMethodUnaryRPCWithErrorsRequest runs the validations defined on
+// MethodUnaryRPCWithErrorsRequest.
+func ValidateMethodUnaryRPCWithErrorsRequest(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsRequest) (err error) {
+	if message.Field == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("field", "message"))
+	}
+	return
+}
+
+// ValidateMethodUnaryRPCWithErrorsResponse runs the validations defined on
+// MethodUnaryRPCWithErrorsResponse.
+func ValidateMethodUnaryRPCWithErrorsResponse(message *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsResponse) (err error) {
+	if message.Field == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("field", "message"))
+	}
+	return
+}
+
+// ValidateMethodUnaryRPCWithErrorsInternalError runs the validations defined
+// on MethodUnaryRPCWithErrorsInternalError.
+func ValidateMethodUnaryRPCWithErrorsInternalError(errmsg *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsInternalError) (err error) {
+	if errmsg.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "errmsg"))
+	}
+	if errmsg.Name != nil {
+		if !(*errmsg.Name == "this" || *errmsg.Name == "that") {
+			err = goa.MergeErrors(err, goa.InvalidEnumValueError("errmsg.name", *errmsg.Name, []any{"this", "that"}))
+		}
+	}
+	return
+}
+
+// ValidateMethodUnaryRPCWithErrorsBadRequestError runs the validations defined
+// on MethodUnaryRPCWithErrorsBadRequestError.
+func ValidateMethodUnaryRPCWithErrorsBadRequestError(errmsg *service_unary_rpc_with_errorspb.MethodUnaryRPCWithErrorsBadRequestError) (err error) {
+	if errmsg.Name == nil {
+		err = goa.MergeErrors(err, goa.MissingFieldError("name", "errmsg"))
+	}
+	if errmsg.Name != nil {
+		if !(*errmsg.Name == "this" || *errmsg.Name == "that") {
+			err = goa.MergeErrors(err, goa.InvalidEnumValueError("errmsg.name", *errmsg.Name, []any{"this", "that"}))
+		}
+	}
+	return
+}

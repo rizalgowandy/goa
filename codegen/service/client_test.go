@@ -2,13 +2,15 @@ package service
 
 import (
 	"bytes"
-	"fmt"
 	"go/format"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/codegen/service/testdata"
-	"goa.design/goa/v3/expr"
 )
 
 func TestClient(t *testing.T) {
@@ -17,44 +19,37 @@ func TestClient(t *testing.T) {
 		DSL  func()
 		Code string
 	}{
-		{"single", testdata.SingleEndpointDSL, testdata.SingleMethodClient},
-		{"use", testdata.UseEndpointDSL, testdata.UseMethodClient},
-		{"multiple", testdata.MultipleEndpointsDSL, testdata.MultipleMethodsClient},
-		{"no-payload", testdata.NoPayloadEndpointDSL, testdata.NoPayloadMethodsClient},
-		{"with-result", testdata.WithResultEndpointDSL, testdata.WithResultMethodClient},
-		{"streaming-result", testdata.StreamingResultMethodDSL, testdata.StreamingResultMethodClient},
-		{"streaming-result-no-payload", testdata.StreamingResultNoPayloadMethodDSL, testdata.StreamingResultNoPayloadMethodClient},
-		{"streaming-payload", testdata.StreamingPayloadMethodDSL, testdata.StreamingPayloadMethodClient},
-		{"streaming-payload-no-payload", testdata.StreamingPayloadNoPayloadMethodDSL, testdata.StreamingPayloadNoPayloadMethodClient},
-		{"streaming-payload-no-result", testdata.StreamingPayloadNoResultMethodDSL, testdata.StreamingPayloadNoResultMethodClient},
-		{"bidirectional-streaming", testdata.BidirectionalStreamingMethodDSL, testdata.BidirectionalStreamingMethodClient},
-		{"bidirectional-streaming-no-payload", testdata.BidirectionalStreamingNoPayloadMethodDSL, testdata.BidirectionalStreamingNoPayloadMethodClient},
+		{"client-single", testdata.SingleEndpointDSL, testdata.SingleMethodClient},
+		{"client-use", testdata.UseEndpointDSL, testdata.UseMethodClient},
+		{"client-multiple", testdata.MultipleEndpointsDSL, testdata.MultipleMethodsClient},
+		{"client-no-payload", testdata.NoPayloadEndpointDSL, testdata.NoPayloadMethodsClient},
+		{"client-with-result", testdata.WithResultEndpointDSL, testdata.WithResultMethodClient},
+		{"client-streaming-result", testdata.StreamingResultMethodDSL, testdata.StreamingResultMethodClient},
+		{"client-mixed-results", testdata.MixedResultsEndpointDSL, testdata.MixedResultsMethodClient},
+		{"client-streaming-result-no-payload", testdata.StreamingResultNoPayloadMethodDSL, testdata.StreamingResultNoPayloadMethodClient},
+		{"client-streaming-payload", testdata.StreamingPayloadMethodDSL, testdata.StreamingPayloadMethodClient},
+		{"client-streaming-payload-no-payload", testdata.StreamingPayloadNoPayloadMethodDSL, testdata.StreamingPayloadNoPayloadMethodClient},
+		{"client-streaming-payload-no-result", testdata.StreamingPayloadNoResultMethodDSL, testdata.StreamingPayloadNoResultMethodClient},
+		{"client-bidirectional-streaming", testdata.BidirectionalStreamingMethodDSL, testdata.BidirectionalStreamingMethodClient},
+		{"client-bidirectional-streaming-no-payload", testdata.BidirectionalStreamingNoPayloadMethodDSL, testdata.BidirectionalStreamingNoPayloadMethodClient},
+		{"client-interceptor", testdata.EndpointWithClientInterceptorDSL, testdata.InterceptorClient},
+		{"client-interceptor-no-method", testdata.NoMethodClientInterceptorDSL, testdata.NoMethodInterceptorClient},
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			codegen.RunDSL(t, c.DSL)
-			if len(expr.Root.Services) != 1 {
-				t.Fatalf("got %d services, expected 1", len(expr.Root.Services))
-			}
-			fs := ClientFile(expr.Root.Services[0])
-			if fs == nil {
-				t.Fatalf("got nil file, expected not nil")
-			}
+			root := codegen.RunDSL(t, c.DSL)
+			plan := mustServicePlan(t, root)
+			require.Len(t, root.Services, 1)
+			fs := clientFile(plan, plan.facts.services[0])
+			require.NotNil(t, fs)
 			buf := new(bytes.Buffer)
 			for _, s := range fs.SectionTemplates[1:] {
-				if err := s.Write(buf); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, s.Write(buf))
 			}
 			bs, err := format.Source(buf.Bytes())
-			if err != nil {
-				fmt.Println(buf.String())
-				t.Fatal(err)
-			}
-			code := string(bs)
-			if code != c.Code {
-				t.Errorf("%s: got\n%s\ngot vs expected\n:%s", c.Name, code, codegen.Diff(t, code, c.Code))
-			}
+			require.NoError(t, err, buf.String())
+			code := strings.ReplaceAll(string(bs), "\r\n", "\n")
+			assert.Equal(t, c.Code, code)
 		})
 	}
 }

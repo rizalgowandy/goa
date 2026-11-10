@@ -1,0 +1,102 @@
+{
+  "components": {
+    "schemas": {
+      "SSEAllFieldsMethodResponseBody": {
+        "example": {
+          "data": {
+            "message": "Hello, world!"
+          },
+          "event": "update",
+          "id": "123",
+          "retry": 3000
+        },
+        "properties": {
+          "data": {
+            "example": {
+              "message": "Hello, world!"
+            },
+            "properties": {
+              "message": {
+                "example": "Hello, world!",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "event": {
+            "example": "update",
+            "type": "string"
+          },
+          "id": {
+            "example": "123",
+            "type": "string"
+          },
+          "retry": {
+            "example": 3000,
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Goa API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/all-fields": {
+      "get": {
+        "operationId": "SSEAllFieldsService#SSEAllFieldsMethod",
+        "parameters": [
+          {
+            "example": "request",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "schema": {
+              "example": "request",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "example": {
+                  "data": {
+                    "message": "Hello, world!"
+                  },
+                  "event": "update",
+                  "id": "123",
+                  "retry": 3000
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SSEAllFieldsMethodResponseBody"
+                }
+              }
+            },
+            "description": "OK response."
+          }
+        },
+        "summary": "SSEAllFieldsMethod SSEAllFieldsService",
+        "tags": [
+          "SSEAllFieldsService"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Default server for test api",
+      "url": "http://localhost:80"
+    }
+  ],
+  "tags": [
+    {
+      "name": "SSEAllFieldsService"
+    }
+  ]
+}

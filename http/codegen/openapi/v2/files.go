@@ -1,58 +1,32 @@
+// This file builds Swagger 2.0 JSON and YAML files from one HTTP design. Each
+// example comes from the request or response described in the file.
 package openapiv2
 
 import (
-	"encoding/json"
-	"path/filepath"
-	"text/template"
-
-	"gopkg.in/yaml.v2"
-
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/expr"
+	"goa.design/goa/v3/http/codegen/openapi"
 )
 
-// Files returns the OpenAPI v2 specification files in JSON and YAML formats.
-func Files(root *expr.RootExpr) ([]*codegen.File, error) {
-	spec, err := NewV2(root, root.API.Servers[0].Hosts[0])
+// Files returns the Swagger 2.0 specification files in JSON and YAML formats.
+// path is the output path of the files relative to the gen directory, without
+// extension.
+func Files(root *expr.RootExpr, path string) ([]*codegen.File, error) {
+	return FilesWithValues(
+		root,
+		path,
+		expr.NewExampleGenerator(root.API.RandomizerFactory),
+		openapi.Values{},
+	)
+}
+
+// FilesWithValues returns Swagger 2.0 files using values in place of matching
+// titles, descriptions, and examples from the evaluated design. The generator
+// supplies examples for attributes that have no matching value.
+func FilesWithValues(root *expr.RootExpr, path string, generator *expr.ExampleGenerator, values openapi.Values) ([]*codegen.File, error) {
+	spec, err := NewV2WithValues(root, root.API.Servers[0].Hosts[0], generator, values)
 	if err != nil {
 		return nil, err
 	}
-	jsonSection := &codegen.SectionTemplate{
-		Name:    "openapi",
-		FuncMap: template.FuncMap{"toJSON": toJSON},
-		Source:  "{{ toJSON .}}",
-		Data:    spec,
-	}
-	yamlSection := &codegen.SectionTemplate{
-		Name:    "openapi",
-		FuncMap: template.FuncMap{"toYAML": toYAML},
-		Source:  "{{ toYAML .}}",
-		Data:    spec,
-	}
-	return []*codegen.File{
-		{
-			Path:             filepath.Join(codegen.Gendir, "http", "openapi.json"),
-			SectionTemplates: []*codegen.SectionTemplate{jsonSection},
-		},
-		{
-			Path:             filepath.Join(codegen.Gendir, "http", "openapi.yaml"),
-			SectionTemplates: []*codegen.SectionTemplate{yamlSection},
-		},
-	}, nil
-}
-
-func toJSON(d interface{}) string {
-	b, err := json.Marshal(d)
-	if err != nil {
-		panic("openapi: " + err.Error()) // bug
-	}
-	return string(b)
-}
-
-func toYAML(d interface{}) string {
-	b, err := yaml.Marshal(d)
-	if err != nil {
-		panic("openapi: " + err.Error()) // bug
-	}
-	return string(b)
+	return openapi.Files(spec, root.API.Meta, "openapi", path), nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -19,7 +20,7 @@ func TestCmdLine(t *testing.T) {
 	)
 
 	usage = func() { usageCalled = true }
-	gen = func(c string, p, o string, d bool) { cmd, path, output, debug = c, p, o, d }
+	gen = func(c string, p, o string, d bool) error { cmd, path, output, debug = c, p, o, d; return nil }
 	defer func() {
 		usage = help
 		gen = generate
@@ -35,9 +36,9 @@ func TestCmdLine(t *testing.T) {
 	}{
 		"gen": {"gen " + testPkg, false, "gen", testPkg, ".", false},
 
-		"invalid":     {"invalid " + testPkg, true, "", "", ".", false},
-		"empty":       {"", true, "", "", ".", false},
-		"invalid gen": {"invalid gen" + testPkg, true, "", "", ".", false},
+		"invalid":     {"invalid " + testPkg, true, "", "", "", false},
+		"empty":       {"", true, "", "", "", false},
+		"invalid gen": {"invalid gen" + testPkg, true, "", "", "", false},
 
 		"output":       {"gen " + testPkg + " -output " + testOutput, false, "gen", testPkg, testOutput, false},
 		"output short": {"gen " + testPkg + " -o " + testOutput, false, "gen", testPkg, testOutput, false},
@@ -73,5 +74,23 @@ func TestCmdLine(t *testing.T) {
 		if debug != c.ExpectedDebug {
 			t.Errorf("%s: Expected debug to be %v but got %v", k, c.ExpectedDebug, debug)
 		}
+	}
+}
+
+func TestGeneratorWriteCreatesAbsoluteTemporaryDirectory(t *testing.T) {
+	generator := &Generator{
+		Command:       "gen",
+		DesignPath:    "example.com/design",
+		Output:        t.TempDir(),
+		DesignVersion: 3,
+		bin:           "goa",
+	}
+	t.Cleanup(generator.Remove)
+
+	if err := generator.Write(false); err != nil {
+		t.Errorf("Write() error = %v", err)
+	}
+	if !filepath.IsAbs(generator.tmpDir) {
+		t.Errorf("Write() temporary directory = %q, want absolute path", generator.tmpDir)
 	}
 }

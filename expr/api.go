@@ -1,3 +1,5 @@
+// This file defines the evaluated API expression and the immutable example
+// randomizer configuration shared by independent code generation runs.
 package expr
 
 import (
@@ -7,7 +9,7 @@ import (
 )
 
 type (
-	// APIExpr contains the global properties for a API expression.
+	// APIExpr contains the global properties for an API expression.
 	APIExpr struct {
 		// DSLFunc contains the DSL used to initialize the expression.
 		eval.DSLFunc
@@ -36,13 +38,20 @@ type (
 		// potentially multiple schemes. Incoming requests must validate
 		// at least one requirement to be authorized.
 		Requirements []*SecurityExpr
+		// ClientInterceptors is the list of API client interceptors.
+		ClientInterceptors []*InterceptorExpr
+		// ServerInterceptors is the list of API server interceptors.
+		ServerInterceptors []*InterceptorExpr
 		// HTTP contains the HTTP specific API level expressions.
 		HTTP *HTTPExpr
 		// GRPC contains the gRPC specific API level expressions.
 		GRPC *GRPCExpr
+		// JSONRPC contains the JSON-RPC specific API level expressions.
+		JSONRPC *JSONRPCExpr
 
-		// random generator used to build examples for the API types.
-		random *Random
+		// RandomizerFactory is the immutable configuration used to create a
+		// fresh example value stream for each code generation run.
+		RandomizerFactory RandomizerFactory
 	}
 
 	// ContactExpr contains the API contact information.
@@ -70,15 +79,52 @@ type (
 		// URL to documentation.
 		URL string `json:"url,omitempty"`
 	}
+
+	// URLHolder is an interface that allows expression types to receive
+	// a URL. Types implementing this interface can use the URL() DSL
+	// function to set a URL.
+	URLHolder interface {
+		SetURL(string)
+	}
+
+	// DescriptionHolder is an interface that allows expression types to
+	// receive a description. Types implementing this interface can use
+	// the Description() DSL function to set a description.
+	DescriptionHolder interface {
+		SetDescription(string)
+	}
+
+	// TitleHolder is an interface that allows expression types to receive
+	// a title. Types implementing this interface can use the Title() DSL
+	// function to set a title.
+	TitleHolder interface {
+		SetTitle(string)
+	}
+
+	// VersionHolder is an interface that allows expression types to
+	// receive a version. Types implementing this interface can use the
+	// Version() DSL function to set a version.
+	VersionHolder interface {
+		SetVersion(string)
+	}
+
+	// TimeoutHolder is an interface that allows expression types to
+	// receive a timeout duration. Types implementing this interface can
+	// use the Timeout() DSL function to set a timeout.
+	TimeoutHolder interface {
+		SetTimeout(string) error
+	}
 )
 
 // NewAPIExpr initializes an API expression.
 func NewAPIExpr(name string, dsl func()) *APIExpr {
 	return &APIExpr{
-		Name:    name,
-		HTTP:    new(HTTPExpr),
-		GRPC:    new(GRPCExpr),
-		DSLFunc: dsl,
+		Name:              name,
+		HTTP:              new(HTTPExpr),
+		GRPC:              new(GRPCExpr),
+		JSONRPC:           new(JSONRPCExpr),
+		DSLFunc:           dsl,
+		RandomizerFactory: NewFakerRandomizerFactory(name),
 	}
 }
 
@@ -100,15 +146,6 @@ func (a *APIExpr) Schemes() []string {
 	}
 	sort.Strings(ss)
 	return ss
-}
-
-// Random returns the random generator associated with a. APIs with identical
-// names return generators that return the same sequence of pseudo random values.
-func (a *APIExpr) Random() *Random {
-	if a.random == nil {
-		a.random = NewRandom(a.Name)
-	}
-	return a.random
 }
 
 // DefaultServer returns a server expression that describes a server which
@@ -149,6 +186,9 @@ func (a *APIExpr) Finalize() {
 	}
 	if len(a.Servers) == 0 {
 		a.Servers = []*ServerExpr{a.DefaultServer()}
+	}
+	if a.Version == "" {
+		a.Version = "0.0.1"
 	}
 }
 

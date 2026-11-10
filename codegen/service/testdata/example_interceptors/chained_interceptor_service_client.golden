@@ -1,0 +1,53 @@
+//
+// ChainedInterceptorService example client interceptors
+//
+// Command:
+// goa
+
+package interceptors
+
+import (
+	"context"
+	"goa.design/clue/log"
+	chainedinterceptorservice "goa.design/goa/example/chained_interceptor_service"
+	goa "goa.design/goa/v3/pkg"
+)
+
+// ChainedInterceptorServiceClientInterceptors implements the client interceptors for the ChainedInterceptorService service.
+type ChainedInterceptorServiceClientInterceptors struct {
+}
+
+// NewChainedInterceptorServiceClientInterceptors creates a new client interceptor for the ChainedInterceptorService service.
+func NewChainedInterceptorServiceClientInterceptors() *ChainedInterceptorServiceClientInterceptors {
+	return &ChainedInterceptorServiceClientInterceptors{}
+}
+func (i *ChainedInterceptorServiceClientInterceptors) API(ctx context.Context, info chainedinterceptorservice.APIInfo, next goa.Endpoint) (any, error) {
+	log.Printf(ctx, "[API] Sending request: %v", info.RawPayload())
+	resp, err := next(ctx, info.RawPayload())
+	if err != nil {
+		log.Printf(ctx, "[API] Error: %v", err)
+		return nil, err
+	}
+	log.Printf(ctx, "[API] Received response: %v", resp)
+	return resp, nil
+}
+func (i *ChainedInterceptorServiceClientInterceptors) Method(ctx context.Context, info chainedinterceptorservice.MethodInfo, next goa.Endpoint) (any, error) {
+	log.Printf(ctx, "[Method] Sending request: %v", info.RawPayload())
+	resp, err := next(ctx, info.RawPayload())
+	if err != nil {
+		log.Printf(ctx, "[Method] Error: %v", err)
+		return nil, err
+	}
+	log.Printf(ctx, "[Method] Received response: %v", resp)
+	return resp, nil
+}
+func (i *ChainedInterceptorServiceClientInterceptors) Service(ctx context.Context, info chainedinterceptorservice.ServiceInfo, next goa.Endpoint) (any, error) {
+	log.Printf(ctx, "[Service] Sending request: %v", info.RawPayload())
+	resp, err := next(ctx, info.RawPayload())
+	if err != nil {
+		log.Printf(ctx, "[Service] Error: %v", err)
+		return nil, err
+	}
+	log.Printf(ctx, "[Service] Received response: %v", resp)
+	return resp, nil
+}

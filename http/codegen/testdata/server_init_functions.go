@@ -12,7 +12,7 @@ func New(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 ) *Server {
 	return &Server{
 		Mounts: []*MountPoint{
@@ -37,7 +37,7 @@ func New(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 ) *Server {
 	return &Server{
 		Mounts: []*MountPoint{
@@ -45,6 +45,55 @@ func New(
 			{"MethodMultiBases", "GET", "/base_2/{id}"},
 		},
 		MethodMultiBases: NewMethodMultiBasesHandler(e.MethodMultiBases, mux, decoder, encoder, errhandler, formatter),
+	}
+}
+`
+
+const ServerFileServerRootPathConstructorCode = `// New instantiates HTTP handlers for all the ServiceFileServer service
+// endpoints using the provided encoder and decoder. The handlers are mounted
+// on the given mux using the HTTP verb and path defined in the design.
+// errhandler is called whenever a response fails to be encoded. formatter is
+// used to format errors returned by the service methods prior to encoding.
+// Both errhandler and formatter are optional and can be nil.
+func New(
+	e *servicefileserver.Endpoints,
+	mux goahttp.Muxer,
+	decoder func(*http.Request) goahttp.Decoder,
+	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
+	errhandler func(context.Context, http.ResponseWriter, error),
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
+	fileSystemFile1JSON http.FileSystem,
+	fileSystemFile1JSON2 http.FileSystem,
+	fileSystemFile1JSON3 http.FileSystem,
+	fileSystemFile1JSON4 http.FileSystem,
+) *Server {
+	if fileSystemFile1JSON == nil {
+		fileSystemFile1JSON = http.Dir(".")
+	}
+	fileSystemFile1JSON = appendPrefix(fileSystemFile1JSON, "/")
+	if fileSystemFile1JSON2 == nil {
+		fileSystemFile1JSON2 = http.Dir(".")
+	}
+	fileSystemFile1JSON2 = appendPrefix(fileSystemFile1JSON2, "/")
+	if fileSystemFile1JSON3 == nil {
+		fileSystemFile1JSON3 = http.Dir(".")
+	}
+	fileSystemFile1JSON3 = appendPrefix(fileSystemFile1JSON3, "/")
+	if fileSystemFile1JSON4 == nil {
+		fileSystemFile1JSON4 = http.Dir(".")
+	}
+	fileSystemFile1JSON4 = appendPrefix(fileSystemFile1JSON4, "/")
+	return &Server{
+		Mounts: []*MountPoint{
+			{"Serve file1.json", "GET", "/file1.json"},
+			{"Serve file1.json", "GET", "/path/to/file1.json"},
+			{"Serve file1.json", "GET", "/file2.json"},
+			{"Serve file1.json", "GET", "/path/to/file2.json"},
+		},
+		File1JSON:  http.FileServer(fileSystemFile1JSON),
+		File1JSON2: http.FileServer(fileSystemFile1JSON2),
+		File1JSON3: http.FileServer(fileSystemFile1JSON3),
+		File1JSON4: http.FileServer(fileSystemFile1JSON4),
 	}
 }
 `
@@ -61,7 +110,7 @@ func New(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	fileSystemPathToFile1JSON http.FileSystem,
 	fileSystemPathToFile2JSON http.FileSystem,
 	fileSystemPathToFile3JSON http.FileSystem,
@@ -69,17 +118,20 @@ func New(
 	if fileSystemPathToFile1JSON == nil {
 		fileSystemPathToFile1JSON = http.Dir(".")
 	}
+	fileSystemPathToFile1JSON = appendPrefix(fileSystemPathToFile1JSON, "/path/to")
 	if fileSystemPathToFile2JSON == nil {
 		fileSystemPathToFile2JSON = http.Dir(".")
 	}
+	fileSystemPathToFile2JSON = appendPrefix(fileSystemPathToFile2JSON, "/path/to")
 	if fileSystemPathToFile3JSON == nil {
 		fileSystemPathToFile3JSON = http.Dir(".")
 	}
+	fileSystemPathToFile3JSON = appendPrefix(fileSystemPathToFile3JSON, "/path/to")
 	return &Server{
 		Mounts: []*MountPoint{
-			{"/path/to/file1.json", "GET", "/server_file_server/file1.json"},
-			{"/path/to/file2.json", "GET", "/server_file_server/file2.json"},
-			{"/path/to/file3.json", "GET", "/server_file_server/file3.json"},
+			{"Serve /path/to/file1.json", "GET", "/server_file_server/file1.json"},
+			{"Serve /path/to/file2.json", "GET", "/server_file_server/file2.json"},
+			{"Serve /path/to/file3.json", "GET", "/server_file_server/file3.json"},
 		},
 		PathToFile1JSON: http.FileServer(fileSystemPathToFile1JSON),
 		PathToFile2JSON: http.FileServer(fileSystemPathToFile2JSON),
@@ -100,22 +152,24 @@ func New(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	fileSystemPathToFile1JSON http.FileSystem,
 	fileSystemPathToFile2JSON http.FileSystem,
 ) *Server {
 	if fileSystemPathToFile1JSON == nil {
 		fileSystemPathToFile1JSON = http.Dir(".")
 	}
+	fileSystemPathToFile1JSON = appendPrefix(fileSystemPathToFile1JSON, "/path/to")
 	if fileSystemPathToFile2JSON == nil {
 		fileSystemPathToFile2JSON = http.Dir(".")
 	}
+	fileSystemPathToFile2JSON = appendPrefix(fileSystemPathToFile2JSON, "/path/to")
 	return &Server{
 		Mounts: []*MountPoint{
 			{"MethodMixed1", "GET", "/resources1/{id}"},
 			{"MethodMixed2", "GET", "/resources2/{id}"},
-			{"/path/to/file1.json", "GET", "/file1.json"},
-			{"/path/to/file2.json", "GET", "/file2.json"},
+			{"Serve /path/to/file1.json", "GET", "/file1.json"},
+			{"Serve /path/to/file2.json", "GET", "/file2.json"},
 		},
 		MethodMixed1:    NewMethodMixed1Handler(e.MethodMixed1, mux, decoder, encoder, errhandler, formatter),
 		MethodMixed2:    NewMethodMixed2Handler(e.MethodMixed2, mux, decoder, encoder, errhandler, formatter),
@@ -137,7 +191,7 @@ func New(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	serviceMultipartMethodMultiBasesDecoderFn ServiceMultipartMethodMultiBasesDecoderFunc,
 ) *Server {
 	return &Server{
@@ -161,7 +215,7 @@ func New(
 	decoder func(*http.Request) goahttp.Decoder,
 	encoder func(context.Context, http.ResponseWriter) goahttp.Encoder,
 	errhandler func(context.Context, http.ResponseWriter, error),
-	formatter func(err error) goahttp.Statuser,
+	formatter func(ctx context.Context, err error) goahttp.Statuser,
 	upgrader goahttp.Upgrader,
 	configurer *ConnConfigurer,
 ) *Server {
@@ -179,19 +233,29 @@ func New(
 
 var ServerMultipleFilesConstructorCode = `// Mount configures the mux to serve the ServiceFileServer endpoints.
 func Mount(mux goahttp.Muxer, h *Server) {
-	MountPathToFileJSON(mux, goahttp.Replace("", "/path/to/file.json", h.PathToFileJSON))
-	MountPathToFileJSON2(mux, goahttp.Replace("", "/path/to/file.json", h.PathToFileJSON2))
+	MountPathToFileJSON(mux, h.PathToFileJSON)
+	MountPathToFileJSON2(mux, h.PathToFileJSON2)
 	MountFileJSON(mux, h.FileJSON)
-	MountPathToFolder(mux, goahttp.Replace("/", "/path/to/folder", h.PathToFolder))
+	MountPathToFolder(mux, h.PathToFolder)
+}
+
+// Mount configures the mux to serve the ServiceFileServer endpoints.
+func (s *Server) Mount(mux goahttp.Muxer) {
+	Mount(mux, s)
 }
 `
 
 var ServerMultipleFilesWithPrefixPathConstructorCode = `// Mount configures the mux to serve the ServiceFileServer endpoints.
 func Mount(mux goahttp.Muxer, h *Server) {
-	MountPathToFileJSON(mux, goahttp.Replace("", "/path/to/file.json", h.PathToFileJSON))
-	MountPathToFileJSON2(mux, goahttp.Replace("", "/path/to/file.json", h.PathToFileJSON2))
-	MountFileJSON(mux, goahttp.Replace("", "/file.json", h.FileJSON))
-	MountPathToFolder(mux, goahttp.Replace("/server_file_server", "/path/to/folder", h.PathToFolder))
+	MountPathToFileJSON(mux, http.StripPrefix("/server_file_server", h.PathToFileJSON))
+	MountPathToFileJSON2(mux, h.PathToFileJSON2)
+	MountFileJSON(mux, http.StripPrefix("/server_file_server", h.FileJSON))
+	MountPathToFolder(mux, http.StripPrefix("/server_file_server", h.PathToFolder))
+}
+
+// Mount configures the mux to serve the ServiceFileServer endpoints.
+func (s *Server) Mount(mux goahttp.Muxer) {
+	Mount(mux, s)
 }
 `
 
@@ -200,9 +264,14 @@ func Mount(mux goahttp.Muxer, h *Server) {
 	MountPathToFileJSON(mux, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/redirect/dest", http.StatusMovedPermanently)
 	}))
-	MountPathToFileJSON2(mux, goahttp.Replace("", "/path/to/file.json", h.PathToFileJSON2))
+	MountPathToFileJSON2(mux, h.PathToFileJSON2)
 	MountFileJSON(mux, h.FileJSON)
-	MountPathToFolder(mux, goahttp.Replace("/", "/path/to/folder", h.PathToFolder))
+	MountPathToFolder(mux, h.PathToFolder)
+}
+
+// Mount configures the mux to serve the ServiceFileServer endpoints.
+func (s *Server) Mount(mux goahttp.Muxer) {
+	Mount(mux, s)
 }
 `
 
@@ -210,12 +279,17 @@ var ServerSimpleRoutingConstructorCode = `// Mount configures the mux to serve t
 func Mount(mux goahttp.Muxer, h *Server) {
 	MountServerSimpleRoutingHandler(mux, h.ServerSimpleRouting)
 }
+
+// Mount configures the mux to serve the ServiceSimpleRoutingServer endpoints.
+func (s *Server) Mount(mux goahttp.Muxer) {
+	Mount(mux, s)
+}
 `
 
 var ServerMultipleFilesMounterCode = `// MountPathToFolder configures the mux to serve GET request made to "/".
 func MountPathToFolder(mux goahttp.Muxer, h http.Handler) {
 	mux.Handle("GET", "/", h.ServeHTTP)
-	mux.Handle("GET", "/*wildcard", h.ServeHTTP)
+	mux.Handle("GET", "/{*wildcard}", h.ServeHTTP)
 }
 `
 
@@ -223,7 +297,7 @@ var ServerMultipleFilesWithPrefixPathMounterCode = `// MountPathToFolder configu
 // "/server_file_server".
 func MountPathToFolder(mux goahttp.Muxer, h http.Handler) {
 	mux.Handle("GET", "/server_file_server/", h.ServeHTTP)
-	mux.Handle("GET", "/server_file_server/*wildcard", h.ServeHTTP)
+	mux.Handle("GET", "/server_file_server/{*wildcard}", h.ServeHTTP)
 }
 `
 

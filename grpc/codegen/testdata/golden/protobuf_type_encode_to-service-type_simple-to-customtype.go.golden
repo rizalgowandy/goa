@@ -1,0 +1,15 @@
+func transform() {
+	target := &proto.CustomTypes{
+		RequiredString: tdtypes.CustomString(*source.RequiredString),
+	}
+	if source.DefaultBool != nil {
+		target.DefaultBool = tdtypes.CustomBool(*source.DefaultBool)
+	}
+	if source.Integer != nil {
+		integer := tdtypes.CustomInt(*source.Integer)
+		target.Integer = &integer
+	}
+	if source.DefaultBool == nil {
+		target.DefaultBool = true
+	}
+}

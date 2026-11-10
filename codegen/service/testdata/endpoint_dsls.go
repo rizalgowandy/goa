@@ -116,12 +116,68 @@ var StreamingResultEndpointDSL = func() {
 	})
 }
 
+var MixedResultsEndpointDSL = func() {
+	var PayloadType = Type("Payload", func() {
+		Attribute("id", String)
+		Required("id")
+	})
+	var ResultType = Type("ResultType", func() {
+		Attribute("ok", Boolean)
+		Required("ok")
+	})
+	var EventType = Type("EventType", func() {
+		Attribute("message", String)
+		Required("message")
+	})
+	Service("MixedResultsEndpoint", func() {
+		Method("MixedResultsMethod", func() {
+			Payload(PayloadType)
+			Result(ResultType)
+			StreamingResult(EventType)
+		})
+	})
+}
+
+var MixedResultsWithViewsEndpointDSL = func() {
+	var ResultType = ResultType("application/vnd.mixed-result", func() {
+		TypeName("MixedResult")
+		Attributes(func() {
+			Attribute("id", String)
+			Attribute("detail", String)
+		})
+		View("default", func() {
+			Attribute("id")
+		})
+		View("detailed", func() {
+			Attribute("id")
+			Attribute("detail")
+		})
+	})
+	var EventType = Type("MixedEvent", func() {
+		Attribute("message", String)
+	})
+	Service("MixedResultsWithViewsEndpoint", func() {
+		Method("MixedResultsWithViewsMethod", func() {
+			Result(ResultType)
+			StreamingResult(EventType)
+		})
+	})
+}
+
 var StreamingPayloadEndpointDSL = func() {
 	var AType = Type("AType", func() {
 		Attribute("a", String)
 	})
 	var BType = Type("BType", func() {
 		Attribute("x", String)
+	})
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
 	})
 	Service("StreamingPayloadEndpoint", func() {
 		Method("StreamingPayloadMethod", func() {
@@ -157,11 +213,63 @@ var BidirectionalStreamingEndpointDSL = func() {
 	var BType = Type("BType", func() {
 		Attribute("x", String)
 	})
+	var AResult = Type("AResult", func() {
+		Attribute("IntField", Int)
+		Attribute("StringField", String)
+		Attribute("BooleanField", Boolean)
+		Attribute("BytesField", Bytes)
+		Attribute("OptionalField", String)
+		Required("IntField", "StringField", "BooleanField", "BytesField")
+	})
 	Service("BidirectionalStreamingEndpoint", func() {
 		Method("BidirectionalStreamingMethod", func() {
 			Payload(AType)
 			StreamingPayload(BType)
 			StreamingResult(AResult)
+		})
+	})
+}
+
+var EndpointWithServerInterceptorDSL = func() {
+	Interceptor("logging")
+	Service("ServiceWithServerInterceptor", func() {
+		Method("Method", func() {
+			ServerInterceptor("logging")
+			Payload(String)
+			Result(String)
+			HTTP(func() {
+				POST("/")
+			})
+		})
+	})
+}
+
+var EndpointWithMultipleInterceptorsDSL = func() {
+	Interceptor("logging")
+	Interceptor("metrics")
+	Service("ServiceWithMultipleInterceptors", func() {
+		Method("Method", func() {
+			ServerInterceptor("logging")
+			ServerInterceptor("metrics")
+			Payload(String)
+			Result(String)
+			HTTP(func() {
+				POST("/")
+			})
+		})
+	})
+}
+
+var EndpointStreamingWithInterceptorDSL = func() {
+	Interceptor("logging")
+	Service("ServiceStreamingWithInterceptor", func() {
+		Method("Method", func() {
+			ServerInterceptor("logging")
+			StreamingPayload(String)
+			StreamingResult(String)
+			HTTP(func() {
+				GET("/")
+			})
 		})
 	})
 }

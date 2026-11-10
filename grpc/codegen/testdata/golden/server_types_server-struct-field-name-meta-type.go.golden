@@ -1,0 +1,31 @@
+// NewMethodPayload builds *usingmetatypes.MethodPayload from
+// *using_meta_typespb.MethodRequest.
+func NewMethodPayload(message *using_meta_typespb.MethodRequest) *usingmetatypes.MethodPayload {
+	v := &usingmetatypes.MethodPayload{}
+	if message.A != nil {
+		v.Foo = *message.A
+	}
+	if message.A == nil {
+		v.Foo = 1
+	}
+	v.Bar = make([]int64, len(message.B))
+	for i, val := range message.B {
+		v.Bar[i] = val
+	}
+	return v
+}
+
+// NewProtoMethodResponse builds *using_meta_typespb.MethodResponse from
+// *usingmetatypes.MethodResult.
+func NewProtoMethodResponse(result *usingmetatypes.MethodResult) *using_meta_typespb.MethodResponse {
+	message := &using_meta_typespb.MethodResponse{
+		A: &result.Foo,
+	}
+	if result.Bar != nil {
+		message.B = make([]int64, len(result.Bar))
+		for i, val := range result.Bar {
+			message.B[i] = val
+		}
+	}
+	return message
+}

@@ -1,7 +1,12 @@
+// This file verifies gRPC endpoint preparation and validation, including the
+// native primitive contract required by request and response metadata.
 package expr_test
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"goa.design/goa/v3/eval"
 	"goa.design/goa/v3/expr"
@@ -14,14 +19,24 @@ func TestGRPCEndpointValidation(t *testing.T) {
 		Errors []string
 	}{
 		"endpoint-with-any-type": {
-			DSL: testdata.GRPCEndpointWithAnyType,
-			Errors: []string{`service "Service" gRPC endpoint "Method": Map key type is Any type which is not supported in gRPC
-service "Service" gRPC endpoint "Method": Array element type is Any type which is not supported in gRPC
-service "Service" gRPC endpoint "Method": Attribute "invalid_primitive" is Any type which is not supported in gRPC
-service "Service" gRPC endpoint "Method": Array element type is Any type which is not supported in gRPC
-service "Service" gRPC endpoint "Method": Error "invalid_error_type" type is Any type which is not supported in gRPC
-service "Service" gRPC endpoint "Method": Map element type is Any type which is not supported in gRPC`,
+			DSL:    testdata.GRPCEndpointWithAnyType,
+			Errors: []string{}, // Any type is now supported in gRPC
+		},
+		"endpoint-with-mixed-results": {
+			DSL: testdata.GRPCEndpointWithMixedResults,
+			Errors: []string{
+				`service "Service" gRPC endpoint "Method": gRPC method "Method" cannot define both Result and StreamingResult because one gRPC call cannot return a separate result after its response stream`,
 			},
+		},
+		"endpoint-with-matching-mixed-results": {
+			DSL: testdata.GRPCEndpointWithMatchingMixedResults,
+			Errors: []string{
+				`service "Service" gRPC endpoint "Method": gRPC method "Method" cannot define both Result and StreamingResult because one gRPC call cannot return a separate result after its response stream`,
+			},
+		},
+		"endpoint-with-streaming-result": {
+			DSL:    testdata.GRPCEndpointWithStreamingResult,
+			Errors: []string{},
 		},
 		"endpoint-with-untagged-fields": {
 			DSL: testdata.GRPCEndpointWithUntaggedFields,
@@ -43,35 +58,109 @@ service "Service" gRPC endpoint "Method": field number 2 in attribute "key_dup_i
 			DSL:    testdata.GRPCEndpointWithExtendedTypes,
 			Errors: []string{},
 		},
+		"endpoint-with-composite-metadata": {
+			DSL: testdata.GRPCEndpointWithCompositeMetadata,
+			Errors: []string{`service "Service" gRPC endpoint "Method": Request metadata attribute "object" must be a primitive or an array of primitives, got MetadataObject
+service "Service" gRPC endpoint "Method": Request metadata attribute "mapping" must be a primitive or an array of primitives, got map
+service "Service" gRPC endpoint "Method": Request metadata attribute "choice" must be a primitive or an array of primitives, got choice
+service "Service" gRPC endpoint "Method": Response metadata attribute "object" must be a primitive or an array of primitives, got MetadataObject
+service "Service" gRPC endpoint "Method": Response metadata attribute "mapping" must be a primitive or an array of primitives, got map
+service "Service" gRPC endpoint "Method": Response metadata attribute "choice" must be a primitive or an array of primitives, got choice`},
+		},
+		"endpoint-with-inherit-error": {
+			DSL:    testdata.GRPCEndpointWithInheritErrorDSL,
+			Errors: []string{},
+		},
+		"endpoint-stream-compat": {
+			DSL:    testdata.GRPCEndpointStreamCompat,
+			Errors: []string{},
+		},
+		"endpoint-stream-compat-service-level": {
+			DSL:    testdata.GRPCEndpointStreamCompatServiceLevel,
+			Errors: []string{},
+		},
+		"endpoint-stream-compat-bad-value": {
+			DSL:    testdata.GRPCEndpointStreamCompatBadValue,
+			Errors: []string{`service "Service" gRPC endpoint "Method": invalid "grpc:stream:compat" meta value "v2": only "v1" is supported`},
+		},
+		"endpoint-stream-compat-no-streaming-payload": {
+			DSL:    testdata.GRPCEndpointStreamCompatNoStreamingPayload,
+			Errors: []string{`service "Service" gRPC endpoint "Method": "grpc:stream:compat" meta requires the method to define both Payload and StreamingPayload`},
+		},
+		"endpoint-stream-compat-union-payload": {
+			DSL:    testdata.GRPCEndpointStreamCompatUnionPayload,
+			Errors: []string{`service "Service" gRPC endpoint "Method": attribute "version_ref" of the method payload must be a primitive or an array of primitives to satisfy the "grpc:stream:compat" meta`},
+		},
+		"endpoint-union-containing-any": {
+			DSL:    testdata.GRPCEndpointWithUnionContainingAny,
+			Errors: []string{},
+		},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			if c.Errors == nil || len(c.Errors) == 0 {
+			if len(c.Errors) == 0 {
 				expr.RunDSL(t, c.DSL)
 			} else {
-				var errors []error
+				var errs []error
 
 				err := expr.RunInvalidDSL(t, c.DSL)
 				if err != nil {
-					if merr, ok := err.(eval.MultiError); ok {
+					var merr eval.MultiError
+					if errors.As(err, &merr) {
 						for _, e := range merr {
-							errors = append(errors, e.GoError)
+							errs = append(errs, e.GoError)
 						}
 					} else {
-						errors = append(errors, err)
+						errs = append(errs, err)
 					}
 				}
 
-				if len(c.Errors) != len(errors) {
-					t.Errorf("%s: got %d, expected the number of error values to match %d", name, len(errors), len(c.Errors))
+				if len(c.Errors) != len(errs) {
+					t.Errorf("%s: got %d, expected the number of error values to match %d", name, len(errs), len(c.Errors))
 				} else {
-					for i, err := range errors {
-						if err.Error() != c.Errors[i] {
-							t.Errorf("%s:\ngot \t%q,\nexpected\t%q at index %d", name, err.Error(), c.Errors[i], i)
+					for i, err := range errs {
+						got := stripValidationLocations(err.Error())
+						if got != c.Errors[i] {
+							t.Errorf("%s:\ngot \t%q,\nexpected\t%q at index %d", name, got, c.Errors[i], i)
 						}
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestGRPCEndpointStreamingPayloadKeepsInitialRequest(t *testing.T) {
+	root := expr.RunDSL(t, testdata.GRPCEndpointWithStreamingPayloadInitialRequest)
+	grpcSvc := root.API.GRPC.Service("Service")
+	require.NotNil(t, grpcSvc)
+	require.Len(t, grpcSvc.GRPCEndpoints, 1)
+
+	endpoint := grpcSvc.GRPCEndpoints[0]
+	req := expr.AsObject(endpoint.Request.Type)
+	require.NotNil(t, req)
+	require.NotNil(t, req.Attribute("repository_id"))
+	require.NotNil(t, req.Attribute("version_ref"))
+	require.True(t, endpoint.Metadata.IsEmpty())
+}
+
+func TestGRPCEndpointLegacyStreamCompat(t *testing.T) {
+	cases := []struct {
+		Name     string
+		DSL      func()
+		Expected bool
+	}{
+		{"method-level", testdata.GRPCEndpointStreamCompat, true},
+		{"service-level", testdata.GRPCEndpointStreamCompatServiceLevel, true},
+		{"not-set", testdata.GRPCEndpointWithStreamingPayloadInitialRequest, false},
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			root := expr.RunDSL(t, c.DSL)
+			grpcSvc := root.API.GRPC.Service("Service")
+			require.NotNil(t, grpcSvc)
+			require.Len(t, grpcSvc.GRPCEndpoints, 1)
+			require.Equal(t, c.Expected, grpcSvc.GRPCEndpoints[0].LegacyStreamCompat())
 		})
 	}
 }

@@ -1,0 +1,266 @@
+
+// Service is the UnionService service interface.
+type Service interface {
+	// A implements A.
+	A(context.Context, *AUnion) (res *AUnion, err error)
+}
+
+// APIName is the name of the API as defined in the design.
+const APIName = "test api"
+
+// APIVersion is the version of the API as defined in the design.
+const APIVersion = "0.0.1"
+
+// ServiceName is the name of the service as defined in the design. This is the
+// same value that is set in the endpoint request contexts under the ServiceKey
+// key.
+const ServiceName = "UnionService"
+
+// MethodNames lists the service method names as defined in the design. These
+// are the same values that are set in the endpoint request contexts under the
+// MethodKey key.
+var MethodNames = [1]string{"A"}
+
+// AUnion is the payload type of the UnionService service A method.
+type AUnion struct {
+	Values Values
+}
+
+type ValuesBranchBoolean bool
+
+type ValuesBranchBytes []byte
+
+type ValuesBranchInt int
+
+type ValuesBranchString string
+
+// Values holds exactly one of its branch values.
+type Values struct {
+	kind    ValuesKind
+	int_    ValuesBranchInt
+	string_ ValuesBranchString
+	boolean ValuesBranchBoolean
+	bytes   ValuesBranchBytes
+}
+
+// ValuesKind records which Values branch is selected.
+type ValuesKind string
+
+const (
+	// ValuesKindInt identifies the Int branch.
+	ValuesKindInt ValuesKind = "Int"
+	// ValuesKindString identifies the String branch.
+	ValuesKindString ValuesKind = "String"
+	// ValuesKindBoolean identifies the Boolean branch.
+	ValuesKindBoolean ValuesKind = "Boolean"
+	// ValuesKindBytes identifies the Bytes branch.
+	ValuesKindBytes ValuesKind = "Bytes"
+)
+
+// Kind returns the selected branch.
+func (u Values) Kind() ValuesKind {
+	return u.kind
+}
+
+// NewValuesInt constructs Values with the Int branch set.
+func NewValuesInt(v ValuesBranchInt) Values {
+	return Values{
+		kind: ValuesKindInt,
+		int_: v,
+	}
+}
+
+// AsInt returns the value when the Int branch is selected.
+func (u Values) AsInt() (_ ValuesBranchInt, ok bool) {
+	if u.kind != ValuesKindInt {
+		return
+	}
+	return u.int_, true
+}
+
+// SetInt selects the Int branch and stores v.
+func (u *Values) SetInt(v ValuesBranchInt) {
+	*u = Values{
+		kind: ValuesKindInt,
+		int_: v,
+	}
+}
+
+// NewValuesString constructs Values with the String branch set.
+func NewValuesString(v ValuesBranchString) Values {
+	return Values{
+		kind:    ValuesKindString,
+		string_: v,
+	}
+}
+
+// AsString returns the value when the String branch is selected.
+func (u Values) AsString() (_ ValuesBranchString, ok bool) {
+	if u.kind != ValuesKindString {
+		return
+	}
+	return u.string_, true
+}
+
+// SetString selects the String branch and stores v.
+func (u *Values) SetString(v ValuesBranchString) {
+	*u = Values{
+		kind:    ValuesKindString,
+		string_: v,
+	}
+}
+
+// NewValuesBoolean constructs Values with the Boolean branch set.
+func NewValuesBoolean(v ValuesBranchBoolean) Values {
+	return Values{
+		kind:    ValuesKindBoolean,
+		boolean: v,
+	}
+}
+
+// AsBoolean returns the value when the Boolean branch is selected.
+func (u Values) AsBoolean() (_ ValuesBranchBoolean, ok bool) {
+	if u.kind != ValuesKindBoolean {
+		return
+	}
+	return u.boolean, true
+}
+
+// SetBoolean selects the Boolean branch and stores v.
+func (u *Values) SetBoolean(v ValuesBranchBoolean) {
+	*u = Values{
+		kind:    ValuesKindBoolean,
+		boolean: v,
+	}
+}
+
+// NewValuesBytes constructs Values with the Bytes branch set.
+func NewValuesBytes(v ValuesBranchBytes) Values {
+	return Values{
+		kind:  ValuesKindBytes,
+		bytes: v,
+	}
+}
+
+// AsBytes returns the value when the Bytes branch is selected.
+func (u Values) AsBytes() (_ ValuesBranchBytes, ok bool) {
+	if u.kind != ValuesKindBytes {
+		return
+	}
+	return u.bytes, true
+}
+
+// SetBytes selects the Bytes branch and stores v.
+func (u *Values) SetBytes(v ValuesBranchBytes) {
+	*u = Values{
+		kind:  ValuesKindBytes,
+		bytes: v,
+	}
+}
+
+// Validate ensures exactly one valid branch is selected.
+func (u Values) Validate() error {
+	_, err := u.Value()
+	return err
+}
+
+// Value returns the selected branch value, or the same selection error as Validate.
+// Go templates can read this method directly; an invalid selection stops execution.
+func (u Values) Value() (any, error) {
+	switch u.kind {
+	case "":
+		return nil, goa.InvalidEnumValueError("type", "", []any{
+			string(ValuesKindInt),
+			string(ValuesKindString),
+			string(ValuesKindBoolean),
+			string(ValuesKindBytes),
+		})
+	case ValuesKindInt:
+		return u.int_, nil
+	case ValuesKindString:
+		return u.string_, nil
+	case ValuesKindBoolean:
+		return u.boolean, nil
+	case ValuesKindBytes:
+		if u.bytes == nil {
+			return nil, goa.MissingFieldError("value", "Values")
+		}
+		return u.bytes, nil
+	default:
+		return nil, goa.InvalidEnumValueError("type", u.kind, []any{
+			string(ValuesKindInt),
+			string(ValuesKindString),
+			string(ValuesKindBoolean),
+			string(ValuesKindBytes),
+		})
+	}
+}
+
+// MarshalJSON marshals the union into the canonical {type,value} JSON shape.
+func (u Values) MarshalJSON() ([]byte, error) {
+	value, err := u.Value()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		Type  string `json:"type"`
+		Value any    `json:"value"`
+	}{
+		Type:  string(u.kind),
+		Value: value,
+	})
+}
+
+// UnmarshalJSON unmarshals the union from the canonical {type,value} JSON shape.
+func (u *Values) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Type  string          `json:"type"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw.Value) == 0 {
+		return goa.MissingFieldError("value", "Values")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw.Value), []byte("null")) {
+		return goa.InvalidFieldTypeError("value", nil, "non-null JSON value")
+	}
+	switch raw.Type {
+	case string(ValuesKindInt):
+		var v ValuesBranchInt
+		if err := json.Unmarshal(raw.Value, &v); err != nil {
+			return err
+		}
+		u.SetInt(v)
+	case string(ValuesKindString):
+		var v ValuesBranchString
+		if err := json.Unmarshal(raw.Value, &v); err != nil {
+			return err
+		}
+		u.SetString(v)
+	case string(ValuesKindBoolean):
+		var v ValuesBranchBoolean
+		if err := json.Unmarshal(raw.Value, &v); err != nil {
+			return err
+		}
+		u.SetBoolean(v)
+	case string(ValuesKindBytes):
+		var v ValuesBranchBytes
+		if err := json.Unmarshal(raw.Value, &v); err != nil {
+			return err
+		}
+		u.SetBytes(v)
+	default:
+		if raw.Type == "" {
+			return goa.MissingFieldError("type", "Values")
+		}
+		return goa.InvalidEnumValueError("type", raw.Type, []any{
+			string(ValuesKindInt),
+			string(ValuesKindString),
+			string(ValuesKindBoolean),
+			string(ValuesKindBytes),
+		})
+	}
+	return nil
+}

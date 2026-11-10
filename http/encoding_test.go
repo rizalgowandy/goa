@@ -3,15 +3,153 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	goa "goa.design/goa/v3/pkg"
 )
 
 var (
 	testString = "test string"
 )
+
+func TestRequestEncoder(t *testing.T) {
+	const (
+		ct      = "Content-Type"
+		ctJSON  = "application/json"
+		ctOther = "<other>"
+		wantT   = "*json.Encoder"
+	)
+	cases := []struct {
+		name      string
+		requestCT string
+		wantCT    string
+	}{
+		{"no ct", "", ctJSON},
+		{"json ct", ctJSON, ctJSON},
+		{"other ct", ctOther, ctOther},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := &http.Request{Header: http.Header{}}
+			if c.requestCT != "" {
+				r.Header.Set(ct, c.requestCT)
+			}
+
+			_ = RequestEncoder(r)
+
+			assert.Equal(t, c.wantCT, r.Header.Get(ct))
+		})
+	}
+}
+
+func TestRequestEncoderGetBody(t *testing.T) {
+	r := &http.Request{Header: http.Header{}}
+	encoder := RequestEncoder(r)
+
+	_, err := r.Body.Read(nil)
+	assert.Error(t, err, "request Body should error (but not panic) if read before data is encoded")
+
+	_, err = r.GetBody()
+	assert.Error(t, err, "request GetBody should error (but not panic) if read before data is encoded")
+
+	err = encoder.Encode("body")
+	require.NoError(t, err)
+
+	bodyContents, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	assert.Equal(t, `"body"`, string(bodyContents))
+
+	newBody, err := r.GetBody()
+	require.NoError(t, err)
+
+	newBodyContents, err := io.ReadAll(newBody)
+	require.NoError(t, err)
+	assert.Equal(t, bodyContents, newBodyContents)
+}
+
+func TestRequestDecoder(t *testing.T) {
+	const (
+		ct           = "Content-Type"
+		ctJSON       = "application/json"
+		ctXML        = "application/xml"
+		ctGob        = "application/gob"
+		unsupportedT = "*http.unsupportedDecoder"
+		jsonT        = "*json.Decoder"
+		xmlT         = "*xml.Decoder"
+		gobT         = "*gob.Decoder"
+	)
+	cases := []struct {
+		name      string
+		requestCT string
+		wantCT    string
+	}{
+		{"no ct", "", jsonT},
+		{"unsupported ct", "application/foo", unsupportedT},
+		{"json ct", ctJSON, jsonT},
+		{"xml ct", ctXML, xmlT},
+		{"gob ct", ctGob, gobT},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			if c.requestCT != "" {
+				r.Header.Set(ct, c.requestCT)
+			}
+
+			decoder := RequestDecoder(r)
+
+			assert.Equal(t, c.wantCT, fmt.Sprintf("%T", decoder))
+		})
+	}
+}
+
+func TestUnsupportedDecoder(t *testing.T) {
+	// Write the response produced when writing the error returned the
+	// unsupported decoder to validate the response status code.
+	w := httptest.NewRecorder()
+	decoder := &unsupportedDecoder{"application/foo"}
+	err := decoder.Decode(nil)
+	require.Error(t, err)
+	encoder := ErrorEncoder(ResponseEncoder, nil)
+
+	err = encoder(context.Background(), w, err)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnsupportedMediaType, w.Code)
+}
+
+func TestErrorEncoderNilFormatterRace(t *testing.T) {
+	// Reproduce the data race that occurs when ErrorEncoder is called with a
+	// nil formatter: the returned encoder is invoked concurrently and each
+	// goroutine writes to the captured formatter variable. Run with -race.
+	encoder := ErrorEncoder(ResponseEncoder, nil)
+	err := errors.New("boom")
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			// Each goroutine uses its own ResponseWriter to avoid unrelated
+			// races and isolate the race on the captured formatter.
+			w := httptest.NewRecorder()
+			require.NoError(t, encoder(context.Background(), w, err))
+		}()
+	}
+	wg.Wait()
+}
 
 func TestResponseEncoder(t *testing.T) {
 	cases := []struct {
@@ -59,10 +197,60 @@ func TestResponseEncoder(t *testing.T) {
 			ctx = context.WithValue(ctx, AcceptTypeKey, c.acceptType)
 			ctx = context.WithValue(ctx, ContentTypeKey, c.contentType)
 			w := httptest.NewRecorder()
+
 			encoder := ResponseEncoder(ctx, w)
-			if c.encoderType != fmt.Sprintf("%T", encoder) {
-				t.Errorf("got encoder type %s, expected %s", fmt.Sprintf("%T", encoder), c.encoderType)
-			}
+
+			assert.Equal(t, c.encoderType, fmt.Sprintf("%T", encoder))
+		})
+	}
+}
+
+func TestResponseEncoder_ContentTypeHeaderPreservesCharset(t *testing.T) {
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, ContentTypeKey, "application/json; charset=utf-8")
+	w := httptest.NewRecorder()
+
+	encoder := ResponseEncoder(ctx, w)
+
+	require.Equal(t, "*json.Encoder", fmt.Sprintf("%T", encoder))
+	assert.Equal(t, "application/json; charset=utf-8", w.Header().Get("Content-Type"))
+}
+
+func TestResponseEncoder_Encode_ErrorResponse(t *testing.T) {
+	var (
+		serviceError              = goa.NewServiceError(errors.New("foo"), "foo", false, false, false)
+		defaultXMLName            = ErrorResponseXMLName
+		backwardCompatibleXMLName = xml.Name{Local: "ErrorResponse"} // Compatible with v3.13.2 and earlier.
+	)
+
+	cases := []struct {
+		acceptType string
+		xmlName    xml.Name
+		encoded    string
+	}{
+		{"application/json", defaultXMLName, fmt.Sprintf(`{"name":"foo","id":"%s","message":"foo","temporary":false,"timeout":false,"fault":false}`, serviceError.ID)},
+		{"application/json", backwardCompatibleXMLName, fmt.Sprintf(`{"name":"foo","id":"%s","message":"foo","temporary":false,"timeout":false,"fault":false}`, serviceError.ID)},
+		{"application/xml", defaultXMLName, fmt.Sprintf(`<error><name>foo</name><id>%s</id><message>foo</message><temporary>false</temporary><timeout>false</timeout><fault>false</fault></error>`, serviceError.ID)},
+		{"application/xml", backwardCompatibleXMLName, fmt.Sprintf(`<ErrorResponse><name>foo</name><id>%s</id><message>foo</message><temporary>false</temporary><timeout>false</timeout><fault>false</fault></ErrorResponse>`, serviceError.ID)},
+	}
+
+	for _, c := range cases {
+		name := c.acceptType
+		if c.xmlName.Local != "" {
+			name += "/" + c.xmlName.Local
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			ctx = context.WithValue(ctx, AcceptTypeKey, c.acceptType)
+			w := httptest.NewRecorder()
+			ErrorResponseXMLName = c.xmlName
+			encoder := ResponseEncoder(ctx, w)
+
+			err := encoder.Encode(NewErrorResponse(ctx, serviceError))
+
+			assert.NoError(t, err)
+			body := strings.TrimSpace(w.Body.String())
+			assert.Equal(t, c.encoded, body)
 		})
 	}
 }
@@ -97,14 +285,14 @@ func TestResponseDecoder(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.contentType, func(t *testing.T) {
 			r := &http.Response{
+				Body: http.NoBody,
 				Header: map[string][]string{
 					"Content-Type": {c.contentType},
 				},
 			}
 			decoder := ResponseDecoder(r)
-			if c.decoderType != fmt.Sprintf("%T", decoder) {
-				t.Errorf("got decoder type %s, expected %s", fmt.Sprintf("%T", decoder), c.decoderType)
-			}
+
+			assert.Equal(t, c.decoderType, fmt.Sprintf("%T", decoder))
 		})
 	}
 }
@@ -112,7 +300,7 @@ func TestResponseDecoder(t *testing.T) {
 func TestTextEncoder_Encode(t *testing.T) {
 	cases := []struct {
 		name  string
-		value interface{}
+		value any
 		error error
 	}{
 		{"string", testString, nil},
@@ -129,57 +317,43 @@ func TestTextEncoder_Encode(t *testing.T) {
 			buffer.Reset()
 			err := encoder.Encode(c.value)
 			if c.error != nil {
-				if err == nil || c.error.Error() != err.Error() {
-					t.Errorf("got error %q, expected %q", err, c.error)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("got error %q, expected <nil>", err)
-				}
-				if buffer.String() != testString {
-					t.Errorf("got string %s, expected %s", buffer.String(), testString)
-				}
+				assert.Error(t, err, c.error)
+				return
 			}
+			require.NoError(t, err)
+			assert.Equal(t, testString, buffer.String())
 		})
 	}
 }
 
 func TestTextPlainDecoder_Decode_String(t *testing.T) {
 	decoder := makeTextDecoder()
-
 	var value string
+
 	err := decoder.Decode(&value)
-	if err != nil {
-		t.Errorf("got error %q, expected <nil>", err)
-	}
-	if testString != value {
-		t.Errorf("got string %s, expected %s", value, testString)
-	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, testString, value)
 }
 
 func TestTextPlainDecoder_Decode_Bytes(t *testing.T) {
 	decoder := makeTextDecoder()
-
 	var value []byte
+
 	err := decoder.Decode(&value)
-	if err != nil {
-		t.Errorf("got error %q, expected <nil>", err)
-	}
-	if testString != string(value) {
-		t.Errorf("got string %s, expected %s", value, testString)
-	}
+
+	assert.NoError(t, err)
+	assert.Equal(t, testString, string(value))
 }
 
 func TestTextPlainDecoder_Decode_Other(t *testing.T) {
 	decoder := makeTextDecoder()
-
 	expectedErr := fmt.Errorf("can't decode content/type to *int")
-
 	var value int
+
 	err := decoder.Decode(&value)
-	if err == nil || err.Error() != expectedErr.Error() {
-		t.Errorf("got error %q, expectedErr %q", err, expectedErr)
-	}
+
+	assert.Error(t, err, expectedErr)
 }
 
 func makeTextDecoder() Decoder {

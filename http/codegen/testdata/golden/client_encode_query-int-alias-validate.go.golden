@@ -1,0 +1,22 @@
+// EncodeMethodARequest returns an encoder for requests sent to the
+// ServiceQueryIntAliasValidate MethodA server.
+func EncodeMethodARequest(encoder func(*http.Request) goahttp.Encoder) func(*http.Request, any) error {
+	return func(req *http.Request, v any) error {
+		p, ok := v.(*servicequeryintaliasvalidate.MethodAPayload)
+		if !ok {
+			return goahttp.ErrInvalidType("ServiceQueryIntAliasValidate", "MethodA", "*servicequeryintaliasvalidate.MethodAPayload", v)
+		}
+		values := req.URL.Query()
+		if p.Int != nil {
+			values.Add("int", strconv.Itoa(int(*p.Int)))
+		}
+		if p.Int32 != nil {
+			values.Add("int32", strconv.FormatInt(int64(*p.Int32), 10))
+		}
+		if p.Int64 != nil {
+			values.Add("int64", strconv.FormatInt(int64(*p.Int64), 10))
+		}
+		req.URL.RawQuery = values.Encode()
+		return nil
+	}
+}

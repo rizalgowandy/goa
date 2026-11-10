@@ -1,0 +1,11 @@
+func transform() {
+	target := &proto.CustomTypes{}
+	requiredString := string(source.RequiredString)
+	target.RequiredString = &requiredString
+	defaultBool := bool(source.DefaultBool)
+	target.DefaultBool = &defaultBool
+	if source.Integer != nil {
+		integer := int32(*source.Integer)
+		target.Integer = &integer
+	}
+}

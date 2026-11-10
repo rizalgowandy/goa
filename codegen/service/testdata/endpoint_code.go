@@ -22,7 +22,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // NewAEndpoint returns an endpoint function that calls the method "A" of
 // service "SingleEndpoint".
 func NewAEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		p := req.(*AType)
 		return nil, s.A(ctx, p)
 	}
@@ -49,7 +49,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // NewUseEndpointEndpoint returns an endpoint function that calls the method
 // "Use" of service "UseEndpoint".
 func NewUseEndpointEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		p := req.(string)
 		return nil, s.UseEndpoint(ctx, p)
 	}
@@ -81,7 +81,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // NewBEndpoint returns an endpoint function that calls the method "B" of
 // service "MultipleEndpoints".
 func NewBEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		p := req.(*BType)
 		return nil, s.B(ctx, p)
 	}
@@ -90,7 +90,7 @@ func NewBEndpoint(s Service) goa.Endpoint {
 // NewCEndpoint returns an endpoint function that calls the method "C" of
 // service "MultipleEndpoints".
 func NewCEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		p := req.(*CType)
 		return nil, s.C(ctx, p)
 	}
@@ -117,88 +117,8 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // NewNoPayloadEndpoint returns an endpoint function that calls the method
 // "NoPayload" of service "NoPayload".
 func NewNoPayloadEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		return nil, s.NoPayload(ctx)
-	}
-}
-`
-
-const WithResultEndpoint = `// Endpoints wraps the "WithResult" service endpoints.
-type Endpoints struct {
-	A goa.Endpoint
-}
-
-// NewEndpoints wraps the methods of the "WithResult" service with endpoints.
-func NewEndpoints(s Service) *Endpoints {
-	return &Endpoints{
-		A: NewAEndpoint(s),
-	}
-}
-
-// Use applies the given middleware to all the "WithResult" service endpoints.
-func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
-	e.A = m(e.A)
-}
-
-// NewAEndpoint returns an endpoint function that calls the method "A" of
-// service "WithResult".
-func NewAEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
-		res, err := s.A(ctx)
-		if err != nil {
-			return nil, err
-		}
-		vres := NewViewedRtype(res, "default")
-		return vres, nil
-	}
-}
-`
-
-const WithResultMultipleViewsEndpoint = `// Endpoints wraps the "WithResultMultipleViews" service endpoints.
-type Endpoints struct {
-	A goa.Endpoint
-	B goa.Endpoint
-}
-
-// NewEndpoints wraps the methods of the "WithResultMultipleViews" service with
-// endpoints.
-func NewEndpoints(s Service) *Endpoints {
-	return &Endpoints{
-		A: NewAEndpoint(s),
-		B: NewBEndpoint(s),
-	}
-}
-
-// Use applies the given middleware to all the "WithResultMultipleViews"
-// service endpoints.
-func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
-	e.A = m(e.A)
-	e.B = m(e.B)
-}
-
-// NewAEndpoint returns an endpoint function that calls the method "A" of
-// service "WithResultMultipleViews".
-func NewAEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
-		res, err := s.A(ctx)
-		if err != nil {
-			return nil, err
-		}
-		vres := NewViewedViewtype(res, "tiny")
-		return vres, nil
-	}
-}
-
-// NewBEndpoint returns an endpoint function that calls the method "B" of
-// service "WithResultMultipleViews".
-func NewBEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
-		res, err := s.B(ctx)
-		if err != nil {
-			return nil, err
-		}
-		vres := NewViewedViewtype(res, "default")
-		return vres, nil
 	}
 }
 `
@@ -235,9 +155,52 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // NewStreamingResultMethodEndpoint returns an endpoint function that calls the
 // method "StreamingResultMethod" of service "StreamingResultEndpoint".
 func NewStreamingResultMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*StreamingResultMethodEndpointInput)
 		return nil, s.StreamingResultMethod(ctx, ep.Payload, ep.Stream)
+	}
+}
+`
+
+const MixedResultsMethodEndpoint = `// Endpoints wraps the "MixedResultsEndpoint" service endpoints.
+type Endpoints struct {
+	MixedResultsMethod goa.Endpoint
+}
+
+// MixedResultsMethodEndpointInput holds both the payload and the server stream
+// of the "MixedResultsMethod" method.
+type MixedResultsMethodEndpointInput struct {
+	// Payload is the method payload.
+	Payload *Payload
+	// Stream is the server stream used by the "MixedResultsMethod" method to send
+	// data.
+	Stream MixedResultsMethodServerStream
+}
+
+// NewEndpoints wraps the methods of the "MixedResultsEndpoint" service with
+// endpoints.
+func NewEndpoints(s Service) *Endpoints {
+	return &Endpoints{
+		MixedResultsMethod: NewMixedResultsMethodEndpoint(s),
+	}
+}
+
+// Use applies the given middleware to all the "MixedResultsEndpoint" service
+// endpoints.
+func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
+	e.MixedResultsMethod = m(e.MixedResultsMethod)
+}
+
+// NewMixedResultsMethodEndpoint returns an endpoint function that calls the
+// method "MixedResultsMethod" of service "MixedResultsEndpoint".
+func NewMixedResultsMethodEndpoint(s Service) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		ep := req.(*MixedResultsMethodEndpointInput)
+		res, err := s.MixedResultsMethod(ctx, ep.Payload, ep.Stream)
+		if err != nil {
+			return nil, err
+		}
+		return res, nil
 	}
 }
 `
@@ -273,7 +236,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // calls the method "StreamingResultNoPayloadMethod" of service
 // "StreamingResultNoPayloadEndpoint".
 func NewStreamingResultNoPayloadMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*StreamingResultNoPayloadMethodEndpointInput)
 		return nil, s.StreamingResultNoPayloadMethod(ctx, ep.Stream)
 	}
@@ -313,7 +276,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // calls the method "StreamingResultWithViewsMethod" of service
 // "StreamingResultWithViewsService".
 func NewStreamingResultWithViewsMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*StreamingResultWithViewsMethodEndpointInput)
 		return nil, s.StreamingResultWithViewsMethod(ctx, ep.Payload, ep.Stream)
 	}
@@ -352,7 +315,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // NewStreamingPayloadMethodEndpoint returns an endpoint function that calls
 // the method "StreamingPayloadMethod" of service "StreamingPayloadEndpoint".
 func NewStreamingPayloadMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*StreamingPayloadMethodEndpointInput)
 		return nil, s.StreamingPayloadMethod(ctx, ep.Payload, ep.Stream)
 	}
@@ -390,7 +353,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // calls the method "StreamingPayloadNoPayloadMethod" of service
 // "StreamingPayloadNoPayloadService".
 func NewStreamingPayloadNoPayloadMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*StreamingPayloadNoPayloadMethodEndpointInput)
 		return nil, s.StreamingPayloadNoPayloadMethod(ctx, ep.Stream)
 	}
@@ -428,7 +391,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // calls the method "StreamingPayloadNoResultMethod" of service
 // "StreamingPayloadNoResultService".
 func NewStreamingPayloadNoResultMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*StreamingPayloadNoResultMethodEndpointInput)
 		return nil, s.StreamingPayloadNoResultMethod(ctx, ep.Stream)
 	}
@@ -468,7 +431,7 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // calls the method "BidirectionalStreamingMethod" of service
 // "BidirectionalStreamingEndpoint".
 func NewBidirectionalStreamingMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*BidirectionalStreamingMethodEndpointInput)
 		return nil, s.BidirectionalStreamingMethod(ctx, ep.Payload, ep.Stream)
 	}
@@ -507,9 +470,107 @@ func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
 // function that calls the method "BidirectionalStreamingNoPayloadMethod" of
 // service "BidirectionalStreamingNoPayloadService".
 func NewBidirectionalStreamingNoPayloadMethodEndpoint(s Service) goa.Endpoint {
-	return func(ctx context.Context, req interface{}) (interface{}, error) {
+	return func(ctx context.Context, req any) (any, error) {
 		ep := req.(*BidirectionalStreamingNoPayloadMethodEndpointInput)
 		return nil, s.BidirectionalStreamingNoPayloadMethod(ctx, ep.Stream)
+	}
+}
+`
+
+var EndpointWithServerInterceptor = `// Endpoints wraps the "ServiceWithServerInterceptor" service endpoints.
+type Endpoints struct {
+	Method goa.Endpoint
+}
+
+// NewEndpoints wraps the methods of the "ServiceWithServerInterceptor" service
+// with endpoints.
+func NewEndpoints(s Service, si ServerInterceptors) *Endpoints {
+	endpoints := &Endpoints{
+		Method: NewMethodEndpoint(s),
+	}
+	endpoints.Method = WrapMethodEndpoint(endpoints.Method, si)
+	return endpoints
+}
+
+// Use applies the given middleware to all the "ServiceWithServerInterceptor"
+// service endpoints.
+func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
+	e.Method = m(e.Method)
+}
+
+// NewMethodEndpoint returns an endpoint function that calls the method
+// "Method" of service "ServiceWithServerInterceptor".
+func NewMethodEndpoint(s Service) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		p := req.(string)
+		return s.Method(ctx, p)
+	}
+}
+`
+
+var EndpointWithMultipleInterceptors = `// Endpoints wraps the "ServiceWithMultipleInterceptors" service endpoints.
+type Endpoints struct {
+	Method goa.Endpoint
+}
+
+// NewEndpoints wraps the methods of the "ServiceWithMultipleInterceptors"
+// service with endpoints.
+func NewEndpoints(s Service, si ServerInterceptors) *Endpoints {
+	endpoints := &Endpoints{
+		Method: NewMethodEndpoint(s),
+	}
+	endpoints.Method = WrapMethodEndpoint(endpoints.Method, si)
+	return endpoints
+}
+
+// Use applies the given middleware to all the
+// "ServiceWithMultipleInterceptors" service endpoints.
+func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
+	e.Method = m(e.Method)
+}
+
+// NewMethodEndpoint returns an endpoint function that calls the method
+// "Method" of service "ServiceWithMultipleInterceptors".
+func NewMethodEndpoint(s Service) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		p := req.(string)
+		return s.Method(ctx, p)
+	}
+}
+`
+
+var EndpointStreamingWithInterceptor = `// Endpoints wraps the "ServiceStreamingWithInterceptor" service endpoints.
+type Endpoints struct {
+	Method goa.Endpoint
+}
+
+// MethodEndpointInput holds both the payload and the server stream of the
+// "Method" method.
+type MethodEndpointInput struct {
+	// Stream is the server stream used by the "Method" method to send data.
+	Stream MethodServerStream
+}
+
+// NewEndpoints wraps the methods of the "ServiceStreamingWithInterceptor" service
+// with endpoints.
+func NewEndpoints(s Service, i ServerInterceptors) *Endpoints {
+	return &Endpoints{
+		Method: WrapMethodEndpoint(NewMethodEndpoint(s), i),
+	}
+}
+
+// Use applies the given middleware to all the "ServiceStreamingWithInterceptor"
+// service endpoints.
+func (e *Endpoints) Use(m func(goa.Endpoint) goa.Endpoint) {
+	e.Method = m(e.Method)
+}
+
+// NewMethodEndpoint returns an endpoint function that calls the method "Method"
+// of service "ServiceStreamingWithInterceptor".
+func NewMethodEndpoint(s Service) goa.Endpoint {
+	return func(ctx context.Context, req any) (any, error) {
+		ep := req.(*MethodEndpointInput)
+		return nil, s.Method(ctx, ep.Stream)
 	}
 }
 `

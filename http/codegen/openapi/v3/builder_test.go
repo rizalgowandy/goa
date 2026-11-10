@@ -1,13 +1,19 @@
+// This file verifies OpenAPI v3 operation construction, body schemas, and
+// examples produced from evaluated HTTP endpoint designs.
 package openapiv3
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"goa.design/goa/v3/codegen"
+	dsl "goa.design/goa/v3/dsl"
 	"goa.design/goa/v3/expr"
 	"goa.design/goa/v3/http/codegen/openapi"
 	"goa.design/goa/v3/http/codegen/openapi/v3/testdata/dsls"
+	"gopkg.in/yaml.v3"
 )
 
 func TestBuildInfo(t *testing.T) {
@@ -63,7 +69,7 @@ func TestBuildInfo(t *testing.T) {
 				License:        &expr.LicenseExpr{Name: licenseName, URL: licenseURL},
 			}
 
-			info := buildInfo(api)
+			info := buildInfo(api, openapi.Version30, openapi.Values{})
 
 			expected := c.Title
 			if api.Title == "" {
@@ -81,15 +87,270 @@ func TestBuildInfo(t *testing.T) {
 				t.Errorf("got API terms of service %q, expected %q", info.TermsOfService, c.TermsOfService)
 			}
 
-			expectedVer := c.Version
-			if api.Version == "" {
-				expectedVer = "1.0"
-			}
-			if info.Version != expectedVer {
-				t.Errorf("got API version %q, expected %q", info.Version, expectedVer)
+			if info.Version != c.Version {
+				t.Errorf("got API version %q, expected %q", info.Version, c.Version)
 			}
 		})
 	}
+}
+
+func TestNewWithValues(t *testing.T) {
+	root := codegen.RunDSL(t, localizedValuesDSL)
+	service := root.Service("messages")
+	method := service.Method("show")
+	values := (openapi.Values{}).
+		WithTitle(root.API, "Localized API").
+		WithDescription(root.API, "Localized API description").
+		WithDescription(service, "Localized service description").
+		WithDescription(method, "Localized method description")
+
+	spec := NewWithValues(
+		root,
+		openapi.Version30,
+		expr.NewExampleGenerator(root.API.RandomizerFactory),
+		values,
+	)
+	require.Equal(t, "Localized API", spec.Info.Title)
+	require.Equal(t, "Localized API description", spec.Info.Description)
+	require.Equal(t, "Localized method description", spec.Paths["/messages"].Get.Description)
+	require.Contains(t, spec.Paths["/messages"].Get.Tags, "messages")
+	require.Equal(t, "Original API", root.API.Title)
+	require.Equal(t, "Original method description", method.Description)
+}
+
+var localizedValuesDSL = func() {
+	dsl.API("messages", func() {
+		dsl.Title("Original API")
+		dsl.Description("Original API description")
+	})
+	dsl.Service("messages", func() {
+		dsl.Description("Original service description")
+		dsl.Method("show", func() {
+			dsl.Description("Original method description")
+			dsl.HTTP(func() {
+				dsl.GET("/messages")
+			})
+		})
+	})
+}
+
+func TestNoSecurityOverridesAPISecurity(t *testing.T) {
+	root := codegen.RunDSL(t, noSecurityOverridesAPISecurityDSL)
+	spec := New(root, openapi.Version30)
+
+	cases := map[string]struct {
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}{
+		"json": {
+			marshal:   json.Marshal,
+			unmarshal: json.Unmarshal,
+		},
+		"yaml": {
+			marshal:   yaml.Marshal,
+			unmarshal: yaml.Unmarshal,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			data, err := tc.marshal(spec)
+			require.NoError(t, err)
+
+			var actual struct {
+				Paths map[string]map[string]struct {
+					Security []map[string][]string `json:"security" yaml:"security"`
+				} `json:"paths" yaml:"paths"`
+			}
+			require.NoError(t, tc.unmarshal(data, &actual))
+
+			require.NotEmpty(t, actual.Paths["/secure"]["get"].Security, "secure operation has no security requirements")
+			security := actual.Paths["/public"]["get"].Security
+			require.NotNil(t, security, "NoSecurity operation omitted the operation security override")
+			require.Empty(t, security, "NoSecurity operation security expected empty override")
+		})
+	}
+}
+
+func TestNoSecurityOverridesServiceSecurity(t *testing.T) {
+	root := codegen.RunDSL(t, noSecurityOverridesServiceSecurityDSL)
+	spec := New(root, openapi.Version30)
+
+	cases := map[string]struct {
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}{
+		"json": {
+			marshal:   json.Marshal,
+			unmarshal: json.Unmarshal,
+		},
+		"yaml": {
+			marshal:   yaml.Marshal,
+			unmarshal: yaml.Unmarshal,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			data, err := tc.marshal(spec)
+			require.NoError(t, err)
+
+			var actual struct {
+				Paths map[string]map[string]struct {
+					Security []map[string][]string `json:"security" yaml:"security"`
+				} `json:"paths" yaml:"paths"`
+			}
+			require.NoError(t, tc.unmarshal(data, &actual))
+
+			require.NotEmpty(t, actual.Paths["/service-secure"]["get"].Security, "secure operation has no security requirements")
+			security := actual.Paths["/service-public"]["get"].Security
+			require.NotNil(t, security, "NoSecurity operation omitted the operation security override")
+			require.Empty(t, security, "NoSecurity operation security expected empty override")
+		})
+	}
+}
+
+func TestStreamingResponseStatusCodes(t *testing.T) {
+	root := codegen.RunDSL(t, streamingResponseStatusDSL)
+	spec := New(root, openapi.Version30)
+
+	sseResponses := spec.Paths["/sse"].Get.Responses
+	require.Contains(t, sseResponses, "200")
+	require.NotContains(t, sseResponses, "101")
+	require.Contains(t, sseResponses["200"].Value.Content, "text/event-stream")
+	require.NotContains(t, sseResponses["200"].Value.Content, "application/json")
+
+	websocketResponses := spec.Paths["/websocket"].Get.Responses
+	require.Contains(t, websocketResponses, "101")
+	require.NotContains(t, websocketResponses, "200")
+}
+
+// TestSSEItemSchemaMatchesDataContract verifies OpenAPI describes the same
+// presence and encoding used by generated SSE clients and servers.
+func TestSSEItemSchemaMatchesDataContract(t *testing.T) {
+	root := codegen.RunDSL(t, func() {
+		count := dsl.Type("EventCount", dsl.Int)
+		dsl.Service("Events", func() {
+			dsl.Method("Optional", func() {
+				dsl.StreamingResult(func() {
+					dsl.Attribute("value", dsl.String)
+				})
+				dsl.HTTP(func() {
+					dsl.GET("/optional")
+					dsl.ServerSentEvents("value")
+				})
+			})
+			dsl.Method("RequiredAlias", func() {
+				dsl.StreamingResult(func() {
+					dsl.Attribute("value", count)
+					dsl.Required("value")
+				})
+				dsl.HTTP(func() {
+					dsl.GET("/required-alias")
+					dsl.ServerSentEvents("value")
+				})
+			})
+			dsl.Method("Structured", func() {
+				dsl.StreamingResult(func() {
+					dsl.Attribute("value", func() {
+						dsl.Attribute("message", dsl.String)
+					})
+					dsl.Required("value")
+				})
+				dsl.HTTP(func() {
+					dsl.GET("/structured")
+					dsl.ServerSentEvents("value")
+				})
+			})
+		})
+	})
+	spec := New(root, openapi.Version32)
+
+	optional := spec.Paths["/optional"].Get.Responses["200"].Value.Content["text/event-stream"].ItemSchema
+	require.NotContains(t, optional.Required, "data")
+	require.Equal(t, openapi.Type(openapi.String), optional.Properties["data"].Type)
+	require.Empty(t, optional.Properties["data"].ContentMediaType)
+
+	requiredAlias := spec.Paths["/required-alias"].Get.Responses["200"].Value.Content["text/event-stream"].ItemSchema
+	require.Contains(t, requiredAlias.Required, "data")
+	require.Empty(t, requiredAlias.Properties["data"].ContentMediaType)
+
+	structured := spec.Paths["/structured"].Get.Responses["200"].Value.Content["text/event-stream"].ItemSchema
+	require.Contains(t, structured.Required, "data")
+	require.Equal(t, "application/json", structured.Properties["data"].ContentMediaType)
+	require.NotNil(t, structured.Properties["data"].ContentSchema)
+}
+
+func TestOperationSecurityMarshal(t *testing.T) {
+	securityCases := map[string]struct {
+		operation Operation
+		expected  map[string]any
+	}{
+		"nil security is omitted": {
+			operation: Operation{Responses: map[string]*ResponseRef{}},
+			expected:  map[string]any{"responses": map[string]any{}},
+		},
+		"empty security is emitted": {
+			operation: Operation{
+				Responses: map[string]*ResponseRef{},
+				Security:  SecurityRequirements{},
+			},
+			expected: map[string]any{"responses": map[string]any{}, "security": []any{}},
+		},
+	}
+	cases := map[string]struct {
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}{
+		"json": {
+			marshal:   json.Marshal,
+			unmarshal: json.Unmarshal,
+		},
+		"yaml": {
+			marshal:   yaml.Marshal,
+			unmarshal: yaml.Unmarshal,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			for securityName, securityTC := range securityCases {
+				t.Run(securityName, func(t *testing.T) {
+					data, err := tc.marshal(securityTC.operation)
+					require.NoError(t, err)
+
+					var actual map[string]any
+					require.NoError(t, tc.unmarshal(data, &actual))
+					require.Equal(t, securityTC.expected, actual)
+				})
+			}
+		})
+	}
+}
+
+func TestSecuritySchemesIncludeVisibleOperationsOnly(t *testing.T) {
+	root := codegen.RunDSL(t, visibleSecuritySchemesDSL)
+	spec := New(root, openapi.Version30)
+
+	visible := root.Service("visible").Method("read").Requirements[0].Schemes[0].Hash()
+	hiddenMethod := root.Service("mixed").Method("hidden").Requirements[0].Schemes[0].Hash()
+	hiddenService := root.Service("hidden").Method("read").Requirements[0].Schemes[0].Hash()
+	require.Contains(t, spec.Components.SecuritySchemes, visible)
+	require.NotContains(t, spec.Components.SecuritySchemes, hiddenMethod)
+	require.NotContains(t, spec.Components.SecuritySchemes, hiddenService)
+}
+
+func TestBuildServersKeepsVariableValuesSeparate(t *testing.T) {
+	root := codegen.RunDSL(t, serverVariablesDSL)
+	servers := buildServers(root.API.Servers, openapi.Version30, openapi.Values{})
+	require.Len(t, servers, 1)
+
+	region := servers[0].Variables["region"]
+	require.Equal(t, []any{"west", "east"}, region.Enum)
+	require.Equal(t, "west", region.Default)
+	require.Equal(t, "Deployment region", region.Description)
+
+	stage := servers[0].Variables["stage"]
+	require.Equal(t, []any{"test", "production"}, stage.Enum)
+	require.Equal(t, "production", stage.Default)
+	require.Equal(t, "Deployment stage", stage.Description)
 }
 
 type param struct {
@@ -99,6 +360,75 @@ type param struct {
 	Style       string
 	Required    bool
 	Type        typ
+}
+
+var visibleSecuritySchemesDSL = func() {
+	var (
+		VisibleAuth       = dsl.JWTSecurity("visible_auth")
+		HiddenMethodAuth  = dsl.JWTSecurity("hidden_method_auth")
+		HiddenServiceAuth = dsl.JWTSecurity("hidden_service_auth")
+	)
+
+	dsl.Service("visible", func() {
+		dsl.Method("read", func() {
+			dsl.Security(VisibleAuth)
+			dsl.Payload(func() {
+				dsl.Token("token", dsl.String)
+			})
+			dsl.HTTP(func() {
+				dsl.GET("/visible")
+			})
+		})
+	})
+	dsl.Service("mixed", func() {
+		dsl.Method("hidden", func() {
+			dsl.Meta("openapi:generate", "false")
+			dsl.Security(HiddenMethodAuth)
+			dsl.Payload(func() {
+				dsl.Token("token", dsl.String)
+			})
+			dsl.HTTP(func() {
+				dsl.GET("/hidden-method")
+			})
+		})
+	})
+	dsl.Service("hidden", func() {
+		dsl.Meta("openapi:generate", "false")
+		dsl.Method("read", func() {
+			dsl.Security(HiddenServiceAuth)
+			dsl.Payload(func() {
+				dsl.Token("token", dsl.String)
+			})
+			dsl.HTTP(func() {
+				dsl.GET("/hidden-service")
+			})
+		})
+	})
+}
+
+var serverVariablesDSL = func() {
+	dsl.API("server variables", func() {
+		dsl.Server("public", func() {
+			dsl.Host("production", func() {
+				dsl.URI("https://{region}.{stage}.example.com")
+				dsl.Variable("region", dsl.String, "Deployment region", func() {
+					dsl.Default("west")
+					dsl.Enum("west", "east")
+				})
+				dsl.Variable("stage", dsl.String, "Deployment stage", func() {
+					dsl.Default("production")
+					dsl.Enum("test", "production")
+				})
+			})
+		})
+	})
+	dsl.Service("status", func() {
+		dsl.Method("read", func() {
+			dsl.HTTP(func() {
+				dsl.GET("/status")
+			})
+		})
+	})
 }
 
 type requestBody struct {
@@ -122,6 +452,7 @@ func TestBuildOperation(t *testing.T) {
 		DSL  func()
 
 		ExpectedDescription string
+		ExpectedDeprecated  bool
 		ExpectedParameters  []param
 		ExpectedRequestBody *requestBody
 		ExpectedResponses   map[string]response
@@ -130,50 +461,75 @@ func TestBuildOperation(t *testing.T) {
 		DSL:  dsls.DescOnly(svcName, "desc_only", "desc"),
 
 		ExpectedDescription: "desc",
+		ExpectedDeprecated:  false,
 		ExpectedResponses:   responses{"204": {Description: "No Content response."}},
+	}, {
+		Name:               "deprecated_only",
+		DSL:                dsls.DeprecatedOnly(svcName, "deprecated_only"),
+		ExpectedDeprecated: true,
+		ExpectedResponses:  responses{"204": {Description: "No Content response."}},
 	}, {
 		Name: "request_string_body",
 		DSL:  dsls.RequestStringBody(svcName, "request_string_body"),
 
+		ExpectedDeprecated:  false,
 		ExpectedRequestBody: &requestBody{"body", tstring, true},
 		ExpectedResponses:   responses{"204": {Description: "No Content response."}},
 	}, {
 		Name: "request_object_body",
 		DSL:  dsls.RequestObjectBody(svcName, "request_object_body"),
 
-		ExpectedRequestBody: &requestBody{"", tobj("name", tstring), true},
+		ExpectedDeprecated:  false,
+		ExpectedRequestBody: &requestBody{"Request body for request_object_body.", tobj("name", tstring), true},
 		ExpectedResponses:   responses{"204": {Description: "No Content response."}},
 	}, {
 		Name: "request_streaming_string_body",
 		DSL:  dsls.RequestObjectBody(svcName, "request_streaming_string_body"),
 
-		ExpectedRequestBody: &requestBody{"", tobj("name", tstring), true},
+		ExpectedDeprecated:  false,
+		ExpectedRequestBody: &requestBody{"Request body for request_streaming_string_body.", tobj("name", tstring), true},
 		ExpectedResponses:   responses{"204": {Description: "No Content response."}},
+	}, {
+		Name: "request_map_params",
+		DSL:  dsls.RequestMapParams(svcName, "request_map_params"),
+
+		ExpectedDeprecated: false,
+		ExpectedParameters: []param{{Name: "param", In: "query", Description: "Query parameters", Style: "deepObject", Type: tobj()}},
+		ExpectedResponses:  responses{"204": {Description: "No Content response."}},
 	}, {
 		Name: "response_array_of_string",
 		DSL:  dsls.ResponseArrayOfString(svcName, "response_array_of_string"),
 
-		ExpectedResponses: responses{"200": {"OK response.", tobj("result", tobj("children", tarray)), nil}},
+		ExpectedDeprecated: false,
+		ExpectedResponses:  responses{"200": {"OK response.", tobj("result", tobj("children", tarray)), nil}},
 	}, {
 		Name: "response_recursive_user_type",
 		DSL:  dsls.ResponseRecursiveUserType(svcName, "response_recursive_user_type"),
 
-		ExpectedResponses: responses{"200": {"OK response.", tobj("recursive", tobj()), nil}},
+		ExpectedDeprecated: false,
+		ExpectedResponses:  responses{"200": {"OK response.", tobj("recursive", tobj()), nil}},
 	}, {
 		Name: "response_recursive_array_user_type",
 		DSL:  dsls.ResponseRecursiveArrayUserType(svcName, "response_recursive_array_user_type"),
 
-		ExpectedResponses: responses{"200": {"OK response.", tobj("result", tobj("children", tarray)), nil}},
+		ExpectedDeprecated: false,
+		ExpectedResponses:  responses{"200": {"OK response.", tobj("result", tobj("children", tarray)), nil}},
+	}, {
+		Name: "response_skip_response_body_encode_decode",
+		DSL:  dsls.ResponseSkipResponseBodyEncodeDecode(svcName, "response_skip_response_body_encode_decode"),
+
+		ExpectedDeprecated: false,
+		ExpectedResponses:  responses{"200": {"OK response.", tbinary, nil}},
 	}}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			api := codegen.RunDSL(t, c.DSL).API
+			root := codegen.RunDSL(t, c.DSL)
 
 			var bodies *EndpointBodies
 			var types map[string]*openapi.Schema
 			{
 				var bds map[string]map[string]*EndpointBodies
-				bds, types = buildBodyTypes(api)
+				bds, types = buildBodyTypes(root.API, root.Types, root.ResultTypes, openapi.Version30, expr.NewExampleGenerator(root.API.RandomizerFactory), openapi.Values{})
 				if svc, ok := bds[svcName]; ok {
 					bodies, ok = svc[c.Name]
 					if !ok {
@@ -184,30 +540,29 @@ func TestBuildOperation(t *testing.T) {
 			}
 
 			var route *expr.RouteExpr
-			{
-				if len(api.HTTP.Services) == 0 {
-					t.Error("no HTTP service created from DSL")
-				}
-				for _, s := range api.HTTP.Services {
-					if s.Name() == svcName {
-						for _, e := range s.HTTPEndpoints {
-							if e.Name() == c.Name {
-								route = e.Routes[0]
-								break
-							}
+			if len(root.API.HTTP.Services) == 0 {
+				t.Error("no HTTP service created from DSL")
+			}
+			for _, s := range root.API.HTTP.Services {
+				if s.Name() == svcName {
+					for _, e := range s.HTTPEndpoints {
+						if e.Name() == c.Name {
+							route = e.Routes[0]
+							break
 						}
 					}
-					if route != nil {
-						break
-					}
 				}
-				if route == nil {
-					t.Error("could not find route")
-					return
+				if route != nil {
+					break
 				}
 			}
+			if route == nil {
+				t.Error("could not find route")
+				return
+			}
 
-			op := buildOperation(c.Name, route, bodies, expr.NewRandom(c.Name))
+			generator := expr.NewExampleGenerator(expr.NewFakerRandomizerFactory(c.Name))
+			op := buildOperation(c.Name, route, bodies, generator, root.API.Meta, openapi.Version30, openapi.Values{})
 
 			if op.Description != c.ExpectedDescription {
 				t.Errorf("got description %q for method %q, expected %q", op.Description, c.Name, c.ExpectedDescription)
@@ -216,6 +571,11 @@ func TestBuildOperation(t *testing.T) {
 				t.Errorf("got %d parameters, expected %d", len(op.Parameters), len(c.ExpectedParameters))
 				return
 			}
+
+			if op.Deprecated != c.ExpectedDeprecated {
+				t.Errorf("got %t deprecated, expected %t", op.Deprecated, c.ExpectedDeprecated)
+			}
+
 			for i, p := range op.Parameters {
 				matchesParameter(t, p, types, c.ExpectedParameters[i])
 			}
@@ -226,6 +586,86 @@ func TestBuildOperation(t *testing.T) {
 			}
 			for s, r := range op.Responses {
 				matchesResponse(t, r, types, c.ExpectedResponses[s])
+			}
+		})
+	}
+}
+
+func TestBuildOperationID(t *testing.T) {
+	const svcName = "test service"
+
+	cases := []struct {
+		Name string
+		DSL  func()
+
+		ExpectedOperationIDs []string
+	}{
+		{
+			Name:                 "template_in_method",
+			DSL:                  dsls.OperationIDMethod(svcName, "template_in_method", "{method}"),
+			ExpectedOperationIDs: []string{"template_in_method"},
+		}, {
+			Name:                 "template_in_service",
+			DSL:                  dsls.OperationIDService(svcName, "template_in_service", "{service}"),
+			ExpectedOperationIDs: []string{"test service"},
+		}, {
+			Name:                 "template_in_api",
+			DSL:                  dsls.OperationIDAPI(svcName, "template_in_api", defaultOperationIDFormat),
+			ExpectedOperationIDs: []string{"test service#template_in_api"},
+		}, {
+			Name:                 "multiple_routes",
+			DSL:                  dsls.OperationIDMultipleRoutes(svcName, "multiple_routes", defaultOperationIDFormat),
+			ExpectedOperationIDs: []string{"test service#multiple_routes", "test service#multiple_routes#1"},
+		}, {
+			Name:                 "multiple_routes_custom_separator",
+			DSL:                  dsls.OperationIDMultipleRoutes(svcName, "multiple_routes_custom_separator", "{service}.{method}(.{routeIndex})"),
+			ExpectedOperationIDs: []string{"test service.multiple_routes_custom_separator", "test service.multiple_routes_custom_separator.1"},
+		}, {
+			Name:                 "multiple_routes_custom_separator_without_routeIndex",
+			DSL:                  dsls.OperationIDMultipleRoutes(svcName, "multiple_routes_custom_separator_without_routeIndex", "{service}.{method}"),
+			ExpectedOperationIDs: []string{"test service.multiple_routes_custom_separator_without_routeIndex", "test service.multiple_routes_custom_separator_without_routeIndex#1"},
+		}, {
+			Name:                 "multiple_routes_no_routeIndex_separator",
+			DSL:                  dsls.OperationIDMultipleRoutes(svcName, "multiple_routes_no_routeIndex_separator", "{service}.{method}({routeIndex})"),
+			ExpectedOperationIDs: []string{"test service.multiple_routes_no_routeIndex_separator", "test service.multiple_routes_no_routeIndex_separator1"},
+		}, {
+			Name:                 "multiple_routes_long_separator",
+			DSL:                  dsls.OperationIDMultipleRoutes(svcName, "multiple_routes_long_separator", "{service}.{method}(someWordsHere and maybe some spaces{routeIndex})"),
+			ExpectedOperationIDs: []string{"test service.multiple_routes_long_separator", "test service.multiple_routes_long_separatorsomeWordsHere and maybe some spaces1"},
+		}, {
+			Name:                 "custom_static_operation_id",
+			DSL:                  dsls.OperationIDMethod(svcName, "custom_static_operation_id", "listThings"),
+			ExpectedOperationIDs: []string{"listThings"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			api := codegen.RunDSL(t, c.DSL).API
+
+			if len(api.HTTP.Services) == 0 {
+				t.Error("no HTTP service created from DSL")
+			}
+
+			for _, s := range api.HTTP.Services {
+				if s.Name() == svcName {
+					for _, e := range s.HTTPEndpoints {
+						for i, r := range e.Routes {
+							generator := expr.NewExampleGenerator(expr.NewFakerRandomizerFactory(c.Name))
+							op := buildOperation(c.Name, r, &EndpointBodies{}, generator, api.Meta, openapi.Version30, openapi.Values{})
+
+							if len(c.ExpectedOperationIDs) == 0 {
+								t.Error("no expected operation IDs")
+								return
+							}
+
+							if op.OperationID != c.ExpectedOperationIDs[i] {
+								t.Errorf("got operation ID %q, expected %q", op.OperationID, c.ExpectedOperationIDs[i])
+								return
+							}
+						}
+					}
+				}
 			}
 		})
 	}
@@ -353,4 +793,73 @@ func matchesHeader(t *testing.T, h *HeaderRef, types map[string]*openapi.Schema,
 		In:              "header",
 	}}
 	matchesParameterHeader(t, par, types, expected, "header")
+}
+
+var noSecurityOverridesAPISecurityDSL = func() {
+	var JWTAuth = dsl.JWTSecurity("jwt")
+
+	dsl.API("test", func() {
+		dsl.Security(JWTAuth)
+	})
+
+	dsl.Service("test", func() {
+		dsl.Method("secure", func() {
+			dsl.Payload(func() {
+				dsl.Token("token", dsl.String)
+				dsl.Required("token")
+			})
+			dsl.HTTP(func() {
+				dsl.GET("/secure")
+			})
+		})
+		dsl.Method("public", func() {
+			dsl.NoSecurity()
+			dsl.HTTP(func() {
+				dsl.GET("/public")
+			})
+		})
+	})
+}
+
+var noSecurityOverridesServiceSecurityDSL = func() {
+	var JWTAuth = dsl.JWTSecurity("jwt")
+
+	dsl.API("test", func() {})
+
+	dsl.Service("test", func() {
+		dsl.Security(JWTAuth)
+		dsl.Method("service-secure", func() {
+			dsl.Payload(func() {
+				dsl.Token("token", dsl.String)
+				dsl.Required("token")
+			})
+			dsl.HTTP(func() {
+				dsl.GET("/service-secure")
+			})
+		})
+		dsl.Method("service-public", func() {
+			dsl.NoSecurity()
+			dsl.HTTP(func() {
+				dsl.GET("/service-public")
+			})
+		})
+	})
+}
+
+var streamingResponseStatusDSL = func() {
+	dsl.Service("streaming", func() {
+		dsl.Method("sse", func() {
+			dsl.StreamingResult(dsl.String)
+			dsl.HTTP(func() {
+				dsl.GET("/sse")
+				dsl.ServerSentEvents()
+			})
+		})
+		dsl.Method("websocket", func() {
+			dsl.StreamingResult(dsl.String)
+			dsl.HTTP(func() {
+				dsl.GET("/websocket")
+			})
+		})
+	})
 }

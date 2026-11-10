@@ -1,338 +1,237 @@
-![Goa logo](https://goa.design/img/goa-logo.svg "Goa")
+<p align="center">
+  <a href="https://goa.design/#gh-light-mode-only">
+    <picture>
+      <source media="(max-width: 600px)" srcset="docs/goa-banner-mobile.png">
+      <img alt="Goa — Let agents reason. Let Goa generate. Go services, built with coding agents. HTTP, gRPC, and JSON-RPC from one Go contract." src="docs/goa-banner.png" width="960">
+    </picture>
+  </a>
+  <a href="https://goa.design/#gh-dark-mode-only">
+    <picture>
+      <source media="(max-width: 600px)" srcset="docs/goa-banner-mobile-dark.png">
+      <img alt="Goa — Let agents reason. Let Goa generate. Go services, built with coding agents. HTTP, gRPC, and JSON-RPC from one Go contract." src="docs/goa-banner-dark.png" width="960">
+    </picture>
+  </a>
+</p>
 
-Goa is a framework for building micro-services and APIs in Go using a unique
-design-first approach.
+<p align="center">
+  <a href="https://github.com/goadesign/goa/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/goadesign/goa"></a>
+  <a href="https://pkg.go.dev/goa.design/goa/v3@v3.35.0/dsl?tab=doc"><img alt="Go reference" src="https://img.shields.io/badge/go-reference-007d9c"></a>
+  <a href="https://github.com/goadesign/goa/actions/workflows/test.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/goadesign/goa/test.yml?branch=v3"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
----
-[![Build Status](https://github.com/goadesign/goa/workflows/build/badge.svg?branch=v3&event=push)](https://github.com/goadesign/goa/actions?query=branch%3Av3+event%3Apush)
-[![DSL GoDoc](https://img.shields.io/badge/godoc-DSL-blue)](https://pkg.go.dev/goa.design/goa/v3@v3.5.2/dsl?tab=doc)
-[![Slack](https://img.shields.io/badge/slack-gophers-orange.svg?style=flat)](https://gophers.slack.com/messages/goa/)
+# Go services. Less code to write.
 
-## Overview
+**Goa is a design-first Go framework that generates HTTP, gRPC, and JSON-RPC APIs from a single contract.** Describe your types, operations, and validation in Go. Goa generates the server and client code, CLI clients, and OpenAPI/protobuf specifications. You and your coding agent implement the business logic.
 
-Goa takes a different approach to building services by making it possible to
-describe the *design* of the service API using a simple Go DSL. Goa uses the
-description to generate specialized service helper code, client code and
-documentation. Goa is extensible via plugins, for example the
-[goakit](https://github.com/goadesign/plugins/tree/v3/goakit) plugin
-generates code that leverage the Go kit library.
+For a coding agent, that's less repetitive code to write, fewer representations to keep in sync, and a clear contract to reason from.
 
-The service design describes the transport independent layer of the services in
-the form of simple methods that accept a context and a payload and return a
-result and an error. The design also describes how the payloads, results and
-errors are serialized in the transport (HTTP or gRPC). For example a service
-method payload may be built from an HTTP request by extracting values from the
-request path, headers and body. This clean separation of layers makes it
-possible to expose the same service using multiple transports. It also promotes
-good design where the service business logic concerns are expressed and
-implemented separately from the transport logic.
+**[Quickstart](https://goa.design/docs/1-goa/quickstart/)** · [Documentation](https://goa.design/docs/1-goa/) · [Examples](https://github.com/goadesign/examples) · [Build AI agents with Goa-AI](https://github.com/goadesign/goa-ai)
 
-The Goa DSL consists of Go functions so that it may be extended easily to avoid
-repetition and promote standards. The design code itself can easily be shared
-across multiple services by simply importing the corresponding Go package again
-promoting reuse and standardization across services.
+## Give your coding agent a contract
 
-## Code Generation
+A new field can affect a handler, a client, validation, and an API specification. With Goa, your agent changes the design and regenerates those pieces together.
 
-The Goa tool accepts the Go design package import path as input and produces the
-interface as well as the glue that binds the service and client code with the
-underlying transport. The code is specific to the API so that for example there
-is no need to cast or "bind" any data structure prior to using the request
-payload or response result. The design may define validations in which case the
-generated code takes care of validating the incoming request payload prior to
-invoking the service method on the server, and validating the response prior to
-invoking the client code.
+- **Spend tokens on the interesting work.** Goa generates routing, serialization, validation, and clients. Your agent can focus on requirements, business rules, and tests.
+- **Start from useful context.** Types, descriptions, examples, errors, and constraints live together in the design. The agent can read the relevant contract before exploring the implementation.
+- **Make edits predictable.** Change `design/`, regenerate `gen/`, implement outside it. The same structure carries across services and transports.
+- **Let the compiler guide the next step.** When a generated interface changes, Go identifies implementations and callers that need updating. Tests cover the behavior.
 
-## Installation
+Install the **[Goa service designer skill](skills/goa-service-designer/)** in your application repository:
 
 ```bash
-go get -u goa.design/goa/v3/...@v3
+npx skills add goadesign/goa --skill goa-service-designer
 ```
 
->Note: Goa requires the use of Go modules.
+The installer requires Node.js and npm and lets you choose your coding tool. The skill guides design changes, generation, implementation, and verification, and points the agent to relevant Goa documentation.
 
-Current Release: `v3.5.2`
+Then give it a real task:
 
-## Teaser
+> Add a catalog service with a product lookup by SKU over HTTP and gRPC. Use the Goa service designer skill. Define the contract, generate the code, implement the lookup, and test successful and missing-product responses.
 
-### 1. Design
+[See the coding-agent workflow](https://goa.design/docs/ai-development/) · [Other skill installation options](skills/)
 
-Create a new Goa project:
+## One design. Three ways to call it.
 
-```bash
-mkdir -p calcsvc/design
-cd calcsvc
-go mod init calcsvc
-```
-
-Create the file `design.go` in the `design` directory with the following
-content:
+This service exposes the same greeting over HTTP, gRPC, and JSON-RPC:
 
 ```go
 package design
 
 import . "goa.design/goa/v3/dsl"
 
-// API describes the global properties of the API server.
-var _ = API("calc", func() {
-        Title("Calculator Service")
-        Description("HTTP service for adding numbers, a goa teaser")
-        Server("calc", func() {
-                Host("localhost", func() { URI("http://localhost:8088") })
-        })
-})
+var _ = Service("hello", func() {
+	Description("Greets people by name.")
+	JSONRPC(func() {
+		POST("/rpc")
+	})
 
-// Service describes a service
-var _ = Service("calc", func() {
-        Description("The calc service performs operations on numbers")
-        // Method describes a service method (endpoint)
-        Method("add", func() {
-                // Payload describes the method payload
-                // Here the payload is an object that consists of two fields
-                Payload(func() {
-                        // Attribute describes an object field
-                        Attribute("a", Int, "Left operand")
-                        Attribute("b", Int, "Right operand")
-                        // Both attributes must be provided when invoking "add"
-                        Required("a", "b")
-                })
-                // Result describes the method result
-                // Here the result is a simple integer value
-                Result(Int)
-                // HTTP describes the HTTP transport mapping
-                HTTP(func() {
-                        // Requests to the service consist of HTTP GET requests
-                        // The payload fields are encoded as path parameters
-                        GET("/add/{a}/{b}")
-                        // Responses use a "200 OK" HTTP status
-                        // The result is encoded in the response body
-                        Response(StatusOK)
-                })
-        })
+	Method("greet", func() {
+		Description("Return a personal greeting.")
+		Payload(func() {
+			Field(1, "name", String, "Name to greet", func() {
+				MinLength(1)
+			})
+			Required("name")
+		})
+		Result(String)
+
+		HTTP(func() {
+			GET("/hello/{name}")
+		})
+		GRPC(func() {
+		})
+		JSONRPC(func() {
+		})
+	})
 })
 ```
 
-This file contains the design for a `calc` service which accepts HTTP GET
-requests to `/add/{a}/{b}` where `{a}` and `{b}` are placeholders for integer
-values. The API returns the sum of `a` and `b` in the HTTP response body.
-
-### 2. Implement
-
-Now that the design is done, let's run `goa` on the design package.
-In the `calcsvc` directory run:
-
-``` bash
-goa gen calcsvc/design
-```
-
-This produces a `gen` directory with the following directory structure:
-
-``` text
-gen
-├── calc
-│   ├── client.go
-│   ├── endpoints.go
-│   └── service.go
-└── http
-    ├── calc
-    │   ├── client
-    │   │   ├── cli.go
-    │   │   ├── client.go
-    │   │   ├── encode_decode.go
-    │   │   ├── paths.go
-    │   │   └── types.go
-    │   └── server
-    │       ├── encode_decode.go
-    │       ├── paths.go
-    │       ├── server.go
-    │       └── types.go
-    ├── cli
-    │   └── calc
-    │       └── cli.go
-    ├── openapi.json
-    └── openapi.yaml
-
-7 directories, 15 files
-```
-
-* `calc` contains the service endpoints and interface as well as a service
-  client.
-* `http` contains the HTTP transport layer. This layer maps the service
-  endpoints to HTTP handlers server side and HTTP client methods client side.
-  The `http` directory also contains a complete
-  [OpenAPI 3.0](https://github.com/OAI/OpenAPI-Specification/blob/master/versions/3.0.3.md)
-  spec for the service.
-
-The `goa` tool can also generate example implementations for both the service
-and client. These examples provide a good starting point:
-
-``` text
-goa example calcsvc/design
-
-calc.go
-cmd/calc-cli/http.go
-cmd/calc-cli/main.go
-cmd/calc/http.go
-cmd/calc/main.go
-```
-
-The tool generated the `main` functions for two commands: one that runs the
-server and one the client. The tool also generated a dummy service
-implementation that prints a log message. Again note that the `example` command
-is intended to generate just that: an *example*, in particular it is not
-intended to be re-run each time the design changes (as opposed to the `gen`
-command which should be re-run each time the design changes).
-
-Let's implement our service by providing a proper implementation for the `add`
-method. Goa generated a payload struct for the `add` method that contains both
-fields. Goa also generated the transport layer that takes care of decoding the
-request so all we have to do is to perform the actual sum. Edit the file
-`calc.go` and change the code of the `add` function as follows:
+Goa generates the three transports, their Go clients, request validation, a CLI client, OpenAPI specifications, and Protocol Buffer definitions. They all call the same generated service interface. Your complete `hello.go` implementation is ordinary Go:
 
 ```go
-// Add returns the sum of attributes a and b of p.
-func (s *calcsrvc) Add(ctx context.Context, p *calc.AddPayload) (res int, err error) {
-        return p.A + p.B, nil
+package helloapi
+
+import (
+	"context"
+
+	genhello "hello/gen/hello"
+)
+
+type hellosrvc struct{}
+
+// NewHello returns the greeting service.
+func NewHello() genhello.Service {
+	return &hellosrvc{}
+}
+
+// Greet returns a greeting for the supplied name.
+func (s *hellosrvc) Greet(ctx context.Context, p *genhello.GreetPayload) (string, error) {
+	return "Hello, " + p.Name + "!", nil
 }
 ```
 
-That's it! we have now a full-fledged HTTP service with a corresponding OpenAPI
-specification and a client tool.
+Here, `genhello` is the generated `gen/hello` package. The generated transports reject an empty name before calling `Greet`. Add a field or change a validation rule in the design, then regenerate the corresponding code and specifications.
 
-### 3. Run
+### Try it
 
-Now let's compile and run the service:
-
-```bash
-cd cmd/calc
-go build
-./calc
-[calcapi] 16:10:47 HTTP "Add" mounted on GET /add/{a}/{b}
-[calcapi] 16:10:47 HTTP server listening on "localhost:8088"
-```
-
-Open a new console and compile the generated CLI tool:
+Start with **Go 1.27.3 or later**:
 
 ```bash
-cd calcsvc/cmd/calc-cli
-go build
+mkdir hello && cd hello
+go mod init hello
+go get goa.design/goa/v3@latest
+mkdir design
 ```
 
-and run it:
+Save the design above as `design/design.go`. For all three transports, install the [Protocol Buffer compiler](https://protobuf.dev/installation/) and the [Go protobuf generators](UPGRADING.md#install-v3350-after-publication). For an HTTP-only first run, omit both `JSONRPC` blocks and the `GRPC` block.
+
+Generate the code and starter application:
 
 ```bash
-./calc-cli calc add -a 1 -b 2
-3
+go mod tidy
+go run goa.design/goa/v3/cmd/goa gen hello/design
+go run goa.design/goa/v3/cmd/goa example hello/design
 ```
 
-The tool includes contextual help:
+Replace the starter `hello.go` with the implementation above, then run:
 
-``` bash
-./calc-cli --help
+```bash
+go mod tidy
+go run ./cmd/hello --http-port=8000
 ```
 
-Help is also available on each command:
+In another terminal:
 
-``` bash
-./calc-cli calc add --help
+```bash
+curl http://localhost:8000/hello/Alice
+# "Hello, Alice!"
 ```
 
-Now let's see how robust our code is and try to use non integer values:
+<details>
+<summary>Try the generated HTTP, gRPC, and JSON-RPC clients</summary>
 
-``` bash
-./calc-cli calc add -a 1 -b foo
-invalid value for b, must be INT
-run './calccli --help' for detailed usage.
+If you kept all three transports in the design, each command returns `"Hello, Alice!"`:
+
+```bash
+go run ./cmd/hello-cli --url=http://localhost:8000 hello greet --name=Alice
+go run ./cmd/hello-cli --url=grpc://127.0.0.1:8080 hello greet --message '{"name":"Alice"}'
+go run ./cmd/hello-cli --jsonrpc --url=http://localhost:8000 hello greet --body '{"name":"Alice"}'
 ```
 
-The generated code validates the command line arguments against the types
-defined in the design. The server also validates the types when decoding
-incoming requests so that your code only has to deal with the business logic.
+</details>
 
-### 4. Document
+`gen` replaces the generated tree. `example` creates missing application files and leaves existing ones alone. Keep your implementation outside `gen/`, and use `go run` as above to run the generator version selected by your module.
 
-The `http` directory contains OpenAPI 2.0 and 3.0 specifications in both YAML
-and JSON format.
+For a guided walkthrough, follow the **[HTTP quickstart](https://goa.design/docs/1-goa/quickstart/)**.
 
-The specification can easily be served from the service itself using a file
-server. The [Files](http://godoc.org/goa.design/goa/dsl/http.go#Files) DSL
-function makes it possible to serve a static file. Edit the file
-`design/design.go` and add:
+## More of your service, generated
 
-```go
-var _ = Service("openapi", func() {
-	// Serve the file gen/http/openapi3.json for requests sent to
-	// /openapi.json. The HTTP file system is created below.
-	Files("/openapi.json", "openapi3.json")
-})
-```
+| Design in Goa | Get from the generator |
+| --- | --- |
+| Types, methods, validation, and errors | Typed service interfaces, endpoints, clients, and boundary validation |
+| HTTP routes, parameters, headers, JSON and form bodies | Server handlers, encoders/decoders, Go clients, CLI commands, and OpenAPI specifications |
+| gRPC messages, metadata, and status mappings | Protocol Buffer definitions, server/client adapters, serialization, and CLI commands |
+| JSON-RPC methods and error mappings | Server/client code, request dispatch, batches, and notifications |
+| Streaming methods | WebSocket and SSE support for HTTP, SSE for JSON-RPC, and gRPC streams |
+| Result views | Named response shapes and the code to select and serialize them |
 
-Re-run `goa gen calcsvc/design` and note the new directory `gen/openapi` and
-`gen/http/openapi` which contain the implementation for a HTTP handler that
-serves the `openapi.json` file.
+Build on these with [security schemes, interceptors, and production guidance](https://goa.design/docs/1-goa/production/), or extend generation with [plugins](https://github.com/goadesign/plugins).
 
-All we need to do is mount the handler on the service mux. Add the corresponding
-import statement to `cmd/calc/http.go`:
+## One ecosystem. Services and AI agents.
 
-```go
-import openapisvr "calcsvc/gen/http/openapi/server"
-```
+**[Goa-AI](https://github.com/goadesign/goa-ai)** brings the same approach to AI applications. Reuse Goa types and bind tools to service methods, so your API and agent tools share a contract.
 
-and mount the handler by adding the following line in the same file and after
-the mux creation (e.g. one the line after the `// Configure the mux.` comment):
+- **Build AI agents** with typed tools, structured completions, agent composition, streaming, and evaluation suites.
+- **Create MCP servers** that expose tools, resources, and prompts from your design.
+- **Host a tool registry** for discovery and invocation across providers.
+- **Run locally or durably** with the in-memory engine for local execution or the Temporal engine for durable workflows.
 
-```go
-svr := openapisvr.New(nil, mux, dec, enc, nil, nil, http.Dir("../../gen/http"))
-openapisvr.Mount(mux, svr)
-```
+You implement the planner and application behavior; Goa-AI generates contracts, schemas, codecs, and integration code.
 
-That's it! we now have a self-documenting service. Stop the running service
-with CTRL-C. Rebuild and re-run it then make requests to the newly added
-`/openapi.json` endpoint:
+**[Explore Goa-AI →](https://github.com/goadesign/goa-ai)** · [Quickstart](https://goa.design/docs/2-goa-ai/quickstart/) · [A service and an agent sharing one design](https://goa.design/docs/ai-development/#one-design-two-entry-points)
 
-``` bash
-^C[calcapi] 16:17:37 exiting (interrupt)
-[calcapi] 16:17:37 shutting down HTTP server at "localhost:8088"
-[calcapi] 16:17:37 exited
-go build
-./calc
-```
+## Upgrading to v3.35.0
 
-In a different console:
+v3.35.0 adds flat and untagged JSON union encodings, service-specific HTTP body field name mappings, `OneOf` template value accessors, and collection branches in gRPC unions; preserves HTTP path parameter identity, selected result views in union branches, and forwarded gRPC status codes; and speeds up `goa gen` up to 6.5x on large multi-service designs. Goa now requires **Go 1.27.3 or later**, incorporating the emergency `crypto/x509` intermediate CA distrust fix (`CVE-2026-111943`) and the 15 standard-library and toolchain security fixes from Go 1.27.2.
 
-``` bash
-curl localhost:8088/openapi.json
-{"openapi":"3.0.3","info":{"title":"Calculator Service","description":...
-```
+Projects upgrading from v3.30.x must also account for the intentional source and transport changes introduced in v3.31. Read the **[upgrade guide](UPGRADING.md)** before regenerating; it keeps the current v3.35.0 changes separate from those earlier migrations. The [release notes](https://github.com/goadesign/goa/releases/tag/v3.35.0) explain the benefits and fixes.
 
-## Resources
+## Keep exploring
 
-### Getting Started Guides
+- **Learn the design language:** [DSL reference](https://goa.design/docs/1-goa/dsl-reference/) and [code generation](https://goa.design/docs/1-goa/code-generation/).
+- **Choose a transport:** [HTTP guide](https://goa.design/docs/1-goa/http-guide/), [gRPC guide](https://goa.design/docs/1-goa/grpc-guide/), and [JSON-RPC reference](https://pkg.go.dev/goa.design/goa/v3/dsl#JSONRPC).
+- **See complete applications:** [Examples](https://github.com/goadesign/examples) cover security, streaming, file uploads, interceptors, tracing, and more.
+- **Give an agent focused documentation:** Start with [llms.txt](https://goa.design/llms.txt), then load the relevant guide's Markdown version.
 
-A couple of Getting Started guides produced by the community.
+## Sponsors
 
-Joseph Ocol from Pelmorex Corp. goes through a complete example writing a server
-and client service using both HTTP and gRPC transports.
+Goa is supported by these sponsors. Thank you for helping keep the project growing.
 
-[![GOA Design Tutorial](https://tech.pelmorex.com/wp-content/uploads/2020/07/GOA-Design-Tutorial-Screencap-800x470.png)](https://vimeo.com/437928805)
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="https://www.incident.io"><img src="docs/incidentio.png" alt="incident.io" width="220"></a>
+      <h3>Bounce back stronger after every incident</h3>
+      <p>Run incidents end-to-end. Rapidly fix and learn from incidents, so you can build more resilient products.</p>
+      <a href="https://incident.io">Explore incident.io →</a>
+    </td>
+    <td align="center" width="50%">
+      <a href="https://www.speakeasy.com/editor?utm_source=goa+repo&utm_medium=github+sponsorship"><img src="docs/speakeasy.png" alt="Speakeasy" width="220"></a>
+      <h3>Enterprise DevEx for your API</h3>
+      <p>Create feature-rich SDKs. Speed up integrations and reduce errors by giving your API the DevEx it deserves.</p>
+      <a href="https://www.speakeasy.com/docs/api-frameworks/goa?utm_source=goa+repo&utm_medium=github+sponsorship">Integrate with Goa →</a>
+    </td>
+  </tr>
+</table>
 
-Gleidson Nascimento goes through how to create a complete service that using both
-[CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS) and
-[JWT](https://jwt.io/) based authentication to secure access.
+## Join the community
 
-[![API Development in Go Using Goa](https://bs-uploads.toptal.io/blackfish-uploads/uploaded_file/file/275966/image-1592349920607-734c25f64461bf3c482bac1d73c26432.png)](https://www.toptal.com/go/goa-api-development)
+Questions, ideas, and contributions are welcome.
 
-### Docs
+- **Talk with us:** [Gophers Slack #goa](https://gophers.slack.com/messages/goa/) and [GitHub Discussions](https://github.com/goadesign/goa/discussions).
+- **Get help:** [Goa Guru](https://gurubase.io/g/goa) and [Goa Design Wizard](https://chat.openai.com/g/g-mLuQDGyro-goa-design-wizard).
+- **Follow along:** [Bluesky](https://bsky.app/profile/goadesign.bsky.social) and [Design First on Substack](https://goadesign.substack.com).
+- **Contribute:** [Report a bug](https://github.com/goadesign/goa/issues) or [open a pull request](https://github.com/goadesign/goa/pulls).
 
-The [goa.design](https://goa.design) website provides a high level overview of
-Goa and the DSL. 
-The [![DSL GoDoc](https://img.shields.io/badge/godoc-DSL-blue)](https://pkg.go.dev/goa.design/goa/v3@v3.5.2/dsl?tab=doc)
-contains a fully documented reference of all the DSL functions.
-### Examples
-
-The [examples](https://github.com/goadesign/examples) directory
-contains simple examples illustrating basic concepts.
-
-## Contributing
-
-See [CONTRIBUTING](https://github.com/goadesign/goa/blob/v3/CONTRIBUTING.md).
+MIT licensed. See [LICENSE](LICENSE) · [Go Report Card](https://goreportcard.com/report/github.com/goadesign/goa).

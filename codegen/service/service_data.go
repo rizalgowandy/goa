@@ -1,64 +1,121 @@
+// This file builds the values passed to service templates. Package-level Go
+// names are shared by every file in the package, while each file may choose
+// additional private helper names.
 package service
 
 import (
-	"bytes"
 	"fmt"
-	"strings"
 	"text/template"
 
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/expr"
 )
 
-// Services holds the data computed from the design needed to generate the code
-// of the services.
-var Services = make(ServicesData)
-
 var (
 	// initTypeTmpl is the template used to render the code that initializes a
 	// projected type or viewed result type or a result type.
-	initTypeCodeTmpl = template.Must(template.New("initTypeCode").Funcs(template.FuncMap{"goify": codegen.Goify}).Parse(initTypeCodeT))
+	initTypeCodeTmpl = template.Must(
+		template.New("initTypeCode").
+			Funcs(template.FuncMap{"goify": codegen.Goify}).
+			Parse(serviceTemplates.Read(returnTypeInitT)),
+	)
+
 	// validateTypeCodeTmpl is the template used to render the code to
 	// validate a projected type or a viewed result type.
-	validateTypeCodeTmpl = template.Must(template.New("validateType").Funcs(template.FuncMap{"goify": codegen.Goify}).Parse(validateTypeT))
+	validateTypeCodeTmpl = template.Must(
+		template.New("validateType").
+			Funcs(template.FuncMap{"goify": codegen.Goify}).
+			Parse(serviceTemplates.Read(typeValidateT)),
+	)
 )
 
 type (
 	// ServicesData encapsulates the data computed from the service designs.
-	ServicesData map[string]*Data
+	ServicesData struct {
+		Root     *expr.RootExpr
+		Services map[string]*Data
 
-	// RequirementsData is the list of security requirements.
-	RequirementsData []*RequirementData
-
-	// SchemesData is the list of security schemes.
-	SchemesData []*SchemeData
+		generation *codegen.Generation
+		examples   *expr.ExampleGenerator
+		aliases    *importAliases
+		packages   map[*codegen.GeneratedPackage]*generatedPackageData
+		facts      *rootFacts
+	}
 
 	// Data contains the data used to render the code related to a single
 	// service.
 	Data struct {
+		// ServiceDeclaration is the exact package-level service interface record.
+		ServiceDeclaration *codegen.NameDeclaration
+		// AutherDeclaration is the exact package-level authorization interface
+		// record. It is nil when the service has no security schemes.
+		AutherDeclaration *codegen.NameDeclaration
+		// APINameDeclaration is the exact package-level API name constant record.
+		APINameDeclaration *codegen.NameDeclaration
+		// APIVersionDeclaration is the exact package-level API version constant record.
+		APIVersionDeclaration *codegen.NameDeclaration
+		// ServiceNameDeclaration is the exact package-level service name constant record.
+		ServiceNameDeclaration *codegen.NameDeclaration
+		// MethodNamesDeclaration is the exact package-level method names variable record.
+		MethodNamesDeclaration *codegen.NameDeclaration
+		// EndpointsDeclaration is the exact package-level endpoint collection record.
+		EndpointsDeclaration *codegen.NameDeclaration
+		// NewEndpointsDeclaration is the exact endpoint constructor record.
+		NewEndpointsDeclaration *codegen.NameDeclaration
+		// ClientDeclaration is the exact package-level client record.
+		ClientDeclaration *codegen.NameDeclaration
+		// NewClientDeclaration is the exact client constructor record.
+		NewClientDeclaration *codegen.NameDeclaration
+		// ServerInterceptorsDeclaration is the server interceptor interface record.
+		ServerInterceptorsDeclaration *codegen.NameDeclaration
+		// ClientInterceptorsDeclaration is the client interceptor interface record.
+		ClientInterceptorsDeclaration *codegen.NameDeclaration
+		// ExampleStructDeclaration is the starter implementation struct record.
+		ExampleStructDeclaration *codegen.NameDeclaration
+		// ExampleConstructorDeclaration is the starter constructor record.
+		ExampleConstructorDeclaration *codegen.NameDeclaration
+		// ExampleServerInterceptorsConstructorDeclaration creates the starter
+		// server interceptor implementation. It is nil when the service has no
+		// server interceptors.
+		ExampleServerInterceptorsConstructorDeclaration *codegen.NameDeclaration
 		// Name is the service name.
 		Name string
 		// Description is the service description.
 		Description string
+		// APIName is the name of the API the service belongs to.
+		APIName string
+		// APIVersion is the API version.
+		APIVersion string
 		// StructName is the service struct name.
 		StructName string
-		// VarName is the service variable name (first letter in lowercase).
+		// VarName is the local Go variable that holds the service implementation in
+		// generated starter programs.
 		VarName string
+		// PathName is the service name as used in file and import paths.
+		PathName string
 		// PkgName is the name of the package containing the generated service
 		// code.
 		PkgName string
-		// ViewsPkg is the name of the package containing the projected and viewed
-		// result types.
+		// ViewsPkg is the final views package name kept for existing plugins. It
+		// is empty when the service does not generate a views package.
 		ViewsPkg string
 		// Methods lists the service interface methods.
 		Methods []*MethodData
 		// Schemes is the list of security schemes required by the service methods.
 		Schemes SchemesData
+		// ServerInterceptors contains the data needed to render the server-side
+		// interceptors code.
+		ServerInterceptors []*InterceptorData
+		// ClientInterceptors contains the data needed to render the client-side
+		// interceptors code.
+		ClientInterceptors []*InterceptorData
 		// Scope initialized with all the service types.
 		Scope *codegen.NameScope
 		// ViewScope initialized with all the viewed types.
 		ViewScope *codegen.NameScope
-
+		// ProtoImports lists the import specifications for the custom
+		// proto types used by the service.
+		ProtoImports []*codegen.ImportSpec
 		// userTypes lists the type definitions that the service depends on.
 		userTypes []*UserTypeData
 		// errorTypes lists the error type definitions that the service depends on.
@@ -69,14 +126,218 @@ type (
 		// projectedTypes lists the types which uses pointers for all fields to
 		// define view specific validation logic.
 		projectedTypes []*ProjectedTypeData
+		// unions lists the values that hold one selected branch for the service.
+		unions []*UnionTypeData
+		// viewUnions lists the values that hold one selected branch in the views package.
+		viewUnions []*UnionTypeData
 		// viewedResultTypes lists all the viewed method result types.
 		viewedResultTypes []*ViewedResultTypeData
+		// viewDerived binds the independently rebuilt view graph to declarations
+		// reserved while the service was planned.
+		viewDerived map[expr.UserType]codegen.DerivedTypeID
 	}
 
-	// ErrorInitData describes an error returned by a service method of type
-	// ErrorResult.
+	// MethodData describes a single service method.
+	MethodData struct {
+		// EndpointDeclaration is the exact package-level endpoint constructor.
+		EndpointDeclaration *codegen.NameDeclaration
+		// EndpointInputDeclaration is the exact streaming endpoint input record.
+		EndpointInputDeclaration *codegen.NameDeclaration
+		// ServerStreamDeclaration is the exact server stream interface record.
+		ServerStreamDeclaration *codegen.NameDeclaration
+		// ClientStreamDeclaration is the exact client stream interface record.
+		ClientStreamDeclaration *codegen.NameDeclaration
+		// RequestDeclaration is the exact JSON-RPC request data record.
+		RequestDeclaration *codegen.NameDeclaration
+		// ResponseDeclaration is the exact JSON-RPC response data record.
+		ResponseDeclaration *codegen.NameDeclaration
+		// ServerEndpointWrapperDeclaration is the exact server endpoint wrapper.
+		ServerEndpointWrapperDeclaration *codegen.NameDeclaration
+		// ClientEndpointWrapperDeclaration is the exact client endpoint wrapper.
+		ClientEndpointWrapperDeclaration *codegen.NameDeclaration
+		// Name is the method name.
+		Name string
+		// Description is the method description.
+		Description string
+		// VarName is the Go method name.
+		VarName string
+		// Idempotent reports whether replaying the exact invocation has the
+		// same externally visible effect as invoking the method once.
+		Idempotent bool
+		// Payload is the name of the payload type if any,
+		Payload string
+		// PayloadLoc defines the file and Go package of the payload type
+		// if overridden via Meta.
+		PayloadLoc *codegen.Location
+		// PayloadDef is the payload type definition if any.
+		PayloadDef string
+		// PayloadRef is a reference to the payload type if any,
+		PayloadRef string
+		// PayloadDeclaration supplies the generated Go type name for a named payload.
+		// It is nil for primitive payloads.
+		PayloadDeclaration *codegen.TypeDeclaration
+		// PayloadDesc is the payload type description if any.
+		PayloadDesc string
+		// PayloadEx is an example of a valid payload value.
+		PayloadEx any
+		// PayloadDefault is the default value of the payload if any.
+		PayloadDefault any
+		// StreamingPayload is the name of the streaming payload type if any.
+		StreamingPayload string
+		// StreamingPayloadDef is the streaming payload type definition if any.
+		StreamingPayloadDef string
+		// StreamingPayloadRef is a reference to the streaming payload type if any.
+		StreamingPayloadRef string
+		// StreamingPayloadDeclaration supplies the generated Go type name for a
+		// named streaming payload. It is nil for primitive payloads.
+		StreamingPayloadDeclaration *codegen.TypeDeclaration
+		// StreamingPayloadDesc is the streaming payload type description if any.
+		StreamingPayloadDesc string
+		// StreamingPayloadEx is an example of a valid streaming payload value.
+		StreamingPayloadEx any
+		// StreamingResult is the name of the streaming result type if any (when different from Result).
+		StreamingResult string
+		// StreamingResultDef is the streaming result type definition if any.
+		StreamingResultDef string
+		// StreamingResultRef is the reference to the streaming result type if any.
+		StreamingResultRef string
+		// StreamingResultDeclaration supplies the generated Go type name for a named
+		// streaming result. It is nil for primitive results.
+		StreamingResultDeclaration *codegen.TypeDeclaration
+		// StreamingResultDesc is the streaming result type description if any.
+		StreamingResultDesc string
+		// StreamingResultEx is an example of a valid streaming result value.
+		StreamingResultEx any
+		// Result is the name of the result type if any.
+		Result string
+		// ResultLoc defines the file and Go package of the result type
+		// if overridden via Meta.
+		ResultLoc *codegen.Location
+		// ResultDef is the result type definition if any.
+		ResultDef string
+		// ResultRef is the reference to the result type if any.
+		ResultRef string
+		// ResultDeclaration supplies the generated Go type name for a named result.
+		// It is nil for primitive results.
+		ResultDeclaration *codegen.TypeDeclaration
+		// ResultDesc is the result type description if any.
+		ResultDesc string
+		// ResultEx is an example of a valid result value.
+		ResultEx any
+		// Errors list the possible errors defined in the design if any.
+		Errors []*ErrorInitData
+		// ErrorLocs lists the file and Go package of the error type
+		// if overridden via Meta indexed by error name.
+		ErrorLocs map[string]*codegen.Location
+		// Requirements contains the security requirements for the
+		// method.
+		Requirements RequirementsData
+		// Schemes contains the security schemes types used by the
+		// method.
+		Schemes SchemesData
+		// ServerInterceptors list the server interceptors that apply to this
+		// method.
+		ServerInterceptors []string
+		// ClientInterceptors list the client interceptors that apply to this
+		// method.
+		ClientInterceptors []string
+		// ViewedResult contains the data required to generate the code handling
+		// views if any.
+		ViewedResult *ViewedResultTypeData
+		// ServerStream indicates that the service method receives a payload
+		// stream or sends a result stream or both.
+		ServerStream *StreamData
+		// ClientStream indicates that the service method receives a result
+		// stream or sends a payload result or both.
+		ClientStream *StreamData
+		// StreamKind is the kind of the stream (payload or result or
+		// bidirectional).
+		StreamKind expr.StreamKind
+		// HasMixedResults indicates whether the method defines Result and
+		// StreamingResult separately so HTTP can return one normal response or an
+		// SSE stream.
+		HasMixedResults bool
+		// SkipRequestBodyEncodeDecode is true if the method payload includes
+		// the raw HTTP request body reader.
+		SkipRequestBodyEncodeDecode bool
+		// SkipResponseBodyEncodeDecode is true if the method result includes
+		// the raw HTTP response body reader.
+		SkipResponseBodyEncodeDecode bool
+		// RequestStruct is the name of the data structure containing the
+		// payload and request body reader when SkipRequestBodyEncodeDecode is
+		// used.
+		RequestStruct string
+		// ResponseStruct is the name of the data structure containing the
+		// result and response body reader when SkipResponseBodyEncodeDecode is
+		// used.
+		ResponseStruct string
+		// EndpointField is the unique field name used in the generated client
+		// struct to store the goa.Endpoint for this method. It is computed with a
+		// scope that includes method names to avoid field/method name collisions.
+		EndpointField string
+		// StreamEndpointField is the unique field name used in the generated client
+		// struct to store the "streaming mode" goa.Endpoint for mixed results. The
+		// transport endpoint forces server streaming (e.g. sets "Accept:
+		// text/event-stream") and returns the client stream interface.
+		//
+		// It is only set when HasMixedResults is true.
+		StreamEndpointField string
+	}
+
+	// StreamData is the data used to generate client and server interfaces that
+	// a streaming endpoint implements. It is initialized if a method defines a
+	// streaming payload or result or both.
+	StreamData struct {
+		// Interface is the name of the stream interface.
+		Interface string
+		// VarName is the unexported Go type name used by transport packages for this
+		// stream implementation.
+		VarName string
+		// SendName is the name of the send function.
+		SendName string
+		// SendDesc is the description for the send function.
+		SendDesc string
+		// SendWithContextName is the name of the send function with context.
+		SendWithContextName string
+		// SendWithContextDesc is the description for the send function with context.
+		SendWithContextDesc string
+		// SendTypeName is the type name sent through the stream.
+		SendTypeName string
+		// SendTypeRef is the reference to the type sent through the stream.
+		SendTypeRef string
+		// RecvName is the name of the receive function.
+		RecvName string
+		// RecvDesc is the description for the recv function.
+		RecvDesc string
+		// RecvWithContextName is the name of the receive function with context.
+		RecvWithContextName string
+		// RecvWithContextDesc is the description for the recv function with context.
+		RecvWithContextDesc string
+		// RecvTypeName is the type name received from the stream.
+		RecvTypeName string
+		// RecvTypeRef is the reference to the type received from the stream.
+		RecvTypeRef string
+		// MustClose indicates whether the stream should implement the Close()
+		// function.
+		MustClose bool
+		// EndpointStruct is the name of the endpoint struct that holds a payload
+		// reference (if any) and the endpoint server stream.
+		EndpointStruct string
+		// Kind is the kind of the stream (payload, result or bidirectional).
+		Kind expr.StreamKind
+	}
+
+	// ErrorInitData describes an error returned by a service method.
 	ErrorInitData struct {
-		// Name is the name of the init function.
+		// Declaration is the package-level constructor submitted while the service
+		// was planned. It is nil for custom errors because the service package does
+		// not generate constructors for them.
+		Declaration *codegen.NameDeclaration
+		// Name is a read-only copy of the final constructor name kept for existing
+		// plugins. It is empty for custom errors because they have no generated
+		// service constructor.
+		//
+		// Deprecated: Use Declaration.Name().
 		Name string
 		// Description is the error description.
 		Description string
@@ -94,117 +355,159 @@ type (
 		Fault bool
 	}
 
-	// MethodData describes a single service method.
-	MethodData struct {
-		// Name is the method name.
+	// InterceptorData contains the data required to render the service-level
+	// interceptor code. interceptors.go.tpl
+	InterceptorData struct {
+		// InfoDeclaration is the exact interceptor metadata record.
+		InfoDeclaration *codegen.NameDeclaration
+		// PayloadDeclaration is the exact payload accessor interface when emitted.
+		PayloadDeclaration *codegen.NameDeclaration
+		// ResultDeclaration is the exact result accessor interface when emitted.
+		ResultDeclaration *codegen.NameDeclaration
+		// StreamingPayloadDeclaration is the exact streaming payload accessor interface when emitted.
+		StreamingPayloadDeclaration *codegen.NameDeclaration
+		// StreamingResultDeclaration is the exact streaming result accessor interface when emitted.
+		StreamingResultDeclaration *codegen.NameDeclaration
+		// Name is the name of the interceptor used in the generated code.
 		Name string
-		// Description is the method description.
+		// DesignName is the name of the interceptor as defined in the design.
+		DesignName string
+		// Description is the description of the interceptor from the design.
 		Description string
-		// VarName is the Go method name.
-		VarName string
-		// Payload is the name of the payload type if any,
-		Payload string
-		// PayloadDef is the payload type definition if any.
-		PayloadDef string
-		// PayloadRef is a reference to the payload type if any,
-		PayloadRef string
-		// PayloadDesc is the payload type description if any.
-		PayloadDesc string
-		// PayloadEx is an example of a valid payload value.
-		PayloadEx interface{}
-		// PayloadDefault is the default value of the payload if any.
-		PayloadDefault interface{}
-		// StreamingPayload is the name of the streaming payload type if any.
-		StreamingPayload string
-		// StreamingPayloadDef is the streaming payload type definition if any.
-		StreamingPayloadDef string
-		// StreamingPayloadRef is a reference to the streaming payload type if any.
-		StreamingPayloadRef string
-		// StreamingPayloadDesc is the streaming payload type description if any.
-		StreamingPayloadDesc string
-		// StreamingPayloadEx is an example of a valid streaming payload value.
-		StreamingPayloadEx interface{}
-		// Result is the name of the result type if any.
-		Result string
-		// ResultDef is the result type definition if any.
-		ResultDef string
-		// ResultRef is the reference to the result type if any.
-		ResultRef string
-		// ResultDesc is the result type description if any.
-		ResultDesc string
-		// ResultEx is an example of a valid result value.
-		ResultEx interface{}
-		// Errors list the possible errors defined in the design if any.
-		Errors []*ErrorInitData
-		// Requirements contains the security requirements for the
-		// method.
-		Requirements RequirementsData
-		// Schemes contains the security schemes types used by the
-		// method.
-		Schemes SchemesData
-		// ViewedResult contains the data required to generate the code handling
-		// views if any.
-		ViewedResult *ViewedResultTypeData
-		// ServerStream indicates that the service method receives a payload
-		// stream or sends a result stream or both.
-		ServerStream *StreamData
-		// ClientStream indicates that the service method receives a result
-		// stream or sends a payload result or both.
-		ClientStream *StreamData
-		// StreamKind is the kind of the stream (payload or result or
-		// bidirectional).
-		StreamKind expr.StreamKind
-		// SkipRequestBodyEncodeDecode is true if the method payload includes
-		// the raw HTTP request body reader.
-		SkipRequestBodyEncodeDecode bool
-		// SkipResponseBodyEncodeDecode is true if the method result includes
-		// the raw HTTP response body reader.
-		SkipResponseBodyEncodeDecode bool
-		// RequestStruct is the name of the data structure containing the
-		// payload and request body reader when SkipRequestBodyEncodeDecode is
-		// used.
-		RequestStruct string
-		// ResponseStruct is the name of the data structure containing the
-		// result and response body reader when SkipResponseBodyEncodeDecode is
-		// used.
-		ResponseStruct string
+		// Service is the service name returned to this interceptor.
+		Service string
+		// Methods
+		Methods []*MethodInterceptorData
+		// ReadPayload contains payload attributes that the interceptor can
+		// read.
+		ReadPayload []*AttributeData
+		// WritePayload contains payload attributes that the interceptor can
+		// write.
+		WritePayload []*AttributeData
+		// ReadResult contains result attributes that the interceptor can read.
+		ReadResult []*AttributeData
+		// WriteResult contains result attributes that the interceptor can
+		// write.
+		WriteResult []*AttributeData
+		// ReadStreamingPayload contains streaming payload attributes that the interceptor can read.
+		ReadStreamingPayload []*AttributeData
+		// WriteStreamingPayload contains streaming payload attributes that the interceptor can write.
+		WriteStreamingPayload []*AttributeData
+		// ReadStreamingResult contains streaming result attributes that the interceptor can read.
+		ReadStreamingResult []*AttributeData
+		// WriteStreamingResult contains streaming result attributes that the interceptor can write.
+		WriteStreamingResult []*AttributeData
+		// HasPayloadAccess indicates that the interceptor info object has a
+		// payload access interface.
+		HasPayloadAccess bool
+		// HasResultAccess indicates that the interceptor info object has a
+		// result access interface.
+		HasResultAccess bool
+		// HasStreamingPayloadAccess indicates that the interceptor info object has a
+		// streaming payload access interface.
+		HasStreamingPayloadAccess bool
+		// HasStreamingResultAccess indicates that the interceptor info object has a
+		// streaming result access interface.
+		HasStreamingResultAccess bool
 	}
 
-	// StreamData is the data used to generate client and server interfaces that
-	// a streaming endpoint implements. It is initialized if a method defines a
-	// streaming payload or result or both.
-	StreamData struct {
+	// MethodInterceptorData contains the data required to render the
+	// method-level interceptor code.
+	MethodInterceptorData struct {
+		// InfoDeclaration is the private type that returns this method's name and
+		// provides its field access methods.
+		InfoDeclaration *codegen.NameDeclaration
+		// ServerUnaryInfoDeclaration is the private call information type used by
+		// the server endpoint call.
+		ServerUnaryInfoDeclaration *codegen.NameDeclaration
+		// ClientUnaryInfoDeclaration is the private call information type used by
+		// the client endpoint call.
+		ClientUnaryInfoDeclaration *codegen.NameDeclaration
+		// StreamingSendInfoDeclaration is the private call information type used
+		// while a stream value is sent.
+		StreamingSendInfoDeclaration *codegen.NameDeclaration
+		// StreamingRecvInfoDeclaration is the private call information type used
+		// while a stream value is received.
+		StreamingRecvInfoDeclaration *codegen.NameDeclaration
+		// PayloadAccessDeclaration is the exact private payload accessor struct.
+		PayloadAccessDeclaration *codegen.NameDeclaration
+		// ResultAccessDeclaration is the exact private result accessor struct.
+		ResultAccessDeclaration *codegen.NameDeclaration
+		// StreamingPayloadAccessDeclaration is the exact private streaming payload accessor struct.
+		StreamingPayloadAccessDeclaration *codegen.NameDeclaration
+		// StreamingResultAccessDeclaration is the exact private streaming result accessor struct.
+		StreamingResultAccessDeclaration *codegen.NameDeclaration
+		// ServerWrapperDeclaration is the exact server interceptor wrapper function.
+		ServerWrapperDeclaration *codegen.NameDeclaration
+		// ClientWrapperDeclaration is the exact client interceptor wrapper function.
+		ClientWrapperDeclaration *codegen.NameDeclaration
+		// MethodName is the name of the method.
+		MethodName string
+		// PayloadAccess is the name of the payload access struct.
+		PayloadAccess string
+		// ResultAccess is the name of the result access struct.
+		ResultAccess string
+		// StreamingPayloadAccess is the name of the streaming payload access struct.
+		StreamingPayloadAccess string
+		// StreamingResultAccess is the name of the streaming result access struct.
+		StreamingResultAccess string
+		// PayloadRef is the reference to the method payload type.
+		PayloadRef string
+		// ResultRef is the reference to the method result type.
+		ResultRef string
+		// StreamingPayloadRef is the reference to the streaming payload type.
+		StreamingPayloadRef string
+		// StreamingResultRef is the reference to the streaming result type.
+		StreamingResultRef string
+		// ServerStream is the stream data if the endpoint defines a server stream.
+		ServerStream *StreamInterceptorData
+		// ClientStream is the stream data if the endpoint defines a client stream.
+		ClientStream *StreamInterceptorData
+	}
+
+	// StreamInterceptorData is the stream data for an interceptor.
+	StreamInterceptorData struct {
+		// InterfaceDeclaration is the exact stream interface wrapped by this record.
+		InterfaceDeclaration *codegen.NameDeclaration
+		// WrapperDeclaration is the exact private interceptor stream wrapper struct.
+		WrapperDeclaration *codegen.NameDeclaration
 		// Interface is the name of the stream interface.
 		Interface string
-		// VarName is the name of the struct type that implements the stream
-		// interface.
-		VarName string
 		// SendName is the name of the send function.
 		SendName string
-		// SendDesc is the description for the send function.
-		SendDesc string
-		// SendTypeName is the type name sent through the stream.
-		SendTypeName string
+		// SendWithContextName is the name of the send function with context.
+		SendWithContextName string
 		// SendTypeRef is the reference to the type sent through the stream.
 		SendTypeRef string
-		// RecvName is the name of the receive function.
+		// RecvName is the name of the recv function.
 		RecvName string
-		// RecvDesc is the description for the recv function.
-		RecvDesc string
-		// RecvTypeName is the type name received from the stream.
-		RecvTypeName string
+		// RecvWithContextName is the name of the recv function with context.
+		RecvWithContextName string
 		// RecvTypeRef is the reference to the type received from the stream.
 		RecvTypeRef string
 		// MustClose indicates whether the stream should implement the Close()
 		// function.
 		MustClose bool
 		// EndpointStruct is the name of the endpoint struct that holds a payload
-		// reference (if any) and the endpoint server stream. It is set only if the
-		// client sends a normal payload and server streams a result.
+		// reference (if any) and the endpoint server stream.
 		EndpointStruct string
-		// Kind is the kind of the stream (payload, result or bidirectional).
-		Kind expr.StreamKind
 	}
+
+	// AttributeData describes a single attribute.
+	AttributeData struct {
+		// Name is the name of the attribute.
+		Name string
+		// TypeRef is the reference to the attribute type.
+		TypeRef string
+		// Pointer is true if the attribute is a pointer.
+		Pointer bool
+	}
+
+	// RequirementsData is the list of security requirements.
+	RequirementsData []*RequirementData
+
+	// SchemesData is the list of security schemes.
+	SchemesData []*SchemeData
 
 	// RequirementData lists the schemes and scopes defined by a single
 	// security requirement.
@@ -217,24 +520,105 @@ type (
 
 	// UserTypeData contains the data describing a user-defined type.
 	UserTypeData struct {
+		// Declaration supplies this type's generated Go name and output package.
+		Declaration *codegen.TypeDeclaration
 		// Name is the type name.
 		Name string
 		// VarName is the corresponding Go type name.
 		VarName string
 		// Description is the type human description.
 		Description string
+		// ErrorDescription is the authored text returned by Error.
+		ErrorDescription string
+		// ErrorName is the Go expression returned by GoaErrorName during planning.
+		ErrorName string
+		// IsServiceError reports whether this is Goa's built-in service error.
+		IsServiceError bool
+		// RawJSON emits JSON methods forwarding to the declared raw JSON type.
+		RawJSON bool
 		// Def is the type definition Go code.
 		Def string
 		// Ref is the reference to the type.
 		Ref string
+		// Loc defines the file and Go package of the type if overridden
+		// via Meta.
+		Loc *codegen.Location
 		// Type is the underlying type.
 		Type expr.UserType
 	}
 
+	// UnionTypeData describes a generated value that holds exactly one branch.
+	UnionTypeData struct {
+		// TypeDeclaration supplies the generated union type name.
+		TypeDeclaration *codegen.NameDeclaration
+		// KindDeclaration supplies the generated type that records the selected branch.
+		KindDeclaration *codegen.NameDeclaration
+		// Name is the final union type name copied for existing plugins.
+		//
+		// Deprecated: Use TypeDeclaration.
+		Name string
+		// KindName is the final selected-branch type name copied for existing plugins.
+		//
+		// Deprecated: Use KindDeclaration.
+		KindName string
+		// Fields describes each union branch.
+		Fields []*UnionFieldData
+		// Loc defines the file and Go package of the union type if overridden via
+		// Meta. When nil the type is generated in the default service file.
+		Loc *codegen.Location
+		// TypeKey is the field that records the selected branch in JSON (defaults to "type").
+		TypeKey string
+		// ValueKey is the value field name for JSON marshaling (defaults to "value").
+		ValueKey string
+		// Flatten writes branch object fields beside TypeKey in JSON.
+		Flatten bool
+		// Untagged writes the selected branch directly and selects input by JSON kind.
+		Untagged bool
+	}
+
+	// UnionFieldData describes a single branch of a union.
+	UnionFieldData struct {
+		// Name is the branch name as defined in the DSL.
+		Name string
+		// KindConst is the final branch constant name copied for existing plugins.
+		//
+		// Deprecated: Use KindDeclaration.
+		KindConst string
+		// Constructor is the final branch constructor name copied for existing plugins.
+		//
+		// Deprecated: Use ConstructorDeclaration.
+		Constructor string
+		// KindDeclaration supplies the generated constant name for this branch.
+		KindDeclaration *codegen.NameDeclaration
+		// ConstructorDeclaration supplies the generated constructor name for this branch.
+		ConstructorDeclaration *codegen.NameDeclaration
+		// FieldName is the branch name used by the public As and Set methods.
+		FieldName string
+		// StorageName is the private struct field that stores this branch value.
+		StorageName string
+		// FieldType is the Go type used in the union struct field and public API.
+		FieldType string
+		// Nilable is true when the Go branch value can be nil even though selecting
+		// a non-nil Goa OneOf branch value is required.
+		Nilable bool
+		// EmitPrimitiveAlias is true when the branch uses a generated primitive alias
+		// that must be declared in the same file as the union type.
+		EmitPrimitiveAlias bool
+		// PrimitiveAliasType is the underlying Go type used by the generated branch
+		// alias (for example "string" or "float64").
+		PrimitiveAliasType string
+		// TypeTag is the JSON "type" value that selects this branch.
+		TypeTag string
+		// RawJSON permits a JSON null value in this explicitly raw JSON branch.
+		RawJSON bool
+		// JSONKind is the first-token category used by an untagged JSON branch.
+		JSONKind byte
+	}
+
 	// SchemeData describes a single security scheme.
 	SchemeData struct {
-		// Kind is the type of scheme, one of "Basic", "APIKey", "JWT"
-		// or "OAuth2".
+		// Kind is the type of scheme, one of "Basic", "APIKey",
+		// "Bearer", "JWT" or "OAuth2".
 		Type string
 		// SchemeName is the name of the scheme.
 		SchemeName string
@@ -264,15 +648,15 @@ type (
 		// contains the password is required.
 		PasswordRequired bool
 		// CredField contains the name of the payload field that should
-		// be initialized with the API key, the JWT token or the OAuth2
-		// access token.
+		// be initialized with the API key, the bearer token, the JWT
+		// token or the OAuth2 access token.
 		CredField string
 		// CredPointer is true if the credential field is a pointer.
 		CredPointer bool
 		// CredRequired specifies if the key is a required attribute.
 		CredRequired bool
 		// KeyAttr is the name of the attribute that contains
-		// the security tag (for APIKey, OAuth2, and JWT schemes).
+		// the security tag (for APIKey, Bearer, OAuth2, and JWT schemes).
 		KeyAttr string
 		// Scopes lists the scopes that apply to the scheme.
 		Scopes []string
@@ -325,6 +709,13 @@ type (
 		Attributes []string
 		// TypeVarName is the Go variable name of the type that defines the view.
 		TypeVarName string
+		// MapDeclaration is the exact package-level view map record for this type.
+		MapDeclaration *codegen.NameDeclaration
+		// ToProjected is the private constructor that copies only this view's
+		// fields from a service result.
+		ToProjected *codegen.NameDeclaration
+		// ToResult is the exact private constructor that removes this view.
+		ToResult *codegen.NameDeclaration
 	}
 
 	// ProjectedTypeData contains the data used to generate a projected type for
@@ -348,7 +739,7 @@ type (
 		// corresponding service type. If the projected type corresponds to a
 		// result type, then a function for each view is generated.
 		TypeInits []*InitData
-		// ViewsPkg is the views package name.
+		// ViewsPkg is the final views package name kept for existing plugins.
 		ViewsPkg string
 		// Views lists the views defined on the projected type.
 		Views []*ViewData
@@ -357,7 +748,13 @@ type (
 	// InitData contains the data to render a constructor to initialize service
 	// types from viewed result types and vice versa.
 	InitData struct {
-		// Name is the name of the constructor function.
+		// Declaration is the package-level constructor submitted while the service
+		// was planned.
+		Declaration *codegen.NameDeclaration
+		// Name is a read-only copy of the final constructor name kept for existing
+		// plugins.
+		//
+		// Deprecated: Use Declaration.Name().
 		Name string
 		// Description is the function description.
 		Description string
@@ -382,7 +779,13 @@ type (
 	// ValidateData contains data to render a validate function to validate a
 	// projected type or a viewed result type based on views.
 	ValidateData struct {
-		// Name is the validation function name.
+		// Declaration is the package-level validation function submitted while the
+		// service was planned.
+		Declaration *codegen.NameDeclaration
+		// Name is a read-only copy of the final validation function name kept for
+		// existing plugins.
+		//
+		// Deprecated: Use Declaration.Name().
 		Name string
 		// Ref is the reference to the type on which the validation function
 		// is defined.
@@ -391,27 +794,179 @@ type (
 		Description string
 		// Validate is the validation code.
 		Validate string
+		// Calls lists nested validator functions called by Validate.
+		Calls []*ValidationCallData
+	}
+
+	// ValidationCallData records the exact generated function called to validate
+	// one nested result value.
+	ValidationCallData struct {
+		// Declaration is the exact package-level validator function record.
+		Declaration *codegen.NameDeclaration
+		// View is the selected result-type view.
+		View string
+		// Default reports whether View is the default result-type view.
+		Default bool
+	}
+
+	// validationFieldData describes a nested result field checked by the
+	// validation function for its parent's selected view.
+	validationFieldData struct {
+		Name       string
+		Call       *ValidationCallData
+		IsRequired bool
+	}
+
+	// unionDataKey selects one Goa OneOf definition by its generated definition
+	// key and Go package path.
+	unionDataKey struct {
+		packagePath string
+		identity    codegen.UnionDeclarationID
+	}
+
+	// userTypeDataKey distinguishes in-memory design types and the generated Go
+	// declaration selected for each one.
+	userTypeDataKey struct {
+		origin      expr.UserType
+		declaration *codegen.TypeDeclaration
+	}
+
+	// projectedTypePair records one result type rebuilt with only a view's fields
+	// and the exact source declaration used to find its DerivedTypeID.
+	projectedTypePair struct {
+		source             expr.UserType
+		projected          expr.UserType
+		sourceAttribute    *expr.AttributeExpr
+		projectedAttribute *expr.AttributeExpr
 	}
 )
 
-// Get retrieves the data for the service with the given name computing it if
-// needed. It returns nil if there is no service with the given name.
-func (d ServicesData) Get(name string) *Data {
-	if data, ok := d[name]; ok {
-		return data
+// linkServicesData builds service template data from the values copied during
+// planning and the Go names chosen by Generation.Freeze.
+func linkServicesData(facts *rootFacts, generation *codegen.Generation, aliases *importAliases) (*ServicesData, error) {
+	root := facts.root
+	data := &ServicesData{
+		Root:       root,
+		Services:   make(map[string]*Data),
+		generation: generation,
+		examples:   facts.examples,
+		aliases:    aliases,
+		packages:   make(map[*codegen.GeneratedPackage]*generatedPackageData),
+		facts:      facts,
 	}
-	service := expr.Root.Service(name)
-	if service == nil {
-		return nil
+	for _, service := range facts.services {
+		analyzed, err := data.analyze(service)
+		if err != nil {
+			return nil, err
+		}
+		service.data = analyzed
+		data.Services[service.name] = analyzed
 	}
-	d[name] = d.analyze(service)
-	return d[name]
+	data.registerPackageData()
+	return data, nil
+}
+
+// Example computes an example for attribute. The supplied ExampleIdentity
+// selects the repeatable sequence from which the values are drawn.
+func (d *ServicesData) Example(attribute *expr.AttributeExpr, owner expr.ExampleIdentity) any {
+	return attribute.Example(d.examples.At(owner))
+}
+
+// FieldExample computes attribute's example from the same repeatable sequence
+// as the matching field in parent. Fields of a named user type use that type's
+// ExampleIdentity; fields of an anonymous parent use the caller's value.
+func (d *ServicesData) FieldExample(attribute, parent *expr.AttributeExpr, name string, owner expr.ExampleIdentity) any {
+	if typ, ok := parent.Type.(expr.UserType); ok {
+		owner = expr.UserTypeExampleIdentity(typ)
+	}
+	return attribute.Example(d.examples.At(owner).Member(name))
+}
+
+// Get retrieves the analyzed data for the service with the given name. It
+// returns nil if there is no service with the given name.
+func (d *ServicesData) Get(name string) *Data {
+	return d.Services[name]
+}
+
+// GenPkg returns the generated module import path shared by every declaration,
+// import alias, and transport built from this service analysis.
+func (d *ServicesData) GenPkg() string {
+	return d.generation.GenPkg()
+}
+
+// ServiceImport returns the import path and Go name used by outputPackage for
+// the generated package of service name. The returned value is a copy that
+// callers may add to one file.
+func (d *ServicesData) ServiceImport(outputPackage, name string) *codegen.ImportSpec {
+	serviceFacts := d.facts.serviceByID[name]
+	if serviceFacts == nil {
+		panic(fmt.Sprintf("service %q is not part of the analyzed design root", name))
+	}
+	spec := d.aliases.spec(outputPackage, serviceFacts.packagePath)
+	return &codegen.ImportSpec{Name: spec.Name, Path: spec.Path}
+}
+
+// ViewImport returns the import path and Go name used by outputPackage for the
+// views package of service name. The returned value is a copy that callers may
+// add to one file.
+func (d *ServicesData) ViewImport(outputPackage, name string) *codegen.ImportSpec {
+	serviceFacts := d.facts.serviceByID[name]
+	if serviceFacts == nil {
+		panic(fmt.Sprintf("service %q is not part of the analyzed design root", name))
+	}
+	spec := d.aliases.spec(outputPackage, serviceFacts.viewsPath)
+	return &codegen.ImportSpec{Name: spec.Name, Path: spec.Path}
+}
+
+// PackageImport returns the import path and Go name used by outputPackage for
+// importPath. The returned value is a copy that callers may add to one file.
+func (d *ServicesData) PackageImport(outputPackage, importPath string) *codegen.ImportSpec {
+	spec := d.aliases.spec(outputPackage, importPath)
+	return &codegen.ImportSpec{Name: spec.Name, Path: spec.Path}
+}
+
+// ServiceAttributor returns a type writer for service name as referenced from
+// outputPackage. It follows explicit generated package locations and uses the
+// same import names as service templates.
+func (d *ServicesData) ServiceAttributor(name, outputPackage string) codegen.Attributor {
+	serviceFacts := d.facts.serviceByID[name]
+	if serviceFacts == nil {
+		panic(fmt.Sprintf("service %q is not part of the analyzed design root", name))
+	}
+	return newServiceResolver(
+		d.generation,
+		d.facts.rootTypes,
+		d.aliases,
+		serviceFacts.name,
+		serviceFacts.packagePath,
+		outputPackage,
+	).
+		withValidators(serviceFacts.validators)
+}
+
+// ViewAttributor returns a type writer for service name's result views as
+// referenced from outputPackage.
+func (d *ServicesData) ViewAttributor(name, outputPackage string) codegen.Attributor {
+	serviceFacts := d.facts.serviceByID[name]
+	if serviceFacts == nil {
+		panic(fmt.Sprintf("service %q is not part of the analyzed design root", name))
+	}
+	data := d.Services[name]
+	return newViewResolver(
+		d.generation,
+		d.aliases,
+		serviceFacts.name,
+		serviceFacts.viewsPath,
+		data.viewDerived,
+	).
+		withValidators(serviceFacts.validators).
+		withOutputPackage(outputPackage)
 }
 
 // Method returns the service method data for the method with the given name,
 // nil if there isn't one.
-func (s *Data) Method(name string) *MethodData {
-	for _, m := range s.Methods {
+func (d *Data) Method(name string) *MethodData {
+	for _, m := range d.Methods {
 		if m.Name == name {
 			return m
 		}
@@ -470,1219 +1025,17 @@ func (s SchemesData) Append(d *SchemeData) SchemesData {
 	return append(s, d)
 }
 
-// analyze creates the data necessary to render the code of the given service.
-// It records the user types needed by the service definition in userTypes.
-func (d ServicesData) analyze(service *expr.ServiceExpr) *Data {
-	var (
-		scope      *codegen.NameScope
-		viewScope  *codegen.NameScope
-		pkgName    string
-		viewspkg   string
-		types      []*UserTypeData
-		errTypes   []*UserTypeData
-		errorInits []*ErrorInitData
-		projTypes  []*ProjectedTypeData
-		viewedRTs  []*ViewedResultTypeData
-		seenErrors map[string]struct{}
-		seen       map[string]struct{}
-		seenProj   map[string]*ProjectedTypeData
-		seenViewed map[string]*ViewedResultTypeData
-	)
-	{
-		scope = codegen.NewNameScope()
-		scope.Unique("Use") // Reserve "Use" for Endpoints struct Use method.
-		viewScope = codegen.NewNameScope()
-		pkgName = scope.HashedUnique(service, strings.ToLower(codegen.Goify(service.Name, false)), "svc")
-		viewspkg = pkgName + "views"
-		seen = make(map[string]struct{})
-		seenErrors = make(map[string]struct{})
-		seenProj = make(map[string]*ProjectedTypeData)
-		seenViewed = make(map[string]*ViewedResultTypeData)
-
-		// A function to collect user types from an error expression
-		recordError := func(er *expr.ErrorExpr) {
-			errTypes = append(errTypes, collectTypes(er.AttributeExpr, scope, seen)...)
-			if er.Type == expr.ErrorResult {
-				if _, ok := seenErrors[er.Name]; ok {
-					return
-				}
-				seenErrors[er.Name] = struct{}{}
-				errorInits = append(errorInits, buildErrorInitData(er, scope))
-			}
-		}
-		for _, er := range service.Errors {
-			recordError(er)
-		}
-
-		// A function to collect inner user types from an attribute expression
-		collectUserTypes := func(att *expr.AttributeExpr) {
-			if ut, ok := att.Type.(expr.UserType); ok {
-				att = ut.Attribute()
-			}
-			types = append(types, collectTypes(att, scope, seen)...)
-		}
-		for _, m := range service.Methods {
-			// collect inner user types
-			collectUserTypes(m.Payload)
-			collectUserTypes(m.StreamingPayload)
-			collectUserTypes(m.Result)
-			if _, ok := m.Result.Type.(*expr.ResultTypeExpr); ok {
-				// collect projected types for the corresponding result type
-				projected := expr.DupAtt(m.Result)
-				projTypes = append(projTypes, collectProjectedTypes(projected, m.Result, viewspkg, scope, viewScope, seenProj)...)
-			}
-			for _, er := range m.Errors {
-				recordError(er)
-			}
-		}
-
-		// A function to convert raw object type to user type.
-		makeUserType := func(att *expr.AttributeExpr, name, id string) {
-			if _, ok := att.Type.(*expr.Object); ok {
-				att.Type = &expr.UserTypeExpr{
-					AttributeExpr: expr.DupAtt(att),
-					TypeName:      scope.Name(name),
-					UID:           id,
-				}
-			}
-			if ut, ok := att.Type.(expr.UserType); ok {
-				seen[ut.ID()] = struct{}{}
-			}
-		}
-
-		for _, e := range service.Methods {
-			name := codegen.Goify(e.Name, true)
-			// Create user type for raw object payloads
-			makeUserType(e.Payload, name+"Payload", service.Name+"#"+name+"Payload")
-			// Create user type for raw object streaming payloads
-			makeUserType(e.StreamingPayload, name+"StreamingPayload", service.Name+"#"+name+"StreamingPayload")
-			// Create user type for raw object results
-			makeUserType(e.Result, name+"Result", service.Name+"#"+name+"Result")
+// DedupeByType returns a new SchemesData slice that is deduplicated by scheme
+// type.
+func (s SchemesData) DedupeByType() SchemesData {
+	seen := make(map[string]struct{})
+	uniqueSchemes := SchemesData{}
+	for _, s := range s {
+		if _, ok := seen[s.Type]; !ok {
+			seen[s.Type] = struct{}{}
+			uniqueSchemes = append(uniqueSchemes, s)
 		}
 	}
 
-	for _, t := range expr.Root.Types {
-		if svcs, ok := t.Attribute().Meta["type:generate:force"]; ok {
-			att := &expr.AttributeExpr{Type: t}
-			if len(svcs) > 0 {
-				// Force generate type only in the specified services
-				for _, svc := range svcs {
-					if svc == service.Name {
-						types = append(types, collectTypes(att, scope, seen)...)
-						break
-					}
-				}
-			} else {
-				// Force generate type in all the services
-				types = append(types, collectTypes(att, scope, seen)...)
-			}
-		}
-	}
-
-	var (
-		methods []*MethodData
-		schemes SchemesData
-	)
-	{
-		methods = make([]*MethodData, len(service.Methods))
-		for i, e := range service.Methods {
-			m := buildMethodData(e, pkgName, service, scope)
-			if rt, ok := e.Result.Type.(*expr.ResultTypeExpr); ok {
-				var view string
-				if v, ok := e.Result.Meta["view"]; ok {
-					view = v[0]
-				}
-				if vrt, ok := seenViewed[m.Result+"::"+view]; ok {
-					m.ViewedResult = vrt
-				} else {
-					projected := seenProj[rt.ID()]
-					projAtt := &expr.AttributeExpr{Type: projected.Type}
-					vrt := buildViewedResultType(e.Result, projAtt, viewspkg, scope, viewScope)
-					found := false
-					for _, rt := range viewedRTs {
-						if rt.Type.ID() == vrt.Type.ID() {
-							found = true
-							break
-						}
-					}
-					if !found {
-						viewedRTs = append(viewedRTs, vrt)
-					}
-					m.ViewedResult = vrt
-					seenViewed[vrt.Name+"::"+view] = vrt
-				}
-			}
-			methods[i] = m
-			for _, s := range m.Schemes {
-				schemes = schemes.Append(s)
-			}
-		}
-	}
-
-	var (
-		desc string
-	)
-	{
-		desc = service.Description
-		if desc == "" {
-			desc = fmt.Sprintf("Service is the %s service interface.", service.Name)
-		}
-	}
-
-	data := &Data{
-		Name:              service.Name,
-		Description:       desc,
-		VarName:           codegen.Goify(service.Name, false),
-		StructName:        codegen.Goify(service.Name, true),
-		PkgName:           pkgName,
-		ViewsPkg:          viewspkg,
-		Methods:           methods,
-		Schemes:           schemes,
-		Scope:             scope,
-		ViewScope:         viewScope,
-		errorTypes:        errTypes,
-		errorInits:        errorInits,
-		userTypes:         types,
-		projectedTypes:    projTypes,
-		viewedResultTypes: viewedRTs,
-	}
-	d[service.Name] = data
-
-	return data
+	return uniqueSchemes
 }
-
-// typeContext returns a contextual attribute for service types. Service types
-// are Go types and uses non-pointers to hold attributes having default values.
-func typeContext(pkg string, scope *codegen.NameScope) *codegen.AttributeContext {
-	return codegen.NewAttributeContext(false, false, true, pkg, scope)
-}
-
-// projectedTypeContext returns a contextual attribute for a projected type.
-// Projected types are Go types that uses pointers for all attributes (even the
-// required ones).
-func projectedTypeContext(pkg string, ptr bool, scope *codegen.NameScope) *codegen.AttributeContext {
-	return codegen.NewAttributeContext(ptr, false, true, pkg, scope)
-}
-
-// collectTypes recurses through the attribute to gather all user types and
-// records them in userTypes.
-func collectTypes(at *expr.AttributeExpr, scope *codegen.NameScope, seen map[string]struct{}) (data []*UserTypeData) {
-	if at == nil || at.Type == expr.Empty {
-		return
-	}
-	collect := func(at *expr.AttributeExpr) []*UserTypeData { return collectTypes(at, scope, seen) }
-	switch dt := at.Type.(type) {
-	case expr.UserType:
-		if _, ok := seen[dt.ID()]; ok {
-			return nil
-		}
-		data = append(data, &UserTypeData{
-			Name:        dt.Name(),
-			VarName:     scope.GoTypeName(at),
-			Description: dt.Attribute().Description,
-			Def:         scope.GoTypeDef(dt.Attribute(), false, true),
-			Ref:         scope.GoTypeRef(at),
-			Type:        dt,
-		})
-		seen[dt.ID()] = struct{}{}
-		data = append(data, collect(dt.Attribute())...)
-	case *expr.Object:
-		for _, nat := range *dt {
-			data = append(data, collect(nat.Attribute)...)
-		}
-	case *expr.Array:
-		data = append(data, collect(dt.ElemType)...)
-	case *expr.Map:
-		data = append(data, collect(dt.KeyType)...)
-		data = append(data, collect(dt.ElemType)...)
-	}
-	return
-}
-
-// buildErrorInitData creates the data needed to generate code around endpoint error return values.
-func buildErrorInitData(er *expr.ErrorExpr, scope *codegen.NameScope) *ErrorInitData {
-	_, temporary := er.AttributeExpr.Meta["goa:error:temporary"]
-	_, timeout := er.AttributeExpr.Meta["goa:error:timeout"]
-	_, fault := er.AttributeExpr.Meta["goa:error:fault"]
-	return &ErrorInitData{
-		Name:        fmt.Sprintf("Make%s", codegen.Goify(er.Name, true)),
-		Description: er.Description,
-		ErrName:     er.Name,
-		TypeName:    scope.GoTypeName(er.AttributeExpr),
-		TypeRef:     scope.GoTypeRef(er.AttributeExpr),
-		Temporary:   temporary,
-		Timeout:     timeout,
-		Fault:       fault,
-	}
-}
-
-// buildMethodData creates the data needed to render the given endpoint. It
-// records the user types needed by the service definition in userTypes.
-func buildMethodData(m *expr.MethodExpr, svcPkgName string, service *expr.ServiceExpr, scope *codegen.NameScope) *MethodData {
-	var (
-		vname       string
-		desc        string
-		payloadName string
-		payloadDef  string
-		payloadRef  string
-		payloadDesc string
-		payloadEx   interface{}
-		rname       string
-		resultDef   string
-		resultRef   string
-		resultDesc  string
-		resultEx    interface{}
-		errors      []*ErrorInitData
-		reqs        RequirementsData
-		schemes     SchemesData
-	)
-	vname = scope.Unique(codegen.Goify(m.Name, true), "Endpoint")
-	desc = m.Description
-	if desc == "" {
-		desc = codegen.Goify(m.Name, true) + " implements " + m.Name + "."
-	}
-	if m.Payload.Type != expr.Empty {
-		payloadName = scope.GoTypeName(m.Payload)
-		payloadRef = scope.GoTypeRef(m.Payload)
-		if dt, ok := m.Payload.Type.(expr.UserType); ok {
-			payloadDef = scope.GoTypeDef(dt.Attribute(), false, true)
-		}
-		payloadDesc = m.Payload.Description
-		if payloadDesc == "" {
-			payloadDesc = fmt.Sprintf("%s is the payload type of the %s service %s method.",
-				payloadName, m.Service.Name, m.Name)
-		}
-		payloadEx = m.Payload.Example(expr.Root.API.Random())
-	}
-	if m.Result.Type != expr.Empty {
-		rname = scope.GoTypeName(m.Result)
-		resultRef = scope.GoTypeRef(m.Result)
-		if dt, ok := m.Result.Type.(expr.UserType); ok {
-			resultDef = scope.GoTypeDef(dt.Attribute(), false, true)
-		}
-		resultDesc = m.Result.Description
-		if resultDesc == "" {
-			resultDesc = fmt.Sprintf("%s is the result type of the %s service %s method.",
-				rname, m.Service.Name, m.Name)
-		}
-		resultEx = m.Result.Example(expr.Root.API.Random())
-	}
-	if len(m.Errors) > 0 {
-		errors = make([]*ErrorInitData, len(m.Errors))
-		for i, er := range m.Errors {
-			errors[i] = buildErrorInitData(er, scope)
-		}
-	}
-	for _, req := range m.Requirements {
-		var rs SchemesData
-		for _, s := range req.Schemes {
-			sch := BuildSchemeData(s, m)
-			rs = rs.Append(sch)
-			schemes = schemes.Append(sch)
-		}
-		reqs = append(reqs, &RequirementData{Schemes: rs, Scopes: req.Scopes})
-	}
-	var httpMet *expr.HTTPEndpointExpr
-	if httpSvc := expr.Root.HTTPService(m.Service.Name); httpSvc != nil {
-		httpMet = httpSvc.Endpoint(m.Name)
-	}
-	data := &MethodData{
-		Name:                         m.Name,
-		VarName:                      vname,
-		Description:                  desc,
-		Payload:                      payloadName,
-		PayloadDef:                   payloadDef,
-		PayloadRef:                   payloadRef,
-		PayloadDesc:                  payloadDesc,
-		PayloadEx:                    payloadEx,
-		PayloadDefault:               m.Payload.DefaultValue,
-		Result:                       rname,
-		ResultDef:                    resultDef,
-		ResultRef:                    resultRef,
-		ResultDesc:                   resultDesc,
-		ResultEx:                     resultEx,
-		Errors:                       errors,
-		Requirements:                 reqs,
-		Schemes:                      schemes,
-		StreamKind:                   m.Stream,
-		SkipRequestBodyEncodeDecode:  httpMet != nil && httpMet.SkipRequestBodyEncodeDecode,
-		SkipResponseBodyEncodeDecode: httpMet != nil && httpMet.SkipResponseBodyEncodeDecode,
-		RequestStruct:                vname + "RequestData",
-		ResponseStruct:               vname + "ResponseData",
-	}
-	if m.IsStreaming() {
-		initStreamData(data, m, vname, rname, resultRef, scope)
-	}
-	return data
-}
-
-// initStreamData initializes the streaming payload data structures and methods.
-func initStreamData(data *MethodData, m *expr.MethodExpr, vname, rname, resultRef string, scope *codegen.NameScope) {
-	var (
-		spayloadName string
-		spayloadRef  string
-		spayloadDef  string
-		spayloadDesc string
-		spayloadEx   interface{}
-	)
-	if m.StreamingPayload.Type != expr.Empty {
-		spayloadName = scope.GoTypeName(m.StreamingPayload)
-		spayloadRef = scope.GoTypeRef(m.StreamingPayload)
-		if dt, ok := m.StreamingPayload.Type.(expr.UserType); ok {
-			spayloadDef = scope.GoTypeDef(dt.Attribute(), false, true)
-		}
-		spayloadDesc = m.StreamingPayload.Description
-		if spayloadDesc == "" {
-			spayloadDesc = fmt.Sprintf("%s is the streaming payload type of the %s service %s method.",
-				spayloadName, m.Service.Name, m.Name)
-		}
-		spayloadEx = m.StreamingPayload.Example(expr.Root.API.Random())
-	}
-	svrStream := &StreamData{
-		Interface:      vname + "ServerStream",
-		VarName:        scope.Unique(codegen.Goify(m.Name, true), "ServerStream"),
-		EndpointStruct: vname + "EndpointInput",
-		Kind:           m.Stream,
-		SendName:       "Send",
-		SendDesc:       fmt.Sprintf("Send streams instances of %q.", rname),
-		SendTypeName:   rname,
-		SendTypeRef:    resultRef,
-		MustClose:      true,
-	}
-	cliStream := &StreamData{
-		Interface:    vname + "ClientStream",
-		VarName:      scope.Unique(codegen.Goify(m.Name, true), "ClientStream"),
-		Kind:         m.Stream,
-		RecvName:     "Recv",
-		RecvDesc:     fmt.Sprintf("Recv reads instances of %q from the stream.", rname),
-		RecvTypeName: rname,
-		RecvTypeRef:  resultRef,
-	}
-	if m.Stream == expr.ClientStreamKind || m.Stream == expr.BidirectionalStreamKind {
-		switch m.Stream {
-		case expr.ClientStreamKind:
-			if resultRef != "" {
-				svrStream.SendName = "SendAndClose"
-				svrStream.SendDesc = fmt.Sprintf("SendAndClose streams instances of %q and closes the stream.", rname)
-				svrStream.MustClose = false
-				cliStream.RecvName = "CloseAndRecv"
-				cliStream.RecvDesc = fmt.Sprintf("CloseAndRecv stops sending messages to the stream and reads instances of %q from the stream.", rname)
-			} else {
-				cliStream.MustClose = true
-			}
-		case expr.BidirectionalStreamKind:
-			cliStream.MustClose = true
-		}
-		svrStream.RecvName = "Recv"
-		svrStream.RecvDesc = fmt.Sprintf("Recv reads instances of %q from the stream.", spayloadName)
-		svrStream.RecvTypeName = spayloadName
-		svrStream.RecvTypeRef = spayloadRef
-		cliStream.SendName = "Send"
-		cliStream.SendDesc = fmt.Sprintf("Send streams instances of %q.", spayloadName)
-		cliStream.SendTypeName = spayloadName
-		cliStream.SendTypeRef = spayloadRef
-	}
-	data.ClientStream = cliStream
-	data.ServerStream = svrStream
-	data.StreamingPayload = spayloadName
-	data.StreamingPayloadDef = spayloadDef
-	data.StreamingPayloadRef = spayloadDef
-	data.StreamingPayloadDesc = spayloadDesc
-	data.StreamingPayloadEx = spayloadEx
-}
-
-// BuildSchemeData builds the scheme data for the given scheme and method expr.
-func BuildSchemeData(s *expr.SchemeExpr, m *expr.MethodExpr) *SchemeData {
-	if !expr.IsObject(m.Payload.Type) {
-		return nil
-	}
-	switch s.Kind {
-	case expr.BasicAuthKind:
-		userAtt := expr.TaggedAttribute(m.Payload, "security:username")
-		user := codegen.Goify(userAtt, true)
-		passAtt := expr.TaggedAttribute(m.Payload, "security:password")
-		pass := codegen.Goify(passAtt, true)
-		var scopes []string
-		if len(s.Scopes) > 0 {
-			scopes = make([]string, len(s.Scopes))
-			for i, s := range s.Scopes {
-				scopes[i] = s.Name
-			}
-		}
-		return &SchemeData{
-			Type:             s.Kind.String(),
-			SchemeName:       s.SchemeName,
-			UsernameAttr:     userAtt,
-			UsernameField:    user,
-			UsernamePointer:  m.Payload.IsPrimitivePointer(userAtt, true),
-			UsernameRequired: m.Payload.IsRequired(userAtt),
-			PasswordAttr:     passAtt,
-			PasswordField:    pass,
-			PasswordPointer:  m.Payload.IsPrimitivePointer(passAtt, true),
-			PasswordRequired: m.Payload.IsRequired(passAtt),
-			Scopes:           scopes,
-		}
-	case expr.APIKeyKind:
-		if keyAtt := expr.TaggedAttribute(m.Payload, "security:apikey:"+s.SchemeName); keyAtt != "" {
-			key := codegen.Goify(keyAtt, true)
-			var scopes []string
-			if len(s.Scopes) > 0 {
-				scopes = make([]string, len(s.Scopes))
-				for i, s := range s.Scopes {
-					scopes[i] = s.Name
-				}
-			}
-			return &SchemeData{
-				Type:         s.Kind.String(),
-				Name:         s.Name,
-				SchemeName:   s.SchemeName,
-				CredField:    key,
-				CredPointer:  m.Payload.IsPrimitivePointer(keyAtt, true),
-				CredRequired: m.Payload.IsRequired(keyAtt),
-				KeyAttr:      keyAtt,
-				Scopes:       scopes,
-				In:           s.In,
-			}
-		}
-	case expr.JWTKind:
-		if keyAtt := expr.TaggedAttribute(m.Payload, "security:token"); keyAtt != "" {
-			key := codegen.Goify(keyAtt, true)
-			var scopes []string
-			if len(s.Scopes) > 0 {
-				scopes = make([]string, len(s.Scopes))
-				for i, s := range s.Scopes {
-					scopes[i] = s.Name
-				}
-			}
-			return &SchemeData{
-				Type:         s.Kind.String(),
-				Name:         s.Name,
-				SchemeName:   s.SchemeName,
-				CredField:    key,
-				CredPointer:  m.Payload.IsPrimitivePointer(keyAtt, true),
-				CredRequired: m.Payload.IsRequired(keyAtt),
-				KeyAttr:      keyAtt,
-				Scopes:       scopes,
-				In:           s.In,
-			}
-		}
-	case expr.OAuth2Kind:
-		if keyAtt := expr.TaggedAttribute(m.Payload, "security:accesstoken"); keyAtt != "" {
-			key := codegen.Goify(keyAtt, true)
-			var scopes []string
-			if len(s.Scopes) > 0 {
-				scopes = make([]string, len(s.Scopes))
-				for i, s := range s.Scopes {
-					scopes[i] = s.Name
-				}
-			}
-			return &SchemeData{
-				Type:         s.Kind.String(),
-				Name:         s.Name,
-				SchemeName:   s.SchemeName,
-				CredField:    key,
-				CredPointer:  m.Payload.IsPrimitivePointer(keyAtt, true),
-				CredRequired: m.Payload.IsRequired(keyAtt),
-				KeyAttr:      keyAtt,
-				Scopes:       scopes,
-				Flows:        s.Flows,
-				In:           s.In,
-			}
-		}
-	}
-	return nil
-}
-
-// collectProjectedTypes builds a projected type for every user type found
-// when recursing through the attributes. The projected types live in the views
-// package and support the marshaling and unmarshalling of result types that
-// make use of views. We need to build projected types for all user types - not
-// just result types - because user types make contain result types and thus may
-// need to be marshalled in different ways depending on the view being used.
-func collectProjectedTypes(projected, att *expr.AttributeExpr, viewspkg string, scope, viewScope *codegen.NameScope, seen map[string]*ProjectedTypeData) (data []*ProjectedTypeData) {
-	collect := func(projected, att *expr.AttributeExpr) []*ProjectedTypeData {
-		return collectProjectedTypes(projected, att, viewspkg, scope, viewScope, seen)
-	}
-	switch pt := projected.Type.(type) {
-	case expr.UserType:
-		dt := att.Type.(expr.UserType)
-		if pd, ok := seen[dt.ID()]; ok {
-			// a projected type is already created for this user type. We change the
-			// attribute type to this seen projected type. The seen projected type
-			// can be nil if the attribute type has a circular type definition in
-			// which case we don't change the attribute type until the projected type
-			// is created during the recursion.
-			if pd != nil {
-				projected.Type = pd.Type
-			}
-			return
-		}
-		seen[dt.ID()] = nil
-		pt.Rename(pt.Name() + "View")
-		// We recurse before building the projected type so that user types within
-		// a projected type is also converted to their respective projected types.
-		types := collect(pt.Attribute(), dt.Attribute())
-		pd := buildProjectedType(projected, att, viewspkg, scope, viewScope)
-		seen[dt.ID()] = pd
-		data = append(data, pd)
-		data = append(data, types...)
-	case *expr.Array:
-		dt := att.Type.(*expr.Array)
-		data = append(data, collect(pt.ElemType, dt.ElemType)...)
-	case *expr.Map:
-		dt := att.Type.(*expr.Map)
-		data = append(data, collect(pt.KeyType, dt.KeyType)...)
-		data = append(data, collect(pt.ElemType, dt.ElemType)...)
-	case *expr.Object:
-		dt := att.Type.(*expr.Object)
-		for _, n := range *pt {
-			data = append(data, collect(n.Attribute, dt.Attribute(n.Name))...)
-		}
-	}
-	return
-}
-
-// buildProjectedType builds projected type for the given user type.
-//
-// viewspkg is the name of the views package
-//
-func buildProjectedType(projected, att *expr.AttributeExpr, viewspkg string, scope, viewScope *codegen.NameScope) *ProjectedTypeData {
-	var (
-		projections []*InitData
-		typeInits   []*InitData
-		validations []*ValidateData
-		views       []*ViewData
-
-		varname = viewScope.GoTypeName(projected)
-		pt      = projected.Type.(expr.UserType)
-	)
-	{
-		if _, isrt := pt.(*expr.ResultTypeExpr); isrt {
-			typeInits = buildTypeInits(projected, att, viewspkg, scope, viewScope)
-			projections = buildProjections(projected, att, viewspkg, scope, viewScope)
-			views = buildViews(att.Type.(*expr.ResultTypeExpr), viewScope)
-		}
-		validations = buildValidations(projected, viewScope)
-	}
-	return &ProjectedTypeData{
-		UserTypeData: &UserTypeData{
-			Name:        varname,
-			Description: fmt.Sprintf("%s is a type that runs validations on a projected type.", varname),
-			VarName:     varname,
-			Def:         viewScope.GoTypeDef(pt.Attribute(), true, true),
-			Ref:         viewScope.GoTypeRef(projected),
-			Type:        pt,
-		},
-		Projections: projections,
-		TypeInits:   typeInits,
-		Validations: validations,
-		ViewsPkg:    viewspkg,
-		Views:       views,
-	}
-}
-
-// buildViews builds the view data for all the views in the given result type.
-func buildViews(rt *expr.ResultTypeExpr, viewScope *codegen.NameScope) []*ViewData {
-	views := make([]*ViewData, len(rt.Views))
-	for i, view := range rt.Views {
-		vatt := expr.AsObject(view.AttributeExpr.Type)
-		attrs := make([]string, len(*vatt))
-		for j, nat := range *vatt {
-			attrs[j] = nat.Name
-		}
-		views[i] = &ViewData{
-			Name:        view.Name,
-			Description: view.Description,
-			Attributes:  attrs,
-			TypeVarName: viewScope.GoTypeName(&expr.AttributeExpr{Type: rt}),
-		}
-	}
-	return views
-}
-
-// buildViewedResultType builds a viewed result type from the given result type
-// and projected type.
-func buildViewedResultType(att, projected *expr.AttributeExpr, viewspkg string, scope, viewScope *codegen.NameScope) *ViewedResultTypeData {
-	// collect result type views
-	var (
-		viewName string
-		views    []*ViewData
-
-		rt    = att.Type.(*expr.ResultTypeExpr)
-		isarr = expr.IsArray(att.Type)
-	)
-	{
-		if !rt.HasMultipleViews() {
-			viewName = expr.DefaultView
-		}
-		if v, ok := att.Meta["view"]; ok && len(v) > 0 {
-			viewName = v[0]
-		}
-		views = buildViews(rt, viewScope)
-	}
-
-	// build validation data
-	var (
-		validate *ValidateData
-
-		resvar = scope.GoTypeName(att)
-		resref = scope.GoTypeRef(att)
-	)
-	{
-		data := map[string]interface{}{
-			"Projected": scope.GoTypeName(projected),
-			"ArgVar":    "result",
-			"Source":    "result",
-			"Views":     views,
-			"IsViewed":  true,
-		}
-		buf := &bytes.Buffer{}
-		if err := validateTypeCodeTmpl.Execute(buf, data); err != nil {
-			panic(err) // bug
-		}
-		name := "Validate" + resvar
-		validate = &ValidateData{
-			Name:        name,
-			Description: fmt.Sprintf("%s runs the validations defined on the viewed result type %s.", name, resvar),
-			Ref:         resref,
-			Validate:    buf.String(),
-		}
-	}
-
-	// build constructor to initialize viewed result type from result type
-	var (
-		init *InitData
-
-		vresref = viewScope.GoFullTypeRef(att, viewspkg)
-	)
-	{
-		data := map[string]interface{}{
-			"ToViewed":      true,
-			"ArgVar":        "res",
-			"ReturnVar":     "vres",
-			"Views":         views,
-			"ReturnTypeRef": vresref,
-			"IsCollection":  isarr,
-			"TargetType":    scope.GoFullTypeName(att, viewspkg),
-			"InitName":      "new" + viewScope.GoTypeName(projected),
-		}
-		buf := &bytes.Buffer{}
-		if err := initTypeCodeTmpl.Execute(buf, data); err != nil {
-			panic(err) // bug
-		}
-		name := "NewViewed" + resvar
-		init = &InitData{
-			Name:        name,
-			Description: fmt.Sprintf("%s initializes viewed result type %s from result type %s using the given view.", name, resvar, resvar),
-			Args: []*InitArgData{
-				{Name: "res", Ref: scope.GoTypeRef(att)},
-				{Name: "view", Ref: "string"},
-			},
-			ReturnTypeRef: vresref,
-			Code:          buf.String(),
-		}
-	}
-
-	// build constructor to initialize result type from viewed result type
-	var resinit *InitData
-	{
-		data := map[string]interface{}{
-			"ToResult":      true,
-			"ArgVar":        "vres",
-			"ReturnVar":     "res",
-			"Views":         views,
-			"ReturnTypeRef": resref,
-			"InitName":      "new" + scope.GoTypeName(att),
-		}
-		buf := &bytes.Buffer{}
-		if err := initTypeCodeTmpl.Execute(buf, data); err != nil {
-			panic(err) // bug
-		}
-		name := "New" + resvar
-		resinit = &InitData{
-			Name:          name,
-			Description:   fmt.Sprintf("%s initializes result type %s from viewed result type %s.", name, resvar, resvar),
-			Args:          []*InitArgData{{Name: "vres", Ref: scope.GoFullTypeRef(att, viewspkg)}},
-			ReturnTypeRef: resref,
-			Code:          buf.String(),
-		}
-	}
-
-	projT := wrapProjected(projected.Type.(expr.UserType))
-	return &ViewedResultTypeData{
-		UserTypeData: &UserTypeData{
-			Name:        resvar,
-			Description: fmt.Sprintf("%s is the viewed result type that is projected based on a view.", resvar),
-			VarName:     resvar,
-			Def:         viewScope.GoTypeDef(projT.Attribute(), false, true),
-			Ref:         resref,
-			Type:        projT,
-		},
-		FullName:     scope.GoFullTypeName(att, viewspkg),
-		FullRef:      vresref,
-		ResultInit:   resinit,
-		Init:         init,
-		Views:        views,
-		Validate:     validate,
-		IsCollection: isarr,
-		ViewName:     viewName,
-		ViewsPkg:     viewspkg,
-	}
-}
-
-// wrapProjected builds a viewed result type by wrapping the given projected
-// in a result type with "projected" and "view" attributes.
-func wrapProjected(projected expr.UserType) expr.UserType {
-	rt := projected.(*expr.ResultTypeExpr)
-	pratt := &expr.NamedAttributeExpr{
-		Name:      "projected",
-		Attribute: &expr.AttributeExpr{Type: rt, Description: "Type to project"},
-	}
-	prview := &expr.NamedAttributeExpr{
-		Name:      "view",
-		Attribute: &expr.AttributeExpr{Type: expr.String, Description: "View to render"},
-	}
-	return &expr.ResultTypeExpr{
-		UserTypeExpr: &expr.UserTypeExpr{
-			AttributeExpr: &expr.AttributeExpr{
-				Type:       &expr.Object{pratt, prview},
-				Validation: &expr.ValidationExpr{Required: []string{"projected", "view"}},
-			},
-			TypeName: rt.TypeName,
-		},
-		Identifier: rt.Identifier,
-		Views:      rt.Views,
-	}
-}
-
-// buildTypeInits builds the data to generate the constructor code to
-// initialize a result type from a projected type.
-func buildTypeInits(projected, att *expr.AttributeExpr, viewspkg string, scope, viewScope *codegen.NameScope) []*InitData {
-	prt := projected.Type.(*expr.ResultTypeExpr)
-	pobj := expr.AsObject(projected.Type)
-	parr := expr.AsArray(projected.Type)
-	if parr != nil {
-		// result type collection
-		pobj = expr.AsObject(parr.ElemType.Type)
-	}
-
-	// For every view defined in the result type, build a constructor function
-	// to create the result type from a projected type based on the view.
-	var init []*InitData
-	{
-		init = make([]*InitData, 0, len(prt.Views))
-		for _, view := range prt.Views {
-			var (
-				typ expr.DataType
-
-				obj = &expr.Object{}
-			)
-			{
-				walkViewAttrs(pobj, view, func(name string, att, _ *expr.AttributeExpr) {
-					obj.Set(name, att)
-				})
-				typ = obj
-				if parr != nil {
-					typ = &expr.Array{ElemType: &expr.AttributeExpr{
-						Type: &expr.ResultTypeExpr{
-							UserTypeExpr: &expr.UserTypeExpr{
-								AttributeExpr: &expr.AttributeExpr{Type: obj},
-								TypeName:      scope.GoTypeName(parr.ElemType),
-							},
-						},
-					}}
-				}
-			}
-			src := &expr.AttributeExpr{
-				Type: &expr.ResultTypeExpr{
-					UserTypeExpr: &expr.UserTypeExpr{
-						AttributeExpr: &expr.AttributeExpr{Type: typ},
-						TypeName:      scope.GoTypeName(projected),
-					},
-					Views:      prt.Views,
-					Identifier: prt.Identifier,
-				},
-			}
-
-			var (
-				name    string
-				code    string
-				helpers []*codegen.TransformFunctionData
-
-				srcCtx = projectedTypeContext(viewspkg, true, viewScope)
-				tgtCtx = typeContext("", scope)
-				resvar = scope.GoTypeName(att)
-			)
-			{
-				name = "new" + resvar
-				if view.Name != expr.DefaultView {
-					name += codegen.Goify(view.Name, true)
-				}
-				code, helpers = buildConstructorCode(src, att, "vres", "res", srcCtx, tgtCtx, view.Name)
-			}
-
-			init = append(init, &InitData{
-				Name:          name,
-				Description:   fmt.Sprintf("%s converts projected type %s to service type %s.", name, resvar, resvar),
-				Args:          []*InitArgData{{Name: "vres", Ref: viewScope.GoFullTypeRef(projected, viewspkg)}},
-				ReturnTypeRef: scope.GoTypeRef(att),
-				Code:          code,
-				Helpers:       helpers,
-			})
-		}
-	}
-	return init
-}
-
-// buildProjections builds the data to generate the constructor code to
-// project a result type to a projected type based on a view.
-func buildProjections(projected, att *expr.AttributeExpr, viewspkg string, scope, viewScope *codegen.NameScope) []*InitData {
-	var (
-		projections []*InitData
-
-		rt = att.Type.(*expr.ResultTypeExpr)
-	)
-
-	projections = make([]*InitData, 0, len(rt.Views))
-	for _, view := range rt.Views {
-		var (
-			typ expr.DataType
-
-			obj = &expr.Object{}
-		)
-		{
-			pobj := expr.AsObject(projected.Type)
-			parr := expr.AsArray(projected.Type)
-			if parr != nil {
-				// result type collection
-				pobj = expr.AsObject(parr.ElemType.Type)
-			}
-			walkViewAttrs(pobj, view, func(name string, att, _ *expr.AttributeExpr) {
-				obj.Set(name, att)
-			})
-			typ = obj
-			if parr != nil {
-				typ = &expr.Array{ElemType: &expr.AttributeExpr{
-					Type: &expr.ResultTypeExpr{
-						UserTypeExpr: &expr.UserTypeExpr{
-							AttributeExpr: &expr.AttributeExpr{Type: obj},
-							TypeName:      parr.ElemType.Type.Name(),
-						},
-					},
-				}}
-			}
-		}
-		tgt := &expr.AttributeExpr{
-			Type: &expr.ResultTypeExpr{
-				UserTypeExpr: &expr.UserTypeExpr{
-					AttributeExpr: &expr.AttributeExpr{Type: typ},
-					TypeName:      projected.Type.Name(),
-				},
-				Views:      rt.Views,
-				Identifier: rt.Identifier,
-			},
-		}
-
-		var (
-			name    string
-			code    string
-			helpers []*codegen.TransformFunctionData
-
-			srcCtx = typeContext("", scope)
-			tgtCtx = projectedTypeContext(viewspkg, true, viewScope)
-			tname  = scope.GoTypeName(projected)
-		)
-		{
-			name = "new" + tname
-			if view.Name != expr.DefaultView {
-				name += codegen.Goify(view.Name, true)
-			}
-			code, helpers = buildConstructorCode(att, tgt, "res", "vres", srcCtx, tgtCtx, view.Name)
-		}
-
-		projections = append(projections, &InitData{
-			Name:          name,
-			Description:   fmt.Sprintf("%s projects result type %s to projected type %s using the %q view.", name, scope.GoTypeName(att), tname, view.Name),
-			Args:          []*InitArgData{{Name: "res", Ref: scope.GoTypeRef(att)}},
-			ReturnTypeRef: viewScope.GoFullTypeRef(projected, viewspkg),
-			Code:          code,
-			Helpers:       helpers,
-		})
-	}
-	return projections
-}
-
-// buildValidationData builds the data required to generate validations for the
-// projected types.
-func buildValidations(projected *expr.AttributeExpr, scope *codegen.NameScope) []*ValidateData {
-	var (
-		validations []*ValidateData
-
-		ut    = projected.Type.(expr.UserType)
-		tname = scope.GoTypeName(projected)
-	)
-	if rt, isrt := ut.(*expr.ResultTypeExpr); isrt {
-		// for result types we create a validation function containing view
-		// specific validation logic for each view
-		arr := expr.AsArray(projected.Type)
-		for _, view := range rt.Views {
-			data := map[string]interface{}{
-				"Projected":    tname,
-				"ArgVar":       "result",
-				"Source":       "result",
-				"IsCollection": arr != nil,
-			}
-			var (
-				name string
-				vn   string
-			)
-			{
-				name = "Validate" + tname
-				if view.Name != "default" {
-					vn = codegen.Goify(view.Name, true)
-					name += vn
-				}
-			}
-
-			if arr != nil {
-				// dealing with an array type
-				data["Source"] = "item"
-				data["ValidateVar"] = "Validate" + scope.GoTypeName(arr.ElemType) + vn
-			} else {
-				var (
-					ctx    *codegen.AttributeContext
-					fields []map[string]interface{}
-
-					o = &expr.Object{}
-				)
-				{
-					walkViewAttrs(expr.AsObject(projected.Type), view, func(name string, attr, vatt *expr.AttributeExpr) {
-						if rt, ok := attr.Type.(*expr.ResultTypeExpr); ok {
-							// use explicitly specified view (if any) for the attribute,
-							// otherwise use default
-							vw := ""
-							if v, ok := vatt.Meta["view"]; ok && len(v) > 0 && v[0] != expr.DefaultView {
-								vw = v[0]
-							}
-							fields = append(fields, map[string]interface{}{
-								"Name":        name,
-								"ValidateVar": "Validate" + scope.GoTypeName(attr) + codegen.Goify(vw, true),
-								"IsRequired":  rt.Attribute().IsRequired(name),
-							})
-						} else {
-							o.Set(name, attr)
-						}
-					})
-					ctx = projectedTypeContext("", !expr.IsPrimitive(projected.Type), scope)
-				}
-				data["Validate"] = codegen.RecursiveValidationCode(&expr.AttributeExpr{Type: o, Validation: rt.Validation}, ctx, true, "result")
-				data["Fields"] = fields
-			}
-
-			buf := &bytes.Buffer{}
-			if err := validateTypeCodeTmpl.Execute(buf, data); err != nil {
-				panic(err) // bug
-			}
-
-			validations = append(validations, &ValidateData{
-				Name:        name,
-				Description: fmt.Sprintf("%s runs the validations defined on %s using the %q view.", name, tname, view.Name),
-				Ref:         scope.GoTypeRef(projected),
-				Validate:    buf.String(),
-			})
-		}
-	} else {
-		// for a user type or a result type with single view, we generate only one validation
-		// function containing the validation logic
-		name := "Validate" + tname
-		ctx := projectedTypeContext("", !expr.IsPrimitive(projected.Type), scope)
-		validations = append(validations, &ValidateData{
-			Name:        name,
-			Description: fmt.Sprintf("%s runs the validations defined on %s.", name, tname),
-			Ref:         scope.GoTypeRef(projected),
-			Validate:    codegen.RecursiveValidationCode(ut.Attribute(), ctx, true, "result"),
-		})
-	}
-	return validations
-}
-
-// buildConstructorCode builds the transformation code to create a projected
-// type from a service type and vice versa.
-//
-// source and target contains the projected/service contextual attributes
-//
-// sourceVar and targetVar contains the variable name that holds the source and
-// target data structures in the transformation code.
-//
-// view is used to generate the constructor function name.
-//
-func buildConstructorCode(src, tgt *expr.AttributeExpr, sourceVar, targetVar string, sourceCtx, targetCtx *codegen.AttributeContext, view string) (string, []*codegen.TransformFunctionData) {
-	var (
-		helpers []*codegen.TransformFunctionData
-		buf     bytes.Buffer
-	)
-	rt := src.Type.(*expr.ResultTypeExpr)
-	arr := expr.AsArray(tgt.Type)
-
-	data := map[string]interface{}{
-		"ArgVar":       sourceVar,
-		"ReturnVar":    targetVar,
-		"IsCollection": arr != nil,
-		"TargetType":   targetCtx.Scope.Name(tgt, targetCtx.Pkg, targetCtx.Pointer, targetCtx.UseDefault),
-	}
-
-	if arr != nil {
-		// result type collection
-		init := "new" + targetCtx.Scope.Name(arr.ElemType, "", targetCtx.Pointer, targetCtx.UseDefault)
-		if view != "" && view != expr.DefaultView {
-			init += codegen.Goify(view, true)
-		}
-		data["InitName"] = init
-		if err := initTypeCodeTmpl.Execute(&buf, data); err != nil {
-			panic(err) // bug
-		}
-		return buf.String(), helpers
-	}
-
-	// service type to projected type (or vice versa)
-	targetRTs := &expr.Object{}
-	tatt := expr.DupAtt(tgt)
-	tobj := expr.AsObject(tatt.Type)
-	for _, nat := range *tobj {
-		if _, ok := nat.Attribute.Type.(*expr.ResultTypeExpr); ok {
-			targetRTs.Set(nat.Name, nat.Attribute)
-			tobj.Delete(nat.Name)
-		}
-	}
-	data["Source"] = sourceVar
-	data["Target"] = targetVar
-
-	var (
-		code string
-		err  error
-	)
-	{
-		// build code for target with no result types
-		if code, helpers, err = codegen.GoTransform(src, tatt, sourceVar, targetVar, sourceCtx, targetCtx, "transform", true); err != nil {
-			panic(err) // bug
-		}
-	}
-	data["Code"] = code
-
-	if view != "" {
-		data["InitName"] = targetCtx.Scope.Name(src, "", targetCtx.Pointer, targetCtx.UseDefault)
-	}
-	fields := make([]map[string]interface{}, 0, len(*targetRTs))
-	// iterate through the result types found in the target and add the
-	// code to initialize them
-	for _, nat := range *targetRTs {
-		finit := "new" + targetCtx.Scope.Name(nat.Attribute, "", targetCtx.Pointer, targetCtx.UseDefault)
-		if view != "" {
-			v := ""
-			if vatt := rt.View(view).AttributeExpr.Find(nat.Name); vatt != nil {
-				if attv, ok := vatt.Meta["view"]; ok && len(attv) > 0 && attv[0] != expr.DefaultView {
-					// view is explicitly set for the result type on the attribute
-					v = attv[0]
-				}
-			}
-			finit += codegen.Goify(v, true)
-		}
-		fields = append(fields, map[string]interface{}{
-			"VarName":   codegen.Goify(nat.Name, true),
-			"FieldInit": finit,
-		})
-	}
-	data["Fields"] = fields
-
-	if err := initTypeCodeTmpl.Execute(&buf, data); err != nil {
-		panic(err) // bug
-	}
-	return buf.String(), helpers
-}
-
-// walkViewAttrs iterates through the attributes in att that are found in the
-// given view and executes the walker function.
-func walkViewAttrs(obj *expr.Object, view *expr.ViewExpr, walker func(name string, attr, vatt *expr.AttributeExpr)) {
-	for _, nat := range *expr.AsObject(view.Type) {
-		if attr := obj.Attribute(nat.Name); attr != nil {
-			walker(nat.Name, attr, nat.Attribute)
-		}
-	}
-}
-
-const (
-	initTypeCodeT = `{{ if or .ToResult .ToViewed }}
-	{{- if eq (len .Views) 1 }}
-		{{- with (index .Views 0) }}
-			{{- if $.ToViewed -}}
-	p := {{ $.InitName }}{{ if ne .Name "default" }}{{ goify .Name true }}{{ end }}({{ $.ArgVar }})
-	return {{ if not $.IsCollection }}&{{ end }}{{ $.TargetType }}{Projected: p, View: {{ printf "%q" .Name }} }
- 			{{- else -}}
-			return {{ $.InitName }}{{ if ne .Name "default" }}{{ goify .Name true }}{{ end }}({{ $.ArgVar }}.Projected)
-			{{- end }}
-		{{- end }}
-	{{- else -}}
-	var {{ .ReturnVar }} {{ .ReturnTypeRef }}
-	switch {{ if .ToResult }}{{ .ArgVar }}.View{{ else }}view{{ end }} {
-		{{- range .Views }}
-		case {{ printf "%q" .Name }}{{ if eq .Name "default" }}, ""{{ end }}:
-			{{- if $.ToViewed }}
-				p := {{ $.InitName }}{{ if ne .Name "default" }}{{ goify .Name true }}{{ end }}({{ $.ArgVar }})
-				{{ $.ReturnVar }} = {{ if not $.IsCollection }}&{{ end }}{{ $.TargetType }}{Projected: p, View: {{ printf "%q" .Name }} }
-			{{- else }}
-				{{ $.ReturnVar }} = {{ $.InitName }}{{ if ne .Name "default" }}{{ goify .Name true }}{{ end }}({{ $.ArgVar }}.Projected)
-			{{- end }}
-		{{- end }}
-	}
-	return {{ .ReturnVar }}
-	{{- end }}
-{{- else if .IsCollection -}}
-	{{ .ReturnVar }} := make({{ .TargetType }}, len({{ .ArgVar }}))
-	for i, n := range {{ .ArgVar }} {
-		{{ .ReturnVar }}[i] = {{ .InitName }}(n)
-	}
-	return {{ .ReturnVar }}
-{{- else -}}
-	{{ .Code }}
-	{{- range .Fields }}
-		if {{ $.Source }}.{{ .VarName }} != nil {
-			{{ $.Target }}.{{ .VarName }} = {{ .FieldInit }}({{ $.Source }}.{{ .VarName }})
-		}
-	{{- end }}
-	return {{ .ReturnVar }}
-{{- end }}`
-
-	validateTypeT = `{{- if .IsViewed -}}
-switch {{ .ArgVar }}.View {
-	{{- range .Views }}
-case {{ printf "%q" .Name }}{{ if eq .Name "default" }}, ""{{ end }}:
-	err = Validate{{ $.Projected }}{{ if ne .Name "default" }}{{ goify .Name true }}{{ end }}({{ $.ArgVar }}.Projected)
-	{{- end }}
-default:
-	err = goa.InvalidEnumValueError("view", {{ .Source }}.View, []interface{}{ {{ range .Views }}{{ printf "%q" .Name }}, {{ end }} })
-}
-{{- else -}}
-	{{- if .IsCollection -}}
-for _, {{ $.Source }} := range {{ $.ArgVar }} {
-	if err2 := {{ .ValidateVar }}({{ $.Source }}); err2 != nil {
-		err = goa.MergeErrors(err, err2)
-	}
-}
-	{{- else -}}
-	{{ .Validate }}
-		{{- range .Fields -}}
-			{{- if .IsRequired -}}
-if {{ $.Source }}.{{ goify .Name true }} == nil {
-	err = goa.MergeErrors(err, goa.MissingFieldError({{ printf "%q" .Name }}, {{ printf "%q" $.Source }}))
-}
-			{{- end }}
-if {{ $.Source }}.{{ goify .Name true }} != nil {
-	if err2 := {{ .ValidateVar }}({{ $.Source }}.{{ goify .Name true }}); err2 != nil {
-		err = goa.MergeErrors(err, err2)
-	}
-}
-		{{- end -}}
-	{{- end -}}
-{{- end -}}
-`
-)

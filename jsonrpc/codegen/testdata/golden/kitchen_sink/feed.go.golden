@@ -1,0 +1,29 @@
+package kitchensink
+
+import (
+	"context"
+
+	feed "generated.local/gen/feed"
+	"goa.design/clue/log"
+)
+
+// Feed service example implementation.
+// The example methods log the requests and return zero values.
+type feedsrvc struct{}
+
+// NewFeed returns the Feed service implementation.
+func NewFeed() feed.Service {
+	return &feedsrvc{}
+}
+
+// Watch implements watch.
+func (s *feedsrvc) Watch(ctx context.Context, p *feed.WatchPayload, stream feed.WatchServerStream) (err error) {
+	log.Printf(ctx, "feed.watch")
+	return
+}
+
+// Snapshot implements snapshot.
+func (s *feedsrvc) Snapshot(ctx context.Context, p *feed.SnapshotPayload) (res string, err error) {
+	log.Printf(ctx, "feed.snapshot")
+	return
+}

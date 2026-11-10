@@ -1,0 +1,15 @@
+// BuildMethodPathCustomNamePayload builds the payload for the
+// ServicePathCustomName MethodPathCustomName endpoint from CLI flags.
+func BuildMethodPathCustomNamePayload(servicePathCustomNameMethodPathCustomNameP *string) (*servicepathcustomname.MethodPathCustomNamePayload, error) {
+	var p string
+	{
+		if servicePathCustomNameMethodPathCustomNameP == nil {
+			return nil, fmt.Errorf("missing required flag --p")
+		}
+		p = *servicePathCustomNameMethodPathCustomNameP
+	}
+	v := &servicepathcustomname.MethodPathCustomNamePayload{}
+	v.Path = p
+
+	return v, nil
+}

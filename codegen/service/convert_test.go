@@ -1,16 +1,25 @@
+// This file verifies service conversion paths, generated helper declarations,
+// and the exact package names used by both definitions and references.
 package service
 
 import (
 	"go/build"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	"goa.design/goa/v3/codegen"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"goa.design/goa/v3/codegen/service/testdata"
+	aliasd "goa.design/goa/v3/codegen/service/testdata/alias-external"
+	"goa.design/goa/v3/codegen/service/testdata/external"
+	accessibility "goa.design/goa/v3/codegen/service/testdata/external-accessibility"
+	externalunion "goa.design/goa/v3/codegen/service/testdata/external-union"
 	"goa.design/goa/v3/dsl"
-	"goa.design/goa/v3/eval"
 	"goa.design/goa/v3/expr"
 )
 
@@ -52,9 +61,7 @@ func TestCommonPath(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			cp := commonPath('/', tc.Paths...)
-			if cp != tc.ExpectedCommonPath {
-				t.Errorf("got %s expected %s", cp, tc.ExpectedCommonPath)
-			}
+			assert.Equal(t, tc.ExpectedCommonPath, cp)
 		})
 	}
 }
@@ -81,9 +88,7 @@ func TestPkgImport(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			pkgImport := getPkgImport(tc.Pkg, tc.Cwd)
-			if pkgImport != tc.ExpectedImport {
-				t.Errorf("got %s, expected %s", pkgImport, tc.ExpectedImport)
-			}
+			assert.Equal(t, tc.ExpectedImport, pkgImport)
 		})
 	}
 }
@@ -92,7 +97,7 @@ func TestDesignType(t *testing.T) {
 	var f bool
 	cases := []struct {
 		Name         string
-		From         interface{}
+		From         any
 		ExpectedType expr.DataType
 		ExpectedErr  string
 	}{
@@ -123,35 +128,37 @@ func TestDesignType(t *testing.T) {
 			var dt expr.DataType
 			err := buildDesignType(&dt, reflect.TypeOf(c.From), nil)
 
-			// We didn't expect an error
 			if c.ExpectedErr == "" {
-				if err != nil {
-					// but got one
-					t.Errorf("got error %s, expected none", err)
-				} else if !expr.Equal(dt, c.ExpectedType) {
-					t.Errorf("got %v expected %v", dt, c.ExpectedType)
-				}
+				assert.NoError(t, err)
+				assert.Equal(t, c.ExpectedType, dt)
 			}
 
-			// We expected an error
 			if c.ExpectedErr != "" {
-				if err == nil {
-					// but got none
-					t.Errorf("got no error, expected %q", c.ExpectedErr)
-				} else {
-					if err.Error() != c.ExpectedErr {
-						t.Errorf("got error %q, expected %q", err, c.ExpectedErr)
-					}
-				}
+				assert.Error(t, err)
+				assert.Equal(t, c.ExpectedErr, err.Error())
 			}
 		})
 	}
 }
 func TestCompatible(t *testing.T) {
+	named := func(name string, underlying expr.DataType) expr.DataType {
+		return &expr.UserTypeExpr{
+			AttributeExpr: &expr.AttributeExpr{Type: underlying},
+			TypeName:      name,
+			UID:           name,
+		}
+	}
+	namedString := named("NamedString", expr.String)
+	nestedString := named("NestedString", namedString)
+	namedBytes := named("NamedBytes", expr.Bytes)
+	namedInt32 := named("NamedInt32", expr.Int32)
+	namedUInt32 := named("NamedUInt32", expr.UInt32)
+	namedFloat32 := named("NamedFloat32", expr.Float32)
+
 	cases := []struct {
 		Name        string
 		From        expr.DataType
-		To          interface{}
+		To          any
 		ExpectedErr string
 	}{
 		{"bool", expr.Boolean, false, ""},
@@ -167,13 +174,29 @@ func TestCompatible(t *testing.T) {
 		{"bytes", expr.Bytes, []byte{}, ""},
 		{"array", dsl.ArrayOf(expr.String), []string{}, ""},
 		{"map", dsl.MapOf(expr.String, expr.String), map[string]string{}, ""},
-		{"map-interface", dsl.MapOf(expr.String, expr.Any), map[string]interface{}{}, ""},
+		{"map-interface", dsl.MapOf(expr.String, expr.Any), map[string]any{}, ""},
 		{"object", obj, objT{}, ""},
 		{"object-mapped", objMapped, objT{}, ""},
 		{"object-ignored", objIgnored, objT{}, ""},
 		{"object-extra", objIgnored, objExtraT{}, ""},
 		{"object-recursive", objRecursive(), objRecursiveT{}, ""},
 		{"array-object", dsl.ArrayOf(obj), []objT{{}}, ""},
+
+		{"string-to-named", expr.String, externalunion.Text_Value(""), ""},
+		{"named-string-to-plain", namedString, "", ""},
+		{"named-string-to-named", namedString, externalunion.Text_Value(""), ""},
+		{"nested-string-to-plain", nestedString, "", ""},
+		{"nested-string-to-named", nestedString, externalunion.Text_Value(""), ""},
+		{"bytes-to-named", expr.Bytes, externalunion.Byte_Data{}, ""},
+		{"named-bytes-to-plain", namedBytes, []byte{}, ""},
+		{"named-bytes-to-named", namedBytes, externalunion.Byte_Data{}, ""},
+		{"named-int32", namedInt32, int32(0), ""},
+		{"named-uint32", namedUInt32, uint32(0), ""},
+		{"named-float32", namedFloat32, float32(0), ""},
+		{"array-named-element", dsl.ArrayOf(expr.String), externalunion.Text_List{}, ""},
+		{"named-array-element", dsl.ArrayOf(nestedString), externalunion.Text_List{}, ""},
+		{"map-named-key-element", dsl.MapOf(expr.String, dsl.ArrayOf(expr.String)), externalunion.Text_Table{}, ""},
+		{"named-map-key-element", dsl.MapOf(nestedString, dsl.ArrayOf(namedString)), externalunion.Text_Table{}, ""},
 
 		{"invalid-primitive", expr.String, 0, "types don't match: type of <value> is int but type of corresponding attribute is string"},
 		{"invalid-int", expr.Int, 0.0, "types don't match: type of <value> is float64 but type of corresponding attribute is int"},
@@ -187,145 +210,55 @@ func TestCompatible(t *testing.T) {
 		{"invalid-obj-4", obj, objT4{}, "types don't match: type of <value>.Goo2 is float32 but type of corresponding attribute is uint"},
 		{"invalid-obj-5", obj, objT5{}, "types don't match: could not find field \"Baz\" of external type \"objT5\" matching attribute \"Baz\" of type \"objT\""},
 		{"invalid-array-object", dsl.ArrayOf(obj), []objT2{{}}, "types don't match: type of <value>[0].Bar is string but type of corresponding attribute is int"},
+		{"invalid-named-string-kind", namedString, 0, "types don't match: type of <value> is int but type of corresponding attribute is NamedString"},
+		{"invalid-named-int32-width", namedInt32, int64(0), "types don't match: type of <value> is int64 but type of corresponding attribute is NamedInt32"},
+		{"invalid-named-uint32-signedness", namedUInt32, int32(0), "types don't match: type of <value> is int32 but type of corresponding attribute is NamedUInt32"},
+		{"invalid-named-float32-width", namedFloat32, float64(0), "types don't match: type of <value> is float64 but type of corresponding attribute is NamedFloat32"},
+		{"invalid-string-to-named-bytes", expr.String, externalunion.Byte_Data{}, "types don't match: type of <value> is Byte_Data but type of corresponding attribute is string"},
+		{"invalid-bytes-to-named-string", expr.Bytes, externalunion.Text_Value(""), "types don't match: type of <value> is Text_Value but type of corresponding attribute is bytes"},
+		{"invalid-any-to-named-string", expr.Any, externalunion.Text_Value(""), "types don't match: type of <value> is Text_Value but type of corresponding attribute is any"},
+		{"invalid-named-map-key", dsl.MapOf(namedInt32, dsl.ArrayOf(expr.String)), externalunion.Text_Table{}, "types don't match: type of <value>.key is Text_Value but type of corresponding attribute is NamedInt32"},
+		{"invalid-named-array-element", dsl.ArrayOf(namedInt32), externalunion.Text_List{}, "types don't match: type of <value>[0] is Text_Value but type of corresponding attribute is NamedInt32"},
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
 			err := compatible(c.From, reflect.TypeOf(c.To))
-			if err == nil {
-				if c.ExpectedErr != "" {
-					t.Errorf("got no error, expected %q", c.ExpectedErr)
-				}
-			} else {
-				if c.ExpectedErr == "" {
-					t.Errorf("got error %q, expected none", err)
-				} else {
-					if err.Error() != c.ExpectedErr {
-						t.Errorf("got error %q, expected %q", err, c.ExpectedErr)
-					}
-				}
+			if c.ExpectedErr == "" {
+				assert.NoError(t, err)
+			}
+			if c.ExpectedErr != "" {
+				assert.Error(t, err)
+				assert.Equal(t, c.ExpectedErr, err.Error())
 			}
 		})
 	}
-}
-
-func TestConvertFile(t *testing.T) {
-	cases := []struct {
-		Name         string
-		DSL          func()
-		SectionIndex int
-		Code         string
-	}{
-		{"convert-string", testdata.ConvertStringDSL, 1, testdata.ConvertStringCode},
-		{"convert-string-required", testdata.ConvertStringRequiredDSL, 1, testdata.ConvertStringRequiredCode},
-		{"convert-string-pointer", testdata.ConvertStringPointerDSL, 1, testdata.ConvertStringPointerCode},
-		{"convert-string-pointer-required", testdata.ConvertStringPointerRequiredDSL, 1, testdata.ConvertStringPointerRequiredCode},
-		{"create-string", testdata.CreateStringDSL, 1, testdata.CreateStringCode},
-		{"create-string-required", testdata.CreateStringRequiredDSL, 1, testdata.CreateStringRequiredCode},
-		{"create-string-pointer", testdata.CreateStringPointerDSL, 1, testdata.CreateStringPointerCode},
-		{"create-string-pointer-required", testdata.CreateStringPointerRequiredDSL, 1, testdata.CreateStringPointerRequiredCode},
-
-		{"convert-external-name", testdata.ConvertExternalNameDSL, 1, testdata.ConvertExternalNameCode},
-		{"convert-external-name-required", testdata.ConvertExternalNameRequiredDSL, 1, testdata.ConvertExternalNameRequiredCode},
-		{"convert-external-name-pointer", testdata.ConvertExternalNamePointerDSL, 1, testdata.ConvertExternalNamePointerCode},
-		{"convert-external-name-pointer-required", testdata.ConvertExternalNamePointerRequiredDSL, 1, testdata.ConvertExternalNamePointerRequiredCode},
-		{"create-external-name", testdata.CreateExternalNameDSL, 1, testdata.CreateExternalNameCode},
-		{"create-external-name-required", testdata.CreateExternalNameRequiredDSL, 1, testdata.CreateExternalNameRequiredCode},
-		{"create-external-name-pointer", testdata.CreateExternalNamePointerDSL, 1, testdata.CreateExternalNamePointerCode},
-		{"create-external-name-pointer-required", testdata.CreateExternalNamePointerRequiredDSL, 1, testdata.CreateExternalNamePointerRequiredCode},
-
-		{"convert-array-string", testdata.ConvertArrayStringDSL, 1, testdata.ConvertArrayStringCode},
-		{"convert-array-string-required", testdata.ConvertArrayStringRequiredDSL, 1, testdata.ConvertArrayStringRequiredCode},
-		{"create-array-string", testdata.CreateArrayStringDSL, 1, testdata.CreateArrayStringCode},
-		{"create-array-string-required", testdata.CreateArrayStringRequiredDSL, 1, testdata.CreateArrayStringRequiredCode},
-		{"convert-object", testdata.ConvertObjectDSL, 1, testdata.ConvertObjectCode},
-		{"convert-object-2", testdata.ConvertObjectDSL, 2, testdata.ConvertObjectHelperCode},
-		{"convert-object-required", testdata.ConvertObjectRequiredDSL, 2, testdata.ConvertObjectRequiredHelperCode},
-		{"convert-object-2-required", testdata.ConvertObjectRequiredDSL, 1, testdata.ConvertObjectRequiredCode},
-		{"create-object", testdata.CreateObjectDSL, 1, testdata.CreateObjectCode},
-		{"create-object-required", testdata.CreateObjectRequiredDSL, 1, testdata.CreateObjectRequiredCode},
-		{"create-object-extra", testdata.CreateObjectExtraDSL, 1, testdata.CreateObjectExtraCode},
-		{"create-external-convert", testdata.CreateExternalDSL, 0, testdata.CreateExternalConvert},
-		{"create-alias-convert", testdata.CreateAliasDSL, 0, testdata.CreateAliasConvert},
-		{"mixed-case-convert", testdata.MixedCaseDSL, 0, testdata.MixedCaseConvert},
-	}
-	for _, c := range cases {
-		t.Run(c.Name, func(t *testing.T) {
-			root := runDSL(t, c.DSL)
-			for _, svc := range root.Services {
-				f, err := ConvertFile(root, svc)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if f == nil {
-					t.Fatal("no file produced")
-				}
-				sections := f.SectionTemplates
-				if len(sections) <= c.SectionIndex {
-					t.Fatalf("got %d sections, expected at least %d", len(sections), c.SectionIndex+1)
-				}
-
-				var code string
-
-				if c.SectionIndex == 0 {
-					methodSection := sections[1]
-					code = codegen.SectionCodeFromImportsAndMethods(t, sections[c.SectionIndex], methodSection)
-				} else {
-					code = codegen.SectionCode(t, sections[c.SectionIndex])
-				}
-
-				if code != c.Code {
-					t.Errorf("invalid code, got:\n%s\ngot vs. expected:\n%s", code, codegen.Diff(t, code, c.Code))
-				}
-			}
-		})
-	}
-}
-
-// runDSL returns the DSL root resulting from running the given DSL.
-func runDSL(t *testing.T, dsl func()) *expr.RootExpr {
-	// reset all roots and codegen data structures
-	Services = make(ServicesData)
-	eval.Reset()
-	expr.Root = new(expr.RootExpr)
-	eval.Register(expr.Root)
-	expr.Root.API = expr.NewAPIExpr("test api", func() {})
-	expr.Root.API.Servers = []*expr.ServerExpr{expr.Root.API.DefaultServer()}
-
-	// run DSL (first pass)
-	if !eval.Execute(dsl, nil) {
-		t.Fatal(eval.Context.Error())
-	}
-
-	// run DSL (second pass)
-	if err := eval.RunDSL(); err != nil {
-		t.Fatal(err)
-	}
-
-	// return generated root
-	return expr.Root
 }
 
 // Test fixtures
-
 var obj = &expr.UserTypeExpr{
 	AttributeExpr: &expr.AttributeExpr{
 		Type: &expr.Object{
-			{"Foo", &expr.AttributeExpr{Type: expr.String}},
-			{"Bar", &expr.AttributeExpr{Type: expr.Int}},
-			{"Baz", &expr.AttributeExpr{Type: expr.Boolean}},
-			{"Goo", &expr.AttributeExpr{Type: expr.Float32}},
-			{"Goo2", &expr.AttributeExpr{Type: expr.UInt}},
+			{Name: "Foo", Attribute: &expr.AttributeExpr{Type: expr.String}},
+			{Name: "Bar", Attribute: &expr.AttributeExpr{Type: expr.Int}},
+			{Name: "Baz", Attribute: &expr.AttributeExpr{Type: expr.Boolean}},
+			{Name: "Goo", Attribute: &expr.AttributeExpr{Type: expr.Float32}},
+			{Name: "Goo2", Attribute: &expr.AttributeExpr{Type: expr.UInt}},
+		},
+		Validation: &expr.ValidationExpr{
+			Required: []string{"Foo", "Bar", "Baz", "Goo", "Goo2"},
 		},
 	},
 	TypeName: "objT",
+	UID:      "goa.design/goa/v3/codegen/service#objT",
 }
 
 var objMapped = &expr.UserTypeExpr{
 	AttributeExpr: &expr.AttributeExpr{
 		Type: &expr.Object{
-			{"Foo", &expr.AttributeExpr{Type: expr.String}},
-			{"Bar", &expr.AttributeExpr{Type: expr.Int}},
-			{"mapped", &expr.AttributeExpr{Type: expr.Boolean, Meta: expr.MetaExpr{"struct.field.external": []string{"Baz"}}}},
+			{Name: "Foo", Attribute: &expr.AttributeExpr{Type: expr.String}},
+			{Name: "Bar", Attribute: &expr.AttributeExpr{Type: expr.Int}},
+			{Name: "mapped", Attribute: &expr.AttributeExpr{Type: expr.Boolean, Meta: expr.MetaExpr{"struct:field:external": []string{"Baz"}}}},
+			{Name: "mapped (deprecated syntax)", Attribute: &expr.AttributeExpr{Type: expr.Boolean, Meta: expr.MetaExpr{"struct.field.external": []string{"Baz"}}}},
 		},
 	},
 	TypeName: "objT",
@@ -334,9 +267,10 @@ var objMapped = &expr.UserTypeExpr{
 var objIgnored = &expr.UserTypeExpr{
 	AttributeExpr: &expr.AttributeExpr{
 		Type: &expr.Object{
-			{"Foo", &expr.AttributeExpr{Type: expr.String}},
-			{"Bar", &expr.AttributeExpr{Type: expr.Int}},
-			{"ignored", &expr.AttributeExpr{Type: expr.Boolean, Meta: expr.MetaExpr{"struct.field.external": []string{"-"}}}},
+			{Name: "Foo", Attribute: &expr.AttributeExpr{Type: expr.String}},
+			{Name: "Bar", Attribute: &expr.AttributeExpr{Type: expr.Int}},
+			{Name: "ignored", Attribute: &expr.AttributeExpr{Type: expr.Boolean, Meta: expr.MetaExpr{"struct:field:external": []string{"-"}}}},
+			{Name: "ignored (deprecated syntax)", Attribute: &expr.AttributeExpr{Type: expr.Boolean, Meta: expr.MetaExpr{"struct.field.external": []string{"-"}}}},
 		},
 	},
 	TypeName: "objT",
@@ -346,13 +280,13 @@ func objRecursive() *expr.UserTypeExpr {
 	res := &expr.UserTypeExpr{
 		AttributeExpr: &expr.AttributeExpr{
 			Type: &expr.Object{
-				{"Foo", &expr.AttributeExpr{Type: expr.String}},
-				{"Bar", &expr.AttributeExpr{Type: expr.Int}},
+				{Name: "Foo", Attribute: &expr.AttributeExpr{Type: expr.String}},
+				{Name: "Bar", Attribute: &expr.AttributeExpr{Type: expr.Int}},
 			},
 		},
 		TypeName: "objRecursiveT",
 	}
-	obj := res.AttributeExpr.Type.(*expr.Object)
+	obj := res.Type.(*expr.Object)
 	*obj = append(*obj, &expr.NamedAttributeExpr{
 		Name:      "Rec",
 		Attribute: &expr.AttributeExpr{Type: res}})
@@ -413,4 +347,188 @@ type objT5 struct {
 	Bar  int
 	Goo  float32
 	Goo2 uint
+}
+
+func TestConvertFiles(t *testing.T) {
+	cases := []struct {
+		Name          string
+		DSL           func()
+		ExpectedFiles map[string]int // path -> number of sections
+	}{
+		{
+			"multi-package-conversions",
+			testdata.ConvertMultiPkgDSL,
+			map[string]int{
+				"gen/types/convert.go":  3, // header + convert-to + create-from sections
+				"gen/models/convert.go": 3, // header + convert-to + create-from sections
+			},
+		},
+		{
+			"noncanonical-location-uses-owned-package",
+			func() {
+				filter := dsl.Type("FilterConfig", func() {
+					dsl.Meta("struct:pkg:path", "domain/../types")
+					dsl.CreateFrom(testdata.TestFilterConfig{})
+					dsl.ConvertTo(testdata.TestFilterConfig{})
+					dsl.Attribute("name", dsl.String)
+					dsl.Attribute("enabled", dsl.Boolean)
+					dsl.Attribute("value", dsl.Int)
+					dsl.Required("name", "enabled", "value")
+				})
+				dsl.Service("Values", func() {
+					dsl.Method("Read", func() { dsl.Payload(filter) })
+				})
+			},
+			map[string]int{
+				"gen/types/convert.go": 3,
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			root := runDSL(t, c.DSL)
+			plan := mustServicePlan(t, root)
+			retained, err := externalConversionFiles([]*Plan{plan})
+			require.NoError(t, err)
+			files := convertFiles(retained)
+
+			// Check expected number of files
+			require.Equal(t, len(c.ExpectedFiles), len(files))
+
+			// Verify each expected file
+			for expectedPath, expectedSections := range c.ExpectedFiles {
+				found := false
+				// Normalize expected path for cross-platform compatibility
+				normalizedExpected := filepath.FromSlash(expectedPath)
+				for _, file := range files {
+					if strings.HasSuffix(file.Path, normalizedExpected) {
+						found = true
+						require.Equal(t, expectedSections, len(file.SectionTemplates))
+						// First section should be header
+						require.Equal(t, "source-header", file.SectionTemplates[0].Name)
+						break
+					}
+				}
+				require.True(t, found, "Expected file %s not found", expectedPath)
+			}
+		})
+	}
+}
+
+// TestConversionPlanSharesHelperDeclarations proves recursive call edges and
+// emitted helper definitions use the same package declaration retained by the
+// external conversion operation.
+func TestConversionPlanSharesHelperDeclarations(t *testing.T) {
+	root := runDSL(t, func() {
+		recursive := dsl.Type("Recursive", func() {
+			dsl.ConvertTo(accessibility.Recursive{})
+			dsl.CreateFrom(accessibility.Recursive{})
+			dsl.Attribute("Foo", dsl.String)
+			dsl.Attribute("Bar", dsl.Int)
+			dsl.Attribute("Goo", dsl.Float32)
+			dsl.Attribute("Goo2", dsl.UInt)
+			dsl.Attribute("Rec", "Recursive")
+			dsl.Required("Foo", "Bar", "Goo", "Goo2")
+		})
+		dsl.Service("RecursiveService", func() {
+			dsl.Method("Read", func() {
+				dsl.Payload(recursive)
+			})
+		})
+	})
+	plan := mustServicePlan(t, root)
+	files := plan.facts.externalConversions
+	require.Len(t, files, 1)
+	require.Len(t, files[0].operations, 2)
+	for _, operation := range files[0].operations {
+		planned := operation.plan.Helpers()
+		require.NotEmpty(t, planned)
+		require.Len(t, operation.helpers, len(planned))
+		for index := range planned {
+			require.Equal(t, planned[index].ID, operation.helpers[index].ID)
+			require.Same(t, planned[index].Declaration, operation.helpers[index].Declaration)
+		}
+	}
+}
+
+// TestExternalConversionSharesSiblingHelper checks that one external type
+// conversion uses the same strict function for required and optional fields.
+func TestExternalConversionSharesSiblingHelper(t *testing.T) {
+	root := runDSL(t, func() {
+		sibling := dsl.Type("ExternalSibling", func() {
+			dsl.ConvertTo(accessibility.Sibling{})
+			dsl.Attribute("Label", dsl.String)
+			dsl.Attribute("Left", "ExternalSibling")
+			dsl.Attribute("Right", "ExternalSibling")
+			dsl.Required("Label", "Left")
+		})
+		dsl.Service("SiblingService", func() {
+			dsl.Method("Read", func() {
+				dsl.Payload(sibling)
+			})
+		})
+	})
+	plan := mustServicePlan(t, root)
+	files := plan.facts.externalConversions
+	require.Len(t, files, 1)
+	require.Len(t, files[0].operations, 1)
+	operation := files[0].operations[0]
+	planned := operation.plan.Helpers()
+	require.Len(t, planned, 2)
+	require.True(t, planned[0].Required)
+	require.False(t, planned[1].Required)
+	require.Same(t, planned[0].Declaration, planned[1].Declaration)
+	require.Len(t, operation.helpers, 1)
+	require.NotContains(t, operation.helpers[0].Code, "if v == nil")
+	require.Contains(t, operation.data.Code, "v.Left = "+planned[0].Declaration.Name()+"(t.Left)")
+	require.Contains(t, operation.data.Code, "if t.Right != nil {")
+	require.Contains(t, operation.data.Code, "v.Right = "+planned[0].Declaration.Name()+"(t.Right)")
+}
+
+// TestConversionMethodNamesUseReceiverNamespaces verifies different receiver
+// types may use the same method spelling while collisions on one receiver are
+// resolved in stable external-package order.
+func TestConversionMethodNamesUseReceiverNamespaces(t *testing.T) {
+	root := runDSL(t, func() {
+		foo := dsl.Type("Foo", func() {
+			dsl.ConvertTo(external.ConvertModel{})
+			dsl.Attribute("Foo", dsl.String)
+		})
+		bar := dsl.Type("Bar", func() {
+			dsl.ConvertTo(aliasd.ConvertModel{})
+			dsl.Attribute("Bar", dsl.String)
+		})
+		empty := dsl.Type("Empty", func() {
+			dsl.ConvertTo(external.ConvertModel{})
+			dsl.ConvertTo(aliasd.ConvertModel{})
+		})
+		dsl.Service("Values", func() {
+			for _, method := range []struct {
+				name    string
+				payload expr.UserType
+			}{
+				{"Foo", foo},
+				{"Bar", bar},
+				{"Empty", empty},
+			} {
+				dsl.Method(method.name, func() {
+					dsl.Payload(method.payload)
+				})
+			}
+		})
+	})
+	plan := mustServicePlan(t, root)
+	var operations []*externalConversionFacts
+	for _, file := range plan.facts.externalConversions {
+		operations = append(operations, file.operations...)
+	}
+	names := make(map[string]string)
+	for _, operation := range operations {
+		names[operation.receiverType.Name()+":"+operation.externalPath] = operation.methodName
+	}
+	require.Equal(t, "ConvertToConvertModel", names["Foo:goa.design/goa/v3/codegen/service/testdata/external"])
+	require.Equal(t, "ConvertToConvertModel", names["Bar:goa.design/goa/v3/codegen/service/testdata/alias-external"])
+	require.Equal(t, "ConvertToConvertModel", names["Empty:goa.design/goa/v3/codegen/service/testdata/alias-external"])
+	require.Equal(t, "ConvertToConvertModel2", names["Empty:goa.design/goa/v3/codegen/service/testdata/external"])
 }

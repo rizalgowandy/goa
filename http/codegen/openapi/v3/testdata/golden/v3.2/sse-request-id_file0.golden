@@ -1,0 +1,63 @@
+{
+  "components": {},
+  "info": {
+    "title": "Goa API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.2.0",
+  "paths": {
+    "/request-id": {
+      "get": {
+        "operationId": "SSERequestIDService#SSERequestIDMethod",
+        "parameters": [
+          {
+            "example": "request",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "schema": {
+              "example": "request",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "example": "event",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK response."
+          }
+        },
+        "summary": "SSERequestIDMethod SSERequestIDService",
+        "tags": [
+          "SSERequestIDService"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Default server for test api",
+      "name": "test api",
+      "url": "http://localhost:80"
+    }
+  ],
+  "tags": [
+    {
+      "name": "SSERequestIDService"
+    }
+  ]
+}

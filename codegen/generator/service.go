@@ -1,48 +1,57 @@
+// This file assembles generated service files after every participating Goa
+// design root has submitted its declarations and all package names are final.
 package generator
 
 import (
-	"fmt"
-
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/codegen/service"
 	"goa.design/goa/v3/eval"
 	"goa.design/goa/v3/expr"
 )
 
-// Service iterates through the roots and returns the files needed to render
-// the service code. It returns an error if the roots slice does not include
-// a goa design.
+// Service returns the files that define service types, endpoints, clients, and
+// result views for roots.
 func Service(genpkg string, roots []eval.Root) ([]*codegen.File, error) {
-	var files []*codegen.File
+	return runStandaloneGenerator(genpkg, roots, serviceGeneratorFactory)
+}
+
+// serviceFiles returns the service files described by plan's completed package
+// declarations and the example generator created for this run.
+func serviceFiles(plan *Plan) ([]*codegen.File, error) {
+	return service.Files(plan.serviceOrder...)
+}
+
+// planServiceData declares service-owned generated package types for every Goa
+// design root in generation.
+func planServiceData(plan *Plan) error {
+	if plan.services != nil {
+		return nil
+	}
+	plan.services = make(map[*expr.RootExpr]*service.Plan)
+	roots := serviceRoots(plan.Generation().Roots())
+	inputs := make([]service.PlanInput, len(roots))
+	for index, root := range roots {
+		inputs[index] = service.PlanInput{Root: root, Examples: plan.exampleGenerator(root)}
+	}
+	servicePlans, err := service.NewPlans(plan.Generation(), inputs...)
+	if err != nil {
+		return err
+	}
+	for index, root := range roots {
+		plan.services[root] = servicePlans[index]
+	}
+	plan.serviceOrder = servicePlans
+	return nil
+}
+
+// serviceRoots returns every Goa design root that emits files into the same
+// generated package tree.
+func serviceRoots(roots []eval.Root) []*expr.RootExpr {
+	var designRoots []*expr.RootExpr
 	for _, root := range roots {
-		switch r := root.(type) {
-		case *expr.RootExpr:
-			for _, s := range r.Services {
-				// Make sure service is first so name scope is
-				// properly initialized.
-				files = append(files, service.File(genpkg, s))
-				files = append(files, service.EndpointFile(genpkg, s))
-				files = append(files, service.ClientFile(s))
-				if f := service.ViewsFile(genpkg, s); f != nil {
-					files = append(files, f)
-				}
-				for _, f := range files {
-					if len(f.SectionTemplates) > 0 {
-						service.AddServiceDataMetaTypeImports(f.SectionTemplates[0], s)
-					}
-				}
-				f, err := service.ConvertFile(r, s)
-				if err != nil {
-					return nil, err
-				}
-				if f != nil {
-					files = append(files, f)
-				}
-			}
+		if design, ok := root.(*expr.RootExpr); ok {
+			designRoots = append(designRoots, design)
 		}
 	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("design must define at least one service")
-	}
-	return files, nil
+	return designRoots
 }

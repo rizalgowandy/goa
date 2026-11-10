@@ -31,6 +31,28 @@ var SimpleDSL = func() {
 	})
 }
 
+// BytesExampleDSL defines a response whose OpenAPI example must remain a
+// string in both JSON and YAML documents.
+var BytesExampleDSL = func() {
+	var _ = API("bytes", func() {
+		Server("bytes", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+	})
+	Service("bytes", func() {
+		Method("download", func() {
+			Result(Bytes, func() {
+				Example([]byte("hello"))
+			})
+			HTTP(func() {
+				GET("/download")
+			})
+		})
+	})
+}
+
 var MultipleServicesDSL = func() {
 	var PayloadT = Type("Payload", func() {
 		Attribute("string", String, func() {
@@ -101,7 +123,9 @@ var MultipleViewsDSL = func() {
 			})
 		})
 		Method("testEndpointTiny", func() {
-			Result(ResultT)
+			Result(ResultT, func() {
+				View("tiny")
+			})
 			HTTP(func() {
 				GET("/tiny")
 			})
@@ -144,6 +168,49 @@ var ExplicitViewDSL = func() {
 	})
 }
 
+// ReleasedResponseCollectionNamesDSL exercises the public OpenAPI component
+// names for response collections whose elements use fixed views.
+var ReleasedResponseCollectionNamesDSL = func() {
+	var StoredBottle = ResultType("application/vnd.stored-bottle", func() {
+		TypeName("StoredBottle")
+		Attributes(func() {
+			Attribute("name", String, func() {
+				Example("Blue's Cuvee")
+			})
+			Attribute("vintage", UInt32, func() {
+				Example(2003)
+			})
+			Required("name", "vintage")
+		})
+		View("default", func() {
+			Attribute("name")
+			Attribute("vintage")
+		})
+		View("tiny", func() {
+			Attribute("name")
+		})
+	})
+
+	Service("storage", func() {
+		Method("list_default", func() {
+			Result(CollectionOf(StoredBottle), func() {
+				View("default")
+			})
+			HTTP(func() {
+				GET("/default")
+			})
+		})
+		Method("list_tiny", func() {
+			Result(CollectionOf(StoredBottle), func() {
+				View("tiny")
+			})
+			HTTP(func() {
+				GET("/tiny")
+			})
+		})
+	})
+}
+
 var InvalidDSL = func() {
 	var _ = API("test", func() {
 		Server("test", func() {
@@ -170,6 +237,32 @@ var EmptyDSL = func() {
 }
 
 var FileServiceDSL = func() {
+	var _ = Service("service-name", func() {
+		Files("path1", "filename")
+		Files("path2", "filename", func() {
+			Meta("openapi:tag:user-tag")
+		})
+	})
+}
+
+// FileServiceWildcardDSL defines a service with a file server using a wildcard path.
+var FileServiceWildcardDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("http://localhost:80")
+			})
+		})
+	})
+	var _ = Service("front", func() {
+		Files("/ui/{*filepath}", "ui/dist", func() {
+			Meta("openapi:summary", "Download ui/dist")
+			Meta("openapi:tag:front")
+		})
+	})
+}
+
+var FileServiceSwaggerDSL = func() {
 	var _ = Service("service-name", func() {
 		Files("path1", "filename")
 		Files("path2", "filename", func() {
@@ -236,20 +329,26 @@ var IntValidationDSL = func() {
 
 var ArrayValidationDSL = func() {
 	var Bar = Type("bar", func() {
+		Example(Val{"string": "item"})
 		Attribute("string", String, func() {
 			MinLength(0)
 			MaxLength(42)
-			Example("")
+			Example("item")
 		})
 	})
 	var FooBar = Type("foobar", func() {
-		Attribute("foo", ArrayOf(String), func() {
+		Example(Val{"foo": []any{"item"}, "bar": []any{Val{"string": "item"}}})
+		Attribute("foo", ArrayOf(String, func() {
+			Example("item")
+		}), func() {
 			MinLength(0)
 			MaxLength(42)
+			Example([]any{"item"})
 		})
 		Attribute("bar", ArrayOf(Bar), func() {
 			MinLength(0)
 			MaxLength(42)
+			Example([]any{Val{"string": "item"}})
 		})
 	})
 	var _ = API("test", func() {
@@ -261,7 +360,9 @@ var ArrayValidationDSL = func() {
 	})
 	Service("testService", func() {
 		Method("testEndpoint", func() {
-			Payload(ArrayOf(FooBar))
+			Payload(ArrayOf(FooBar), func() {
+				Example([]any{Val{"foo": []any{"item"}, "bar": []any{Val{"string": "item"}}}})
+			})
 			Result(String, func() {
 				MinLength(0)
 				MaxLength(42)
@@ -276,6 +377,45 @@ var ArrayValidationDSL = func() {
 }
 
 var ExtensionDSL = func() {
+	var PayloadT = Type("Payload", func() {
+		Attribute("string", String, func() {
+			Example("")
+			Meta("openapi:extension:x-test-schema", "Payload")
+		})
+	})
+	var ResultT = Type("Result", func() {
+		Attribute("string", String, func() {
+			Example("")
+			Meta("openapi:extension:x-test-schema", "Result")
+		})
+	})
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+		Meta("openapi:extension:x-test-api", "API")
+		Meta("openapi:tag:Backend")
+		Meta("openapi:tag:Backend:desc", "Description of Backend")
+		Meta("openapi:tag:Backend:url", "http://example.com")
+		Meta("openapi:tag:Backend:url:desc", "See more docs here")
+		Meta("openapi:tag:Backend:extension:x-data", `{"foo":"bar"}`)
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(PayloadT)
+			Result(ResultT)
+			HTTP(func() {
+				POST("/")
+				Meta("openapi:extension:x-test-foo", "bar")
+			})
+			Meta("openapi:extension:x-test-operation", "Operation")
+		})
+	})
+}
+
+var ExtensionSwaggerDSL = func() {
 	var PayloadT = Type("Payload", func() {
 		Attribute("string", String, func() {
 			Example("")
@@ -376,6 +516,43 @@ var SecurityDSL = func() {
 	})
 }
 
+var BearerSecurityDSL = func() {
+	var BearerAuth = BearerSecurity("bearer", func() {
+		Description("Opaque session token or trusted OIDC access token.")
+		Scope("api:read", "Read-only access")
+	})
+
+	var FormattedBearerAuth = BearerSecurity("formatted_bearer", func() {
+		Description("JWT access token.")
+		BearerFormat("JWT")
+	})
+
+	Service("testService", func() {
+		Method("plainBearer", func() {
+			Security(BearerAuth, func() {
+				Scope("api:read")
+			})
+			Payload(func() {
+				BearerToken("token", String)
+				Required("token")
+			})
+			HTTP(func() {
+				GET("/plain")
+			})
+		})
+		Method("formattedBearer", func() {
+			Security(FormattedBearerAuth)
+			Payload(func() {
+				BearerToken("token", String)
+				Required("token")
+			})
+			HTTP(func() {
+				GET("/formatted")
+			})
+		})
+	})
+}
+
 var ServerHostWithVariablesDSL = func() {
 	var _ = API("test", func() {
 		Server("test", func() {
@@ -400,6 +577,7 @@ var ServerHostWithVariablesDSL = func() {
 
 var WithSpacesDSL = func() {
 	var Bar = Type("bar", func() {
+		Example(Val{"string": "item"})
 		Attribute("string", String, func() {
 			Example("")
 		})
@@ -409,16 +587,22 @@ var WithSpacesDSL = func() {
 		Attribute("foo", String, func() {
 			Example("")
 		})
-		Attribute("bar", ArrayOf(Bar))
+		Attribute("bar", ArrayOf(Bar), func() {
+			Example([]any{Val{"string": "item"}})
+		})
 	})
 	Service("test service", func() {
 		Method("test endpoint", func() {
 			Payload(Bar)
-			Result(FooBar)
+			Result(FooBar, func() {
+				Example(Val{"foo": "", "bar": []any{Val{"string": "item"}}})
+			})
 			HTTP(func() {
 				POST("/")
 				Response(StatusOK)
-				Response(StatusNotFound)
+				Response(StatusNotFound, func() {
+					Tag("foo", "not_found")
+				})
 			})
 		})
 	})
@@ -472,11 +656,55 @@ var WithMapDSL = func() {
 	})
 }
 
+var WithAnyDSL = func() {
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(func() {
+				Example(Val{"any": "", "any_array": []any{""}, "any_map": Val{"key": ""}})
+				Attribute("any", Any, func() {
+					Example("")
+				})
+				Attribute("any_array", ArrayOf(Any, func() {
+					Example("")
+				}), func() {
+					Example([]any{""})
+				})
+				Attribute("any_map", MapOf(String, Any), func() {
+					Example(Val{"key": ""})
+					Key(func() { Example("") })
+					Elem(func() { Example("") })
+				})
+			})
+			Result(func() {
+				Example(Val{"any": "", "any_array": []any{""}, "any_map": Val{"key": ""}})
+				Attribute("any", Any, func() {
+					Example("")
+				})
+				Attribute("any_array", ArrayOf(Any, func() {
+					Example("")
+				}), func() {
+					Example([]any{""})
+				})
+				Attribute("any_map", MapOf(String, Any), func() {
+					Example(Val{"key": ""})
+					Key(func() { Example("") })
+					Elem(func() { Example("") })
+				})
+			})
+			HTTP(func() {
+				POST("/")
+			})
+		})
+	})
+}
+
 var PathWithWildcardDSL = func() {
 	Service("test service", func() {
 		Method("test endpoint", func() {
 			Payload(func() {
-				Attribute("int_map", Int)
+				Attribute("int_map", Int, func() {
+					Example(1)
+				})
 			})
 			HTTP(func() {
 				POST("/{*int_map}")
@@ -485,22 +713,165 @@ var PathWithWildcardDSL = func() {
 	})
 }
 
+var PathWithMultipleWildcardDSL = func() {
+	Service("test service", func() {
+		Method("test endpoint", func() {
+			Payload(func() {
+				Attribute("foo", Int, func() {
+					Example(1)
+				})
+				Attribute("bar", Int, func() {
+					Example(2)
+				})
+			})
+			HTTP(func() {
+				POST("/{bar}")
+			})
+		})
+		HTTP(func() {
+			Path("/{foo}")
+		})
+	})
+}
+
+var PathWithMultipleExplicitWildcardDSL = func() {
+	Service("test service", func() {
+		Method("test endpoint", func() {
+			Payload(func() {
+				Attribute("foo", Int, func() {
+					Example(1)
+				})
+				Attribute("bar", Int, func() {
+					Example(2)
+				})
+			})
+			HTTP(func() {
+				POST("/{bar}")
+				Param("bar")
+			})
+		})
+		HTTP(func() {
+			Path("/{foo}")
+			Param("foo")
+		})
+	})
+}
+
+// PathWithMidSegmentWildcardDSL exercises path parameters that do not span a
+// whole path segment, such as the "/user/@{username}" and "/{month}-{day}-{year}"
+// patterns supported by Chi.
+var PathWithMidSegmentWildcardDSL = func() {
+	Service("test service", func() {
+		Method("test endpoint", func() {
+			Payload(func() {
+				Attribute("username", String, func() {
+					Example("alice")
+				})
+				Attribute("month", String, func() {
+					Example("01")
+				})
+				Attribute("day", String, func() {
+					Example("02")
+				})
+				Attribute("year", String, func() {
+					Example("2025")
+				})
+			})
+			HTTP(func() {
+				POST("/{month}-{day}-{year}")
+			})
+		})
+		HTTP(func() {
+			Path("/user/@{username}")
+		})
+	})
+}
+
+var HeadersDSL = func() {
+	Service("test service", func() {
+		Method("test endpoint", func() {
+			Payload(func() {
+				Attribute("foo", Int, func() {
+					Example(1)
+				})
+				Attribute("bar", Int, func() {
+					Example(2)
+				})
+			})
+			HTTP(func() {
+				POST("/")
+				Header("bar")
+			})
+		})
+		HTTP(func() {
+			Header("foo")
+		})
+	})
+}
+
 var WithTagsDSL = func() {
 	Service("test service", func() {
 		HTTP(func() {
-			Meta("swagger:tag:Service")
-			Meta("swagger:tag:Service:desc", "Service description")
+			Meta("openapi:tag:SomeTag:desc", "Endpoint description")
+			Meta("openapi:tag:SomeTag:url", "Endpoint URL")
+			Meta("openapi:tag:AnotherTag:desc", "Endpoint description")
+			Meta("openapi:tag:AnotherTag:url", "Endpoint URL")
 		})
 		Method("test endpoint", func() {
+			Payload(func() {
+				Attribute("int_map", Int, func() {
+					Example(1)
+				})
+			})
+			HTTP(func() {
+				Meta("openapi:tag:SomeTag")
+				POST("/{*int_map}")
+			})
+		})
+		Method("another test endpoint", func() {
 			Payload(func() {
 				Attribute("int_map", Int)
 			})
 			HTTP(func() {
-				Meta("swagger:tag:Service")
-				Meta("swagger:tag:Service:desc", "Overwritten service description")
-				Meta("swagger:tag:Endpoint")
-				Meta("swagger:tag:Endpoint:desc", "Endpoint description")
-				Meta("swagger:tag:Endpoint:url", "Endpoint URL")
+				Meta("openapi:generate", "false")
+				Meta("openapi:tag:AnotherTag")
+				POST("/{*int_map}")
+			})
+		})
+	})
+	Service("another test service", func() {
+		Meta("openapi:generate", "false")
+		HTTP(func() {
+			Meta("openapi:tag:AnotherService:desc", "Another service description")
+		})
+		Method("another test endpoint", func() {
+			Payload(func() {
+				Attribute("int_map", Int)
+			})
+			HTTP(func() {
+				Meta("openapi:tag:AnotherService")
+				POST("/{*int_map}")
+			})
+		})
+	})
+}
+
+var WithTagsSwaggerDSL = func() {
+	Service("test service", func() {
+		HTTP(func() {
+			Meta("swagger:tag:SomeTag:desc", "Endpoint description")
+			Meta("swagger:tag:SomeTag:url", "Endpoint URL")
+			Meta("swagger:tag:AnotherTag:desc", "Endpoint description")
+			Meta("swagger:tag:AnotherTag:url", "Endpoint URL")
+		})
+		Method("test endpoint", func() {
+			Payload(func() {
+				Attribute("int_map", Int, func() {
+					Example(1)
+				})
+			})
+			HTTP(func() {
+				Meta("swagger:tag:SomeTag")
 				POST("/{*int_map}")
 			})
 		})
@@ -510,9 +881,7 @@ var WithTagsDSL = func() {
 			})
 			HTTP(func() {
 				Meta("swagger:generate", "false")
-				Meta("swagger:tag:AnotherEndpoint")
-				Meta("swagger:tag:AnotherEndpoint:desc", "Endpoint description")
-				Meta("swagger:tag:AnotherEndpoint:url", "Endpoint URL")
+				Meta("swagger:tag:AnotherTag")
 				POST("/{*int_map}")
 			})
 		})
@@ -520,7 +889,6 @@ var WithTagsDSL = func() {
 	Service("another test service", func() {
 		Meta("swagger:generate", "false")
 		HTTP(func() {
-			Meta("swagger:tag:AnotherService")
 			Meta("swagger:tag:AnotherService:desc", "Another service description")
 		})
 		Method("another test endpoint", func() {
@@ -528,7 +896,451 @@ var WithTagsDSL = func() {
 				Attribute("int_map", Int)
 			})
 			HTTP(func() {
+				Meta("swagger:tag:AnotherService")
 				POST("/{*int_map}")
+			})
+		})
+	})
+}
+
+var TypenameDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+	})
+
+	var Foo = Type("Foo", func() {
+		Meta("openapi:typename", "FooPayload")
+		Attribute("value", String, func() {
+			Example("")
+		})
+	})
+
+	var Bar = ResultType("application/vnd.goa.example.bar", func() {
+		TypeName("Bar")
+		Meta("openapi:typename", "BarResult")
+		Attribute("value", String, func() {
+			Example("")
+		})
+	})
+
+	var _ = Service("testService", func() {
+		Method("foo", func() {
+			Payload(Foo)
+			Result(Bar, func() {
+				Meta("openapi:typename", "FooResult")
+			})
+			HTTP(func() {
+				POST("/foo")
+			})
+		})
+		Method("bar", func() {
+			Payload(Foo, func() {
+				Meta("openapi:typename", "BarPayload")
+			})
+			Result(Bar)
+			HTTP(func() {
+				POST("/bar")
+			})
+		})
+		Method("baz", func() {
+			Payload(func() {
+				Meta("openapi:typename", "BazPayload")
+				Attribute("value", String, func() {
+					Example("")
+				})
+			})
+			Result(func() {
+				Meta("openapi:typename", "BazResult")
+				Attribute("value", String, func() {
+					Example("")
+				})
+			})
+			HTTP(func() {
+				POST("/baz")
+			})
+		})
+	})
+}
+
+var SkipResponseBodyEncodeDecodeDSL = func() {
+	Service("testService", func() {
+		Method("empty", func() {
+			Payload(Empty)
+			Result(Empty)
+			HTTP(func() {
+				GET("/empty")
+			})
+		})
+		Method("empty_ok", func() {
+			Payload(Empty)
+			Result(Empty)
+			HTTP(func() {
+				GET("/empty/ok")
+				Response(StatusOK)
+			})
+		})
+		Method("binary", func() {
+			Payload(Empty)
+			Result(Empty)
+			HTTP(func() {
+				GET("/binary")
+				SkipResponseBodyEncodeDecode()
+				Response(StatusOK, func() {
+					ContentType("image/png")
+				})
+			})
+		})
+	})
+}
+
+var NotGenerateServerDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+			Meta("openapi:generate", "false")
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Result(String, func() {
+				Example("ok")
+			})
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var NotGenerateHostDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+				Meta("openapi:generate", "false")
+			})
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Result(String, func() {
+				Example("ok")
+			})
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var NotGenerateAttributeDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+	})
+	var PayloadT = Type("Payload", func() {
+		Attribute("int", Int, func() {
+			Meta("openapi:generate", "false")
+		})
+		Attribute("string", String, func() {
+			Example("")
+		})
+		Attribute("required_int", Int, func() {
+			Meta("openapi:generate", "false")
+		})
+		Attribute("required_string", String, func() {
+			Example("")
+		})
+		Required("required_int", "required_string")
+	})
+	var ResultT = Type("Result", func() {
+		Attribute("int", Int, func() {
+			Example(0)
+		})
+		Attribute("string", String, func() {
+			Meta("openapi:generate", "false")
+		})
+		Attribute("required_int", Int, func() {
+			Example(0)
+		})
+		Attribute("required_string", String, func() {
+			Meta("openapi:generate", "false")
+		})
+		Required("required_int", "required_string")
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(PayloadT)
+			Result(ResultT)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var JSONPrefixDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+		Meta("openapi:json:prefix", "  ")
+	})
+	var _ = Service("service-name", func() {
+		Files("path1", "filename")
+		Files("path2", "filename", func() {
+			Meta("openapi:tag:user-tag")
+		})
+	})
+}
+
+var JSONIndentDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+		Meta("openapi:json:indent", "  ")
+	})
+	var _ = Service("service-name", func() {
+		Files("path1", "filename")
+		Files("path2", "filename", func() {
+			Meta("openapi:tag:user-tag")
+		})
+	})
+}
+
+var JSONPrefixIndentDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+		Meta("openapi:json:prefix", " ")
+		Meta("openapi:json:indent", "  ")
+	})
+	var _ = Service("service-name", func() {
+		Files("path1", "filename")
+		Files("path2", "filename", func() {
+			Meta("openapi:tag:user-tag")
+		})
+	})
+}
+
+var AdditionalPropertiesTypeDSL = func() {
+	var PayloadT = Type("Payload", func() {
+		Attribute("string", String, func() {
+			Example("")
+		})
+		Meta("openapi:additionalProperties", "false")
+	})
+	var ResultT = Type("Result", func() {
+		Attribute("string", String, func() {
+			Example("")
+		})
+		Meta("openapi:additionalProperties", "false")
+	})
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(PayloadT)
+			Result(ResultT)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var AdditionalPropertiesPayloadResultDSL = func() {
+	var PayloadT = Type("Payload", func() {
+		Attribute("string", String, func() {
+			Example("")
+		})
+	})
+	var ResultT = Type("Result", func() {
+		Attribute("string", String, func() {
+			Example("")
+		})
+	})
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(PayloadT, func() {
+				Meta("openapi:additionalProperties", "false")
+			})
+			Result(ResultT, func() {
+				Meta("openapi:additionalProperties", "false")
+			})
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var AdditionalPropertiesEmbeddedPayloadResultDSL = func() {
+	var _ = API("test", func() {
+		Server("test", func() {
+			Host("localhost", func() {
+				URI("https://goa.design")
+			})
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(func() {
+				Attribute("string", String, func() {
+					Example("")
+				})
+				Meta("openapi:additionalProperties", "false")
+			})
+			Result(func() {
+				Attribute("string", String, func() {
+					Example("")
+				})
+				Meta("openapi:additionalProperties", "false")
+			})
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var OpenAPIV32MetaDSL = func() {
+	var _ = API("test", func() {
+		Meta("openapi:info:summary", "Test API summary")
+		Meta("openapi:tag:Users:desc", "Operations about users")
+		Meta("openapi:tag:Users:summary", "Users")
+		Meta("openapi:tag:Users:parent", "Accounts")
+		Meta("openapi:tag:Users:kind", "nav")
+		Server("multi", func() {
+			Host("dev", func() {
+				URI("http://localhost:8080")
+			})
+			Host("prod", func() {
+				URI("https://goa.design")
+			})
+		})
+		Server("single", func() {
+			Host("only", func() {
+				URI("https://single.goa.design")
+			})
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(Empty)
+			Result(Empty)
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var OpenAPIVersionsSubsetDSL = func() {
+	var _ = API("test", func() {
+		Meta("openapi:versions", "3.2")
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var OpenAPIPathOverrideDSL = func() {
+	var _ = API("test", func() {
+		Meta("openapi:path:3.2", "docs/openapi")
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var OpenAPIInvalidVersionDSL = func() {
+	var _ = API("test", func() {
+		Meta("openapi:versions", "4.0")
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			HTTP(func() {
+				GET("/")
+			})
+		})
+	})
+}
+
+var TypeExtensionDSL = func() {
+	var Notification = Type("Notification", func() {
+		Meta("openapi:extension:x-test-include", "true")
+		Attribute("id", String, func() {
+			Example("notice")
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(Notification)
+			Result(Notification)
+			HTTP(func() {
+				POST("/")
+			})
+		})
+	})
+}
+
+var AliasTypeDSL = func() {
+	var Stage = Type("Stage", String, func() {
+		Description("Setup stage.")
+		Enum("who", "when", "where", "what")
+		Example("who")
+	})
+	var Setup = Type("Setup", func() {
+		Example(Val{"current": "who", "completed": []any{"when"}})
+		Attribute("current", Stage)
+		Attribute("completed", ArrayOf(Stage), func() {
+			Example([]any{"when"})
+		})
+	})
+	Service("testService", func() {
+		Method("testEndpoint", func() {
+			Payload(Setup)
+			Result(Setup)
+			HTTP(func() {
+				POST("/")
 			})
 		})
 	})

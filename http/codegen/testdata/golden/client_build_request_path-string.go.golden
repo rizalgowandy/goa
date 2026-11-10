@@ -1,0 +1,29 @@
+// BuildMethodPathStringRequest instantiates a HTTP request object with method
+// and path set to call the "ServicePathString" service "MethodPathString"
+// endpoint
+func (c *Client) BuildMethodPathStringRequest(ctx context.Context, v any) (*http.Request, error) {
+	var (
+		p string
+	)
+	{
+		p, ok := v.(*servicepathstring.MethodPathStringPayload)
+		if !ok {
+			return nil, goahttp.ErrInvalidType("ServicePathString", "MethodPathString", "*servicepathstring.MethodPathStringPayload", v)
+		}
+		if p.P != nil {
+			p = *p.P
+		}
+	}
+
+	rawPath := fmt.Sprintf("/%v", url.PathEscape(fmt.Sprint(p)))
+	u := &url.URL{Scheme: c.scheme, Host: c.host, Path: MethodPathStringServicePathStringPath(p), RawPath: rawPath}
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return nil, goahttp.ErrInvalidURL("ServicePathString", "MethodPathString", u.String(), err)
+	}
+	if ctx != nil {
+		req = req.WithContext(ctx)
+	}
+
+	return req, nil
+}

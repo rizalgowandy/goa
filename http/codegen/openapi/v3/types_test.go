@@ -1,11 +1,15 @@
+// This file verifies OpenAPI v3 schema construction and stable example
+// generation for primitive, collection, object, and transport body types.
 package openapiv3
 
 import (
+	"encoding/json"
 	"hash/fnv"
 	"strings"
 	"testing"
 
 	"goa.design/goa/v3/codegen"
+	"goa.design/goa/v3/dsl"
 	"goa.design/goa/v3/expr"
 	"goa.design/goa/v3/http/codegen/openapi"
 	"goa.design/goa/v3/http/codegen/openapi/v3/testdata/dsls"
@@ -13,9 +17,18 @@ import (
 
 // describes a type for comparison in tests.
 type typ struct {
-	Type      string
-	Props     []attr
-	SkipProps bool
+	Type                 string
+	Format               string
+	Props                []attr
+	SkipProps            bool
+	AdditionalProperties *additionalPropsType // nil means no additionalProperties check
+}
+
+// additionalPropsType describes additionalProperties for testing
+type additionalPropsType struct {
+	Type  string               // "string", "array", "object", "" (for reference)
+	Items *additionalPropsType // for array items
+	Ref   string               // for references like "#/components/schemas/MapData"
 }
 
 type attr struct {
@@ -30,11 +43,13 @@ type rt map[int]typ
 var (
 	tempty  typ
 	tstring = typ{Type: "string"}
+	tuuid   = typ{Type: "string", Format: "uuid"}
+	tbinary = typ{Type: "string", Format: "binary"}
 	tint    = typ{Type: "integer"}
 	tarray  = typ{Type: "array"}
 )
 
-func tobj(attrs ...interface{}) typ {
+func tobj(attrs ...any) typ {
 	res := typ{Type: "object"}
 	if len(attrs) == 0 {
 		res.SkipProps = true
@@ -43,6 +58,10 @@ func tobj(attrs ...interface{}) typ {
 		res.Props = append(res.Props, attr{Name: attrs[i].(string), Val: attrs[i+1].(typ)})
 	}
 	return res
+}
+
+func tmap() typ {
+	return typ{Type: "object", Props: []attr{{Name: "map", Val: typ{Type: "object"}}}}
 }
 
 func (tt typ) Prop(n string) (typ, bool) {
@@ -62,7 +81,10 @@ func TestBuildBodyTypes(t *testing.T) {
 		DSL  func()
 
 		ExpectedType          typ
+		ExpectedFormat        string
 		ExpectedResponseTypes rt
+		ExpectedExtraTypes    map[string]typ
+		ExpectedAbsentTypes   []string
 	}{{
 		Name: "string_body",
 		DSL:  dsls.StringBodyDSL(svcName, "string_body"),
@@ -70,10 +92,22 @@ func TestBuildBodyTypes(t *testing.T) {
 		ExpectedType:          tstring,
 		ExpectedResponseTypes: rt{204: tempty},
 	}, {
+		Name: "alias_string_body",
+		DSL:  dsls.AliasStringBodyDSL(svcName, "alias_string_body"),
+
+		ExpectedType:          tuuid,
+		ExpectedResponseTypes: rt{204: tempty},
+	}, {
 		Name: "object_body",
 		DSL:  dsls.ObjectBodyDSL(svcName, "object_body"),
 
 		ExpectedType:          tobj("name", tstring, "age", tint),
+		ExpectedResponseTypes: rt{204: tempty},
+	}, {
+		Name: "map_body",
+		DSL:  dsls.MapBodyDSL(svcName, "map_body"),
+
+		ExpectedType:          tmap(),
 		ExpectedResponseTypes: rt{204: tempty},
 	}, {
 		Name: "streaming_string_body",
@@ -98,7 +132,13 @@ func TestBuildBodyTypes(t *testing.T) {
 		DSL:  dsls.ObjectResponseBodyDSL(svcName, "object_response_body"),
 
 		ExpectedType:          tempty,
-		ExpectedResponseTypes: rt{200: tobj("name", tstring, "age", tint)},
+		ExpectedResponseTypes: rt{200: tobj("name", tstring, "age", tint, "misc", tempty)},
+	}, {
+		Name: "multi_cookie_response_body",
+		DSL:  dsls.MultiCookieResponseBodyDSL(svcName, "multi_cookie_response_body"),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{200: tobj("name", tstring)},
 	}, {
 		Name: "string_streaming_response_body",
 		DSL:  dsls.StringStreamingResponseBodyDSL(svcName, "string_streaming_response_body"),
@@ -110,7 +150,7 @@ func TestBuildBodyTypes(t *testing.T) {
 		DSL:  dsls.ObjectResponseBodyDSL(svcName, "object_streaming_response_body"),
 
 		ExpectedType:          tempty,
-		ExpectedResponseTypes: rt{200: tobj("name", tstring, "age", tint)},
+		ExpectedResponseTypes: rt{200: tobj("name", tstring, "age", tint, "misc", tempty)},
 	}, {
 		Name: "string_error_response",
 		DSL:  dsls.StringErrorResponseBodyDSL(svcName, "string_error_response"),
@@ -123,13 +163,62 @@ func TestBuildBodyTypes(t *testing.T) {
 
 		ExpectedType:          tempty,
 		ExpectedResponseTypes: rt{204: tempty, 400: tobj("name", tstring, "age", tint)},
+	}, {
+		Name: "unused_type",
+		DSL:  dsls.UnusedTypeDSL(svcName, "unused_type"),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{204: tempty},
+		ExpectedAbsentTypes:   []string{"Unused"},
+	}, {
+		Name: "forced_type",
+		DSL:  dsls.ForcedTypeDSL(svcName, "forced_type"),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{204: tempty},
+		ExpectedExtraTypes:    map[string]typ{"Forced": tobj("foo", tstring)},
+	}, {
+		Name: "service_scoped_forced_type",
+		DSL:  dsls.ServiceScopedForcedTypeDSL(svcName, "service_scoped_forced_type", svcName),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{204: tempty},
+		ExpectedExtraTypes:    map[string]typ{"Forced": tobj("foo", tstring)},
+	}, {
+		Name: "other_service_scoped_forced_type",
+		DSL:  dsls.ServiceScopedForcedTypeDSL(svcName, "other_service_scoped_forced_type", "other"),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{204: tempty},
+		ExpectedAbsentTypes:   []string{"Forced"},
+	}, {
+		Name: "openapi_suppressed_forced_type",
+		DSL:  dsls.OpenAPISuppressedForcedTypeDSL(svcName, "openapi_suppressed_forced_type"),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{204: tempty},
+		ExpectedAbsentTypes:   []string{"Forced"},
+	}, {
+		Name: "forced_result_type",
+		DSL:  dsls.ForcedResultTypeDSL(svcName, "forced_result_type"),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{204: tempty},
+		ExpectedExtraTypes:    map[string]typ{"Forced": tobj("foo", tstring)},
+	}, {
+		Name: "openapi_suppressed_forced_result_type",
+		DSL:  dsls.OpenAPISuppressedForcedResultTypeDSL(svcName, "openapi_suppressed_forced_result_type"),
+
+		ExpectedType:          tempty,
+		ExpectedResponseTypes: rt{204: tempty},
+		ExpectedAbsentTypes:   []string{"Forced"},
 	}}
 
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			api := codegen.RunDSL(t, c.DSL).API
+			root := codegen.RunDSL(t, c.DSL)
 
-			bodies, types := buildBodyTypes(api)
+			bodies, types := buildBodyTypes(root.API, root.Types, root.ResultTypes, openapi.Version30, expr.NewExampleGenerator(root.API.RandomizerFactory), openapi.Values{})
 
 			svc, ok := bodies[svcName]
 			if !ok {
@@ -161,6 +250,19 @@ func TestBuildBodyTypes(t *testing.T) {
 				}
 				matchesSchema(t, "response", met.ResponseBodies[s][0], types, r)
 			}
+			for name, forced := range c.ExpectedExtraTypes {
+				got, ok := types[name]
+				if !ok {
+					t.Errorf("missing forced type %q", name)
+					continue
+				}
+				matchesSchema(t, "extra type", got, types, forced)
+			}
+			for _, name := range c.ExpectedAbsentTypes {
+				if _, ok := types[name]; ok {
+					t.Errorf("unexpected type %q", name)
+				}
+			}
 		})
 	}
 }
@@ -186,6 +288,11 @@ func matchesSchemaWithPrefix(t *testing.T, ctx string, s *openapi.Schema, types 
 	if tt.Type != string(s.Type) {
 		t.Errorf("%s: %sgot type %q, expected %q", ctx, prefix, s.Type, tt.Type)
 	}
+	if tt.Format != "" {
+		if s.Format != tt.Format {
+			t.Errorf("%s: %sgot format %q, expected %q", ctx, prefix, s.Format, tt.Format)
+		}
+	}
 	if tt.Type == "object" {
 		if tt.SkipProps {
 			return
@@ -198,73 +305,437 @@ func matchesSchemaWithPrefix(t *testing.T, ctx string, s *openapi.Schema, types 
 			}
 			matchesSchemaWithPrefix(t, ctx, v, types, p, n+": ")
 		}
+
+		// Check additionalProperties
+		if tt.AdditionalProperties != nil {
+			validateAdditionalProperties(t, ctx, s.AdditionalProperties, types, tt.AdditionalProperties, prefix)
+		}
 	}
 }
 
-func TestHashAttribute(t *testing.T) {
-	var (
-		h1 = uint64(12943244719806607708)
-		h2 = uint64(7733915756259492975)
-		h3 = uint64(7729867354446285276)
-		h4 = uint64(12938215553621425391)
-		h5 = uint64(590638987843676710)
-	)
-	cases := []struct {
-		Name string
-		att  *expr.AttributeExpr
-		h    uint64
+func TestMapTypes(t *testing.T) {
+	svcName := "test-service"
+
+	testCases := []struct {
+		Name     string
+		DSL      func()
+		Expected typ
 	}{
-		{"bool", &expr.AttributeExpr{Type: expr.Boolean}, 1200285950329868815},
-		{"int", &expr.AttributeExpr{Type: expr.Int}, 15618947606512183472},
-		{"int32", &expr.AttributeExpr{Type: expr.Int32}, 9710406772214674507},
-		{"int64", &expr.AttributeExpr{Type: expr.Int64}, 9710410070749559206},
-		{"uint", &expr.AttributeExpr{Type: expr.UInt}, 9334303408231097877},
-		{"uint32", &expr.AttributeExpr{Type: expr.UInt32}, 14693036559411812390},
-		{"uint64", &expr.AttributeExpr{Type: expr.UInt64}, 14693033260876927695},
-		{"float32", &expr.AttributeExpr{Type: expr.Float32}, 3496747786213902106},
-		{"float64", &expr.AttributeExpr{Type: expr.Float64}, 3496753283772043155},
-		{"string", &expr.AttributeExpr{Type: expr.String}, 11035750783128163470},
-		{"bytes", &expr.AttributeExpr{Type: expr.Bytes}, 9376284137219620846},
-		{"any", &expr.AttributeExpr{Type: expr.Any}, 15626582615256966821},
-		{"array-bool", &expr.AttributeExpr{Type: &expr.Array{ElemType: &expr.AttributeExpr{Type: expr.Boolean}}}, 11710318443436489022},
-		{"array-int", &expr.AttributeExpr{Type: &expr.Array{ElemType: &expr.AttributeExpr{Type: expr.Int}}}, 16304700464423429033},
-		{"map-str-int", &expr.AttributeExpr{Type: &expr.Map{KeyType: &expr.AttributeExpr{Type: expr.String}, ElemType: &expr.AttributeExpr{Type: expr.Int}}}, 957614225485715479},
-		{"map-str-str", &expr.AttributeExpr{Type: &expr.Map{KeyType: &expr.AttributeExpr{Type: expr.String}, ElemType: &expr.AttributeExpr{Type: expr.String}}}, 10408036596908747853},
-		{"map-int-str", &expr.AttributeExpr{Type: &expr.Map{KeyType: &expr.AttributeExpr{Type: expr.Int}, ElemType: &expr.AttributeExpr{Type: expr.String}}}, 16377853221392883275},
-		{"map-int-int", &expr.AttributeExpr{Type: &expr.Map{KeyType: &expr.AttributeExpr{Type: expr.Int}, ElemType: &expr.AttributeExpr{Type: expr.Int}}}, 3290208366554661977},
-		{"obj-str-req", newObj("foo", expr.String, true), 2958992150570065940},
-		{"obj-str-noreq", newObj("foo", expr.String, false), 17427721879237743911},
-		{"obj-int-req", newObj("foo", expr.Int, true), 8915021286725901502},
-		{"obj-int-noreq", newObj("foo", expr.Int, false), 11777831908257753485},
-		{"obj-other", newObj("bar", expr.Int, false), 12868551315046025641},
-		{"obj-str-str-noreq", newObj2("foo", "bar", expr.String, expr.String), h1},
-		{"obj-str-str-req1", newObj2("foo", "bar", expr.String, expr.String, "foo"), h2},
-		{"obj-str-str-req2", newObj2("foo", "bar", expr.String, expr.String, "bar"), h3},
-		{"obj-str-str-req3", newObj2("foo", "bar", expr.String, expr.String, "foo", "bar"), h4},
-		{"obj-int-str-noreq", newObj2("foo", "bar", expr.Int, expr.String), 16228531529443692022},
-		{"obj1-str-str-noreq", newObj2("bar", "foo", expr.String, expr.String), h1},
-		{"obj1-str-str-req1", newObj2("bar", "foo", expr.String, expr.String, "foo"), h2},
-		{"obj1-str-str-req2", newObj2("bar", "foo", expr.String, expr.String, "bar"), h3},
-		{"obj1-str-str-req3", newObj2("bar", "foo", expr.String, expr.String, "bar", "foo"), h4},
-		{"result", newRT("id", newObj("foo", expr.String, true)), h5},
-		{"result-diff", newRT("id2", newObj("foo", expr.String, true)), 15618941009442414240},
-		{"result-same", newRT("id", newObj("foo", expr.Int, true)), h5},
+		{
+			Name: "map_int_array_string",
+			DSL:  dsls.MapIntKeyBodyDSL(svcName, "map_int_array_string"),
+			Expected: typ{
+				Type: "object",
+				Props: []attr{{Name: "intmap", Val: typ{
+					Type: "object",
+					AdditionalProperties: &additionalPropsType{
+						Type:  "array",
+						Items: &additionalPropsType{Type: "string"},
+					},
+				}}},
+			},
+		},
+		{
+			Name: "map_int_array_object",
+			DSL:  dsls.MapIntKeyObjectBodyDSL(svcName, "map_int_array_object"),
+			Expected: typ{
+				Type: "object",
+				Props: []attr{{Name: "intmap", Val: typ{
+					Type: "object",
+					AdditionalProperties: &additionalPropsType{
+						Type:  "array",
+						Items: &additionalPropsType{Ref: "#/components/schemas/MapData"},
+					},
+				}}},
+			},
+		},
+		{
+			Name: "map_int_string",
+			DSL:  dsls.MapIntKeyStringBodyDSL(svcName, "map_int_string"),
+			Expected: typ{
+				Type: "object",
+				Props: []attr{{Name: "intmap", Val: typ{
+					Type:                 "object",
+					AdditionalProperties: &additionalPropsType{Type: "string"},
+				}}},
+			},
+		},
+		{
+			Name: "map_int_object_direct",
+			DSL:  dsls.MapIntKeyObjectDirectBodyDSL(svcName, "map_int_object_direct"),
+			Expected: typ{
+				Type: "object",
+				Props: []attr{{Name: "intmap", Val: typ{
+					Type:                 "object",
+					AdditionalProperties: &additionalPropsType{Ref: "#/components/schemas/MapData"},
+				}}},
+			},
+		},
+		{
+			Name: "map_string_int",
+			DSL:  dsls.MapStringKeyIntBodyDSL(svcName, "map_string_int"),
+			Expected: typ{
+				Type: "object",
+				Props: []attr{{Name: "stringmap", Val: typ{
+					Type:                 "object",
+					AdditionalProperties: &additionalPropsType{Type: "integer"},
+				}}},
+			},
+		},
+		{
+			Name: "map_string_object_direct",
+			DSL:  dsls.MapStringKeyObjectDirectBodyDSL(svcName, "map_string_object_direct"),
+			Expected: typ{
+				Type: "object",
+				Props: []attr{{Name: "stringmap", Val: typ{
+					Type:                 "object",
+					AdditionalProperties: &additionalPropsType{Ref: "#/components/schemas/MapData"},
+				}}},
+			},
+		},
+		{
+			Name: "map_string_array_object",
+			DSL:  dsls.MapStringKeyArrayObjectBodyDSL(svcName, "map_string_array_object"),
+			Expected: typ{
+				Type: "object",
+				Props: []attr{{Name: "stringmap", Val: typ{
+					Type: "object",
+					AdditionalProperties: &additionalPropsType{
+						Type:  "array",
+						Items: &additionalPropsType{Ref: "#/components/schemas/MapData"},
+					},
+				}}},
+			},
+		},
 	}
-	h := fnv.New64()
-	sf := newSchemafier(expr.NewRandom("test"))
-	for _, c := range cases {
-		t.Run(c.Name, func(t *testing.T) {
-			got := sf.hashAttribute(c.att, h)
-			if got != c.h {
-				t.Errorf("got %v, expected %v", got, c.h)
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			// Build the OpenAPI spec
+			root := codegen.RunDSL(t, tc.DSL)
+			bodies, types := buildBodyTypes(root.API, root.Types, root.ResultTypes, openapi.Version30, expr.NewExampleGenerator(root.API.RandomizerFactory), openapi.Values{})
+
+			// Find the service and method
+			svcBodies, ok := bodies[svcName]
+			if !ok {
+				t.Fatalf("Could not find service %s in bodies", svcName)
+			}
+
+			methodBody, ok := svcBodies[tc.Name]
+			if !ok {
+				t.Fatalf("Could not find method %s in service bodies", tc.Name)
+			}
+
+			// Get the request body schema
+			requestBodyRef := methodBody.RequestBody.Ref
+			if requestBodyRef == "" {
+				t.Fatal("Expected request body reference")
+			}
+
+			requestBodyTypeName := nameFromRef(requestBodyRef)
+			requestBodySchema, ok := types[requestBodyTypeName]
+			if !ok {
+				t.Fatalf("Could not find request body type %s", requestBodyTypeName)
+			}
+
+			// Validate the schema
+			matchesSchema(t, tc.Name, requestBodySchema, types, tc.Expected)
+		})
+	}
+}
+
+func validateAdditionalProperties(t *testing.T, ctx string, addProps any, types map[string]*openapi.Schema, expected *additionalPropsType, prefix string) {
+	if addProps == nil {
+		t.Errorf("%s: %sexpected additionalProperties to be set", ctx, prefix)
+		return
+	}
+
+	// Check if additionalProperties is a schema
+	schema, ok := addProps.(*openapi.Schema)
+	if !ok {
+		t.Errorf("%s: %sexpected additionalProperties to be schema, got %T", ctx, prefix, addProps)
+		return
+	}
+
+	validateAdditionalPropsSchema(t, ctx, schema, types, expected, prefix+"additionalProperties: ")
+}
+
+func validateAdditionalPropsSchema(t *testing.T, ctx string, schema *openapi.Schema, types map[string]*openapi.Schema, expected *additionalPropsType, prefix string) {
+	// Handle reference case
+	if expected.Ref != "" {
+		if schema.Ref == "" {
+			t.Errorf("%s: %sexpected reference to %s, but got inline schema", ctx, prefix, expected.Ref)
+			return
+		}
+		if schema.Ref != expected.Ref {
+			t.Errorf("%s: %sexpected reference %s, got %s", ctx, prefix, expected.Ref, schema.Ref)
+		}
+		return
+	}
+
+	// Resolve reference if present
+	if schema.Ref != "" {
+		typeName := nameFromRef(schema.Ref)
+		resolvedSchema, ok := types[typeName]
+		if !ok {
+			t.Errorf("%s: %scould not resolve reference %s", ctx, prefix, schema.Ref)
+			return
+		}
+		schema = resolvedSchema
+	}
+
+	// Check type
+	if string(schema.Type) != expected.Type {
+		t.Errorf("%s: %sexpected type %s, got %s", ctx, prefix, expected.Type, schema.Type)
+	}
+
+	// Check array items if expected
+	if expected.Items != nil {
+		if schema.Items == nil {
+			t.Errorf("%s: %sexpected array items to be set", ctx, prefix)
+		} else {
+			validateAdditionalPropsSchema(t, ctx, schema.Items, types, expected.Items, prefix+"items: ")
+		}
+	}
+}
+
+func TestTypesOnlyDifferByEnum(t *testing.T) {
+	root := codegen.RunDSL(t, dsls.StringEnumBodyDSL())
+
+	bodies, types := buildBodyTypes(root.API, root.Types, root.ResultTypes, openapi.Version30, expr.NewExampleGenerator(root.API.RandomizerFactory), openapi.Values{})
+
+	svc1, ok := bodies["svc_enum_1"]
+	if !ok {
+		t.Errorf("bodies does not contain details for service %q", "svc_enum_1")
+		return
+	}
+	svc2, ok := bodies["svc_enum_2"]
+	if !ok {
+		t.Errorf("bodies does not contain details for service %q", "svc_enum_2")
+		return
+	}
+
+	svc1MethodRB := svc1["method_enum"].RequestBody.Ref
+	svc2MethodRB := svc2["method_enum"].RequestBody.Ref
+
+	if svc1MethodRB == svc2MethodRB {
+		t.Errorf("expected different refs, got %q", svc1MethodRB)
+
+		name := nameFromRef(svc1MethodRB)
+		derefed := types[name]
+		jsoned, _ := json.Marshal(derefed)
+		t.Errorf("shared referenced type (%s) was: %v", name, string(jsoned))
+		return
+	}
+}
+
+func TestBuildBodyTypesPreservesPrimitiveAliasComponents(t *testing.T) {
+	root := codegen.RunDSL(t, func() {
+		unauthorized := dsl.Type("Unauthorized", dsl.String, func() {
+			dsl.Description("Authentication is required.")
+		})
+		forbidden := dsl.Type("Forbidden", dsl.String, func() {
+			dsl.Description("Access is forbidden.")
+		})
+
+		dsl.Service("auth", func() {
+			dsl.Method("show", func() {
+				dsl.Error("unauthorized", unauthorized)
+				dsl.Error("forbidden", forbidden)
+				dsl.HTTP(func() {
+					dsl.GET("/")
+					dsl.Response("unauthorized", dsl.StatusUnauthorized)
+					dsl.Response("forbidden", dsl.StatusForbidden)
+				})
+			})
+		})
+	})
+
+	bodies, types := buildBodyTypes(root.API, root.Types, root.ResultTypes, openapi.Version32, expr.NewExampleGenerator(root.API.RandomizerFactory), openapi.Values{})
+	tests := []struct {
+		name        string
+		status      int
+		description string
+	}{
+		{name: "Unauthorized", status: 401, description: "Authentication is required."},
+		{name: "Forbidden", status: 403, description: "Access is forbidden."},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			responses := bodies["auth"]["show"].ResponseBodies[test.status]
+			if len(responses) != 1 {
+				t.Errorf("got %d response schemas, expected 1", len(responses))
+				return
+			}
+			wantRef := "#/components/schemas/" + test.name
+			if responses[0].Ref != wantRef {
+				t.Errorf("got response ref %q, expected %q", responses[0].Ref, wantRef)
+			}
+			schema, ok := types[test.name]
+			if !ok {
+				t.Errorf("missing component schema %q", test.name)
+				return
+			}
+			if schema.Description != test.description {
+				t.Errorf("got description %q, expected %q", schema.Description, test.description)
 			}
 		})
 	}
 }
 
-func newObj(n string, t expr.DataType, req bool) *expr.AttributeExpr {
+func TestHashAttribute(t *testing.T) {
+	type (
+		testAttr struct {
+			name string
+			att  *expr.AttributeExpr
+		}
+
+		hashBehavior int
+
+		testGroup struct {
+			name     string
+			attrs    []testAttr
+			behavior hashBehavior
+		}
+	)
+
+	const (
+		uniqueHashes hashBehavior = iota
+		identicalHashes
+	)
+
+	var (
+		metaNotGenerate = expr.MetaExpr{"openapi:generate": []string{"false"}}
+		metaEmpty       = expr.MetaExpr{}
+	)
+
+	cases := []testGroup{
+		{
+			name:     "Primitive types",
+			behavior: uniqueHashes,
+			attrs: []testAttr{
+				{name: "bool", att: &expr.AttributeExpr{Type: expr.Boolean}},
+				{name: "int", att: &expr.AttributeExpr{Type: expr.Int}},
+				{name: "int32", att: &expr.AttributeExpr{Type: expr.Int32}},
+				{name: "int64", att: &expr.AttributeExpr{Type: expr.Int64}},
+				{name: "uint", att: &expr.AttributeExpr{Type: expr.UInt}},
+				{name: "uint32", att: &expr.AttributeExpr{Type: expr.UInt32}},
+				{name: "uint64", att: &expr.AttributeExpr{Type: expr.UInt64}},
+				{name: "float32", att: &expr.AttributeExpr{Type: expr.Float32}},
+				{name: "float64", att: &expr.AttributeExpr{Type: expr.Float64}},
+				{name: "string", att: &expr.AttributeExpr{Type: expr.String}},
+				{name: "bytes", att: &expr.AttributeExpr{Type: expr.Bytes}},
+				{name: "any", att: &expr.AttributeExpr{Type: expr.Any}},
+			},
+		}, {
+			name:     "Collection types",
+			behavior: uniqueHashes,
+			attrs: []testAttr{
+				{name: "array-bool", att: &expr.AttributeExpr{Type: &expr.Array{ElemType: &expr.AttributeExpr{Type: expr.Boolean}}}},
+				{name: "array-int", att: &expr.AttributeExpr{Type: &expr.Array{ElemType: &expr.AttributeExpr{Type: expr.Int}}}},
+				{name: "map-str-int", att: &expr.AttributeExpr{Type: &expr.Map{KeyType: &expr.AttributeExpr{Type: expr.String}, ElemType: &expr.AttributeExpr{Type: expr.Int}}}},
+				{name: "map-str-str", att: &expr.AttributeExpr{Type: &expr.Map{KeyType: &expr.AttributeExpr{Type: expr.String}, ElemType: &expr.AttributeExpr{Type: expr.String}}}},
+			},
+		}, {
+			name:     "Objects with validation rules",
+			behavior: uniqueHashes,
+			attrs: []testAttr{
+				{name: "no-validation", att: newObj("foo", false)},
+				{name: "required-validation", att: newObj("foo", true)},
+				{name: "pattern-validation", att: &expr.AttributeExpr{
+					Type: expr.String,
+					Validation: &expr.ValidationExpr{
+						Pattern: "^[a-z]+$",
+					},
+				}},
+				{name: "enum-validation", att: &expr.AttributeExpr{
+					Type: expr.String,
+					Validation: &expr.ValidationExpr{
+						Values: []any{"foo", "bar"},
+					},
+				}},
+			},
+		}, {
+			name:     "Result types with different views",
+			behavior: uniqueHashes,
+			attrs: []testAttr{
+				{name: "no-view", att: newRT("id", newObj("foo", true))},
+				{name: "default-view", att: newRTWithView("id", newObj("foo", true), "default")},
+				{name: "tiny-view", att: newRTWithView("id", newObj("foo", true), "tiny")},
+			},
+		}, {
+			name:     "Objects with openapi:generate:false metadata",
+			behavior: identicalHashes,
+			attrs: []testAttr{
+				{name: "obj-with-skipped-field", att: newObj2Meta("foo", "bar", expr.String, expr.String, metaEmpty, metaNotGenerate)},
+				{name: "obj-without-skipped-field", att: newObj("foo", false)},
+			},
+		}, {
+			name:     "Complex map types",
+			behavior: uniqueHashes,
+			attrs: []testAttr{
+				{name: "map-int-array", att: &expr.AttributeExpr{Type: &expr.Map{
+					KeyType:  &expr.AttributeExpr{Type: expr.Int},
+					ElemType: &expr.AttributeExpr{Type: &expr.Array{ElemType: &expr.AttributeExpr{Type: expr.String}}},
+				}}},
+				{name: "map-array-int", att: &expr.AttributeExpr{Type: &expr.Map{
+					KeyType:  &expr.AttributeExpr{Type: &expr.Array{ElemType: &expr.AttributeExpr{Type: expr.String}}},
+					ElemType: &expr.AttributeExpr{Type: expr.Int},
+				}}},
+			},
+		}, {
+			name:     "Nested user types",
+			behavior: uniqueHashes,
+			attrs: []testAttr{
+				{name: "single-nest", att: newUserType("foo", newObj("bar", false))},
+				{name: "double-nest", att: newUserType("foo", newUserType("bar", newObj("baz", false)))},
+			},
+		}, {
+			name:     "Recursive types",
+			behavior: identicalHashes,
+			attrs: []testAttr{
+				{name: "recursive-1", att: newRecursiveType("foo")},
+				{name: "recursive-2", att: newRecursiveType("foo")},
+			},
+		},
+	}
+
+	h := fnv.New64()
+	sf := newSchemafier(expr.NewExampleGenerator(expr.NewFakerRandomizerFactory("test")), openapi.Values{})
+
+	for _, group := range cases {
+		t.Run(group.name, func(t *testing.T) {
+			seen := make(map[uint64][]string)
+
+			// Collect all hashes in this group
+			for _, attr := range group.attrs {
+				hash := sf.hashAttribute(attr.att, h)
+				seen[hash] = append(seen[hash], attr.name)
+			}
+
+			switch group.behavior {
+			case uniqueHashes:
+				// Verify all hashes are different
+				for hash, names := range seen {
+					if len(names) > 1 {
+						t.Errorf("expected unique hashes but got collision between %v (hash: %d)",
+							names, hash)
+					}
+				}
+			case identicalHashes:
+				// Verify all hashes are the same
+				if len(seen) > 1 {
+					t.Errorf("expected identical hashes but got different ones: %v", seen)
+				}
+			}
+		})
+	}
+}
+
+func newObj(n string, req bool) *expr.AttributeExpr {
 	attr := &expr.AttributeExpr{
-		Type:       &expr.Object{{n, &expr.AttributeExpr{Type: t}}},
+		Type:       &expr.Object{{Name: n, Attribute: &expr.AttributeExpr{Type: expr.String}}},
 		Validation: &expr.ValidationExpr{},
 	}
 	if req {
@@ -273,11 +744,11 @@ func newObj(n string, t expr.DataType, req bool) *expr.AttributeExpr {
 	return attr
 }
 
-func newObj2(n, o string, t, u expr.DataType, reqs ...string) *expr.AttributeExpr {
+func newObj2Meta(n, o string, t, u expr.DataType, l, m expr.MetaExpr, reqs ...string) *expr.AttributeExpr {
 	attr := &expr.AttributeExpr{
 		Type: &expr.Object{
-			{n, &expr.AttributeExpr{Type: t}},
-			{o, &expr.AttributeExpr{Type: u}},
+			{Name: n, Attribute: &expr.AttributeExpr{Type: t, Meta: l}},
+			{Name: o, Attribute: &expr.AttributeExpr{Type: u, Meta: m}},
 		},
 		Validation: &expr.ValidationExpr{},
 	}
@@ -294,6 +765,45 @@ func newRT(id string, att *expr.AttributeExpr) *expr.AttributeExpr {
 			},
 		},
 	}
+}
+
+// Helper function for result types with views
+func newRTWithView(id string, att *expr.AttributeExpr, view string) *expr.AttributeExpr {
+	rt := newRT(id, att)
+	rt.Type.(*expr.ResultTypeExpr).Meta = expr.MetaExpr{
+		expr.ViewMetaKey: []string{view},
+	}
+	return rt
+}
+
+// Helper function for user types
+func newUserType(name string, att *expr.AttributeExpr) *expr.AttributeExpr {
+	return &expr.AttributeExpr{
+		Type: &expr.UserTypeExpr{
+			AttributeExpr: att,
+			TypeName:      name,
+		},
+	}
+}
+
+// Helper function for recursive types
+func newRecursiveType(name string) *expr.AttributeExpr {
+	// Create a user type that references itself
+	ut := &expr.UserTypeExpr{
+		TypeName: name,
+	}
+	att := &expr.AttributeExpr{
+		Type: &expr.Object{
+			&expr.NamedAttributeExpr{
+				Name: "self",
+				Attribute: &expr.AttributeExpr{
+					Type: ut,
+				},
+			},
+		},
+	}
+	ut.AttributeExpr = att
+	return &expr.AttributeExpr{Type: ut}
 }
 
 // nameFromRef does the reverse of toRef: it returns the type name from its

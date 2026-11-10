@@ -1,0 +1,37 @@
+// DecodeMethodClientStreamingRPCWithPayloadRequest decodes requests sent to
+// "ServiceClientStreamingRPCWithPayload" service
+// "MethodClientStreamingRPCWithPayload" endpoint.
+func DecodeMethodClientStreamingRPCWithPayloadRequest(ctx context.Context, v any, md metadata.MD) (any, error) {
+	var (
+		message *service_client_streaming_rpc_with_payloadpb.MethodClientStreamingRPCWithPayloadRequest
+		ok      bool
+	)
+	{
+		if v == nil {
+			return nil, goa.MissingFieldError("initial_payload", "stream")
+		}
+		var envelope *service_client_streaming_rpc_with_payloadpb.MethodClientStreamingRPCWithPayloadStreamingRequest
+		if envelope, ok = v.(*service_client_streaming_rpc_with_payloadpb.MethodClientStreamingRPCWithPayloadStreamingRequest); !ok {
+			return nil, goagrpc.ErrInvalidType("ServiceClientStreamingRPCWithPayload", "MethodClientStreamingRPCWithPayload", "*service_client_streaming_rpc_with_payloadpb.MethodClientStreamingRPCWithPayloadStreamingRequest", v)
+		}
+		switch body := envelope.Body.(type) {
+		case *service_client_streaming_rpc_with_payloadpb.MethodClientStreamingRPCWithPayloadStreamingRequest_InitialPayload:
+			if body.InitialPayload == nil {
+				return nil, goa.MissingFieldError("initial_payload", "stream")
+			}
+			message = body.InitialPayload
+		case *service_client_streaming_rpc_with_payloadpb.MethodClientStreamingRPCWithPayloadStreamingRequest_StreamItem:
+			return nil, goa.InvalidFieldTypeError("body", "stream_item", "initial_payload")
+		default:
+			return nil, goa.MissingFieldError("initial_payload", "stream")
+		}
+		if err := ValidateMethodClientStreamingRPCWithPayloadRequest(message); err != nil {
+			return nil, err
+		}
+	}
+	var payload int
+	{
+		payload = NewMethodClientStreamingRPCWithPayloadPayload(message)
+	}
+	return payload, nil
+}

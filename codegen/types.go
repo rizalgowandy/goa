@@ -35,14 +35,43 @@ func GoNativeTypeName(t expr.DataType) string {
 	case expr.BytesKind:
 		return "[]byte"
 	case expr.AnyKind:
-		return "interface{}"
+		return "any"
 	default:
 		panic(fmt.Sprintf("cannot compute native Go type for %T", t)) // bug
 	}
 }
 
-// AttributeTags computes the struct field tags from its metadata if any.
-func AttributeTags(parent, att *expr.AttributeExpr) string {
+// IsNilable reports whether the Go type generated for t can be nil.
+func IsNilable(t expr.DataType) bool {
+	underlying := unalias(t)
+	return expr.IsObject(t) ||
+		expr.IsArray(t) ||
+		expr.IsMap(t) ||
+		underlying.Kind() == expr.BytesKind ||
+		underlying.Kind() == expr.AnyKind
+}
+
+// arrayElementIsPointer reports whether validation needs a pointer to tell a
+// null element apart from the element type's zero value.
+func arrayElementIsPointer(array *expr.Array, enabled bool) bool {
+	return enabled && array.NonNullableElems && expr.IsPrimitive(array.ElemType.Type) &&
+		!IsNilable(array.ElemType.Type)
+}
+
+// goFieldIsPointer reports whether a field in a generated Goa service struct
+// uses a pointer. Unions remain values; their discriminator represents
+// presence after the transport boundary has validated the wire shape.
+func goFieldIsPointer(parent *expr.AttributeExpr, name string, pointer, useDefault bool) bool {
+	field := expr.AsObject(parent.Type).Attribute(name)
+	return expr.IsObject(field.Type) ||
+		parent.IsPrimitivePointer(name, useDefault) ||
+		pointer && expr.IsPrimitive(field.Type) && field.Type.Kind() != expr.AnyKind && field.Type.Kind() != expr.BytesKind
+}
+
+// AttributeTags computes the struct field tags from the attribute's explicit
+// struct:tag:* metadata, ignoring struct:tag:json:name which only renames the
+// computed json tag (see AttributeTagsWithName).
+func AttributeTags(att *expr.AttributeExpr) string {
 	var elems []string
 	keys := make([]string, len(att.Meta))
 	i := 0
@@ -54,6 +83,9 @@ func AttributeTags(parent, att *expr.AttributeExpr) string {
 	for _, key := range keys {
 		val := att.Meta[key]
 		if strings.HasPrefix(key, "struct:tag:") {
+			if key == "struct:tag:json:name" {
+				continue
+			}
 			name := key[11:]
 			value := strings.Join(val, ",")
 			elems = append(elems, fmt.Sprintf("%s:\"%s\"", name, value))
@@ -63,4 +95,64 @@ func AttributeTags(parent, att *expr.AttributeExpr) string {
 		return " `" + strings.Join(elems, " ") + "`"
 	}
 	return ""
+}
+
+// AttributeTagsWithName computes the struct field tags from its metadata,
+// interpreting the "struct:tag:json:name" key when present.
+//
+// The "struct:tag:json" meta key always takes precedence and is treated as a
+// complete tag override value. When only "struct:tag:json:name" is set, Goa
+// computes the json tag and appends ",omitempty" when the field is not
+// required by its parent object.
+func AttributeTagsWithName(parent *expr.AttributeExpr, fieldName string, att *expr.AttributeExpr) string {
+	if att == nil || len(att.Meta) == 0 {
+		return ""
+	}
+	tags := make(map[string]string)
+	var jsonName string
+	keys := make([]string, 0, len(att.Meta))
+	for k := range att.Meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		val := att.Meta[key]
+		if !strings.HasPrefix(key, "struct:tag:") {
+			continue
+		}
+		switch key {
+		case "struct:tag:json:name":
+			if jsonName == "" && len(val) > 0 {
+				jsonName = strings.Join(val, ",")
+			}
+			continue
+		default:
+		}
+		name := key[11:]
+		value := strings.Join(val, ",")
+		tags[name] = value
+		if name == "json" {
+			// Full override: do not attempt to merge with json:name.
+			jsonName = ""
+		}
+	}
+	if _, ok := tags["json"]; !ok && jsonName != "" {
+		if parent != nil && fieldName != "" && !parent.IsRequired(fieldName) {
+			jsonName += ",omitempty"
+		}
+		tags["json"] = jsonName
+	}
+	if len(tags) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(tags))
+	for n := range tags {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	elems := make([]string, 0, len(names))
+	for _, n := range names {
+		elems = append(elems, fmt.Sprintf("%s:\"%s\"", n, tags[n]))
+	}
+	return " `" + strings.Join(elems, " ") + "`"
 }

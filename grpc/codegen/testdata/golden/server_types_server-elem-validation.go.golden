@@ -1,0 +1,51 @@
+// NewMethodElemValidationPayload builds *serviceelemvalidation.PayloadType
+// from *service_elem_validationpb.MethodElemValidationRequest.
+func NewMethodElemValidationPayload(message *service_elem_validationpb.MethodElemValidationRequest) *serviceelemvalidation.PayloadType {
+	v := &serviceelemvalidation.PayloadType{}
+	if message.Foo != nil {
+		v.Foo = make(map[string][]string, len(message.Foo))
+		for key, val := range message.Foo {
+			tk := key
+			var tv []string
+			if val != nil {
+				tv = make([]string, len(val.Field))
+				for i, val := range val.Field {
+					tv[i] = val
+				}
+			}
+			v.Foo[tk] = tv
+		}
+	}
+	return v
+}
+
+// NewProtoMethodElemValidationResponse builds
+// *service_elem_validationpb.MethodElemValidationResponse from metadata values.
+func NewProtoMethodElemValidationResponse() *service_elem_validationpb.MethodElemValidationResponse {
+	message := &service_elem_validationpb.MethodElemValidationResponse{}
+	return message
+}
+
+// ValidateMethodElemValidationRequest runs the validations defined on
+// MethodElemValidationRequest.
+func ValidateMethodElemValidationRequest(message *service_elem_validationpb.MethodElemValidationRequest) (err error) {
+	for _, v := range message.Foo {
+		if err2 := validatetest_20_api_ServiceElemValidation_ArrayOfString_At_val(v); err2 != nil {
+			err = goa.MergeErrors(err, err2)
+		}
+	}
+	return
+}
+
+// validatetest_20_api_ServiceElemValidation_ArrayOfString_At_val runs the
+// validations defined on ArrayOfString.
+func validatetest_20_api_ServiceElemValidation_ArrayOfString_At_val(val *service_elem_validationpb.ArrayOfString) (err error) {
+	var valField []string
+	if val != nil {
+		valField = val.Field
+	}
+	if len(valField) < 1 {
+		err = goa.MergeErrors(err, goa.InvalidLengthError("val.field", valField, len(valField), 1, true))
+	}
+	return
+}

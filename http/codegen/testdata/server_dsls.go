@@ -168,6 +168,18 @@ var ServerFileServerWithRedirectDSL = func() {
 	})
 }
 
+var ServerFileServerRootPathDSL = func() {
+	Service("ServiceFileServer", func() {
+		HTTP(func() {
+			Path("/")
+		})
+		Files("/file1.json", "file1.json")
+		Files("/path/to/file1.json", "file1.json")
+		Files("/file2.json", "file1.json")
+		Files("/path/to/file2.json", "file1.json")
+	})
+}
+
 var ServerMixedDSL = func() {
 	Service("ServerMixed", func() {
 		Method("MethodMixed1", func() {
@@ -264,6 +276,32 @@ var ServerSimpleRoutingWithRedirectDSL = func() {
 			HTTP(func() {
 				GET("/simple/routing")
 				Redirect("/redirect/dest", StatusMovedPermanently)
+			})
+		})
+	})
+}
+
+var ServerSkipResponseBodyEncodeDecodeDSL = func() {
+	Service("ServiceSkipResponseBodyEncodeDecode", func() {
+		Method("MethodSkipResponseBodyEncodeDecode", func() {
+			Error("internal_error", ErrorResult, "Fault while processing download.")
+			HTTP(func() {
+				GET("/")
+				SkipResponseBodyEncodeDecode()
+				Response(StatusOK)
+				Response("internal_error", StatusInternalServerError)
+			})
+		})
+	})
+}
+
+var ResponseEncoderSkipResponseBodyEncodeDecodeDSL = func() {
+	Service("ServiceResponseEncoderSkip", func() {
+		Method("MethodResponseEncoderSkip", func() {
+			HTTP(func() {
+				GET("/")
+				SkipResponseBodyEncodeDecode()
+				Response(StatusOK)
 			})
 		})
 	})

@@ -1,0 +1,47 @@
+func transform() {
+	target := &proto.Optional{
+		Bytes_: source.Bytes,
+		Any: func() *structpb.Value {
+			// Convert Go any to protobuf Value directly
+			if source.Any == nil {
+				return structpb.NewNullValue()
+			}
+			value, err := structpb.NewValue(source.Any)
+			if err != nil {
+				panic(fmt.Sprintf("failed to convert value to structpb.Value: %v", err))
+			}
+			return value
+		}(),
+	}
+	if source.Int != nil {
+		int_ := int32(*source.Int)
+		target.Int = &int_
+	}
+	if source.Uint != nil {
+		uint_ := uint32(*source.Uint)
+		target.Uint = &uint_
+	}
+	if source.Float != nil {
+		target.Float_ = source.Float
+	}
+	if source.String != nil {
+		target.String_ = source.String
+	}
+	if source.Array != nil {
+		target.Array = make([]string, len(source.Array))
+		for i, val := range source.Array {
+			target.Array[i] = val
+		}
+	}
+	if source.Map != nil {
+		target.Map_ = make(map[int32]string, len(source.Map))
+		for key, val := range source.Map {
+			tk := int32(key)
+			tv := val
+			target.Map_[tk] = tv
+		}
+	}
+	if source.UserType != nil {
+		target.UserType = svcProtoOptionalToProtoOptional(source.UserType)
+	}
+}

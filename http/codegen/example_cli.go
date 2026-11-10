@@ -1,171 +1,184 @@
+// This file writes runnable HTTP and JSON-RPC command-line examples with the
+// package names already chosen for this generation.
 package codegen
 
 import (
-	"os"
+	"path"
 	"path/filepath"
-	"strings"
 
 	"goa.design/goa/v3/codegen"
 	"goa.design/goa/v3/codegen/example"
+	"goa.design/goa/v3/codegen/service"
 	"goa.design/goa/v3/expr"
 )
 
-// ExampleCLIFiles returns an example client tool HTTP implementation for each
-// server expression.
-func ExampleCLIFiles(genpkg string, root *expr.RootExpr) []*codegen.File {
+// exampleCLIFiles returns an example command-line client for the HTTP services
+// on each configured server.
+func exampleCLIFiles(root *example.Root, services *ServicesData) []*codegen.File {
 	var files []*codegen.File
-	for _, svr := range root.API.Servers {
-		if f := exampleCLI(genpkg, root, svr); f != nil {
+	for _, server := range root.Servers {
+		if f := exampleCLI(server, services); f != nil {
 			files = append(files, f)
 		}
 	}
 	return files
 }
 
-// exampleCLI returns an example client tool HTTP implementation for the given
-// server expression.
-func exampleCLI(genpkg string, root *expr.RootExpr, svr *expr.ServerExpr) *codegen.File {
-	svrdata := example.Servers.Get(svr)
-	path := filepath.Join("cmd", svrdata.Dir+"-cli", "http.go")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		return nil // file already exists, skip it.
+// exampleCLI returns an example command-line client for the HTTP services on
+// the given server.
+func exampleCLI(server *example.Data, services *ServicesData) *codegen.File {
+	genpkg := services.GenPkg()
+	outputPath := filepath.Join("cmd", server.Dir+"-cli", services.dir()+".go")
+	outputPackage := path.Join(path.Dir(genpkg), "cmd", server.Dir+"-cli")
+	funcSuffix := "HTTP"
+	if services.jsonrpc {
+		funcSuffix = "JSONRPC"
 	}
-	var (
-		rootPath string
-		apiPkg   string
-
-		scope = codegen.NewNameScope()
-	)
-	{
-		// genpkg is created by path.Join so the separator is / regardless of operating system
-		idx := strings.LastIndex(genpkg, string("/"))
-		rootPath = "."
-		if idx > 0 {
-			rootPath = genpkg[:idx]
-		}
-		apiPkg = scope.Unique(strings.ToLower(codegen.Goify(root.API.Name, false)), "api")
+	rootPath := path.Dir(genpkg)
+	parser := services.cliParsers[server.Name]
+	if parser == nil {
+		return nil
 	}
-	specs := []*codegen.ImportSpec{
-		{Path: "context"},
-		{Path: "encoding/json"},
-		{Path: "flag"},
-		{Path: "fmt"},
-		{Path: "net/http"},
-		{Path: "net/url"},
-		{Path: "os"},
-		{Path: "strings"},
-		{Path: "time"},
-		{Path: "github.com/gorilla/websocket"},
-		codegen.GoaImport(""),
-		codegen.GoaNamedImport("http", "goahttp"),
-		{Path: genpkg + "/http/cli/" + svrdata.Dir, Name: "cli"},
-		{Path: rootPath, Name: apiPkg},
-	}
-
 	var svcData []*ServiceData
-	for _, svc := range svr.Services {
-		if data := HTTPServices.Get(svc); data != nil {
-			svcData = append(svcData, data)
+	hasClientInterceptors := false
+	hasMultipart := false
+	for _, name := range server.Services {
+		data := services.Get(name)
+		if data == nil {
+			continue
 		}
+		if len(data.Endpoints) == 0 {
+			continue
+		}
+		copy := exampleServiceDataForOutput(data, services, outputPackage)
+		svcData = append(svcData, copy)
+		hasClientInterceptors = hasClientInterceptors || len(data.Service.ClientInterceptors) > 0
+		for _, endpoint := range data.Endpoints {
+			hasMultipart = hasMultipart || endpoint.MultipartRequestDecoder != nil
+		}
+	}
+	cliImport := services.PackageImport(outputPackage, path.Join(genpkg, services.dir(), "cli", server.Dir))
+	var interceptorsPkg string
+	if hasClientInterceptors {
+		interceptorImport := services.PackageImport(outputPackage, rootPath+"/interceptors")
+		interceptorsPkg = interceptorImport.Name
+	}
+	var apiPkg string
+	if hasMultipart {
+		apiPkg = services.PackageImport(outputPackage, rootPath).Name
 	}
 	sections := []*codegen.SectionTemplate{
-		codegen.Header("", "main", specs),
+		plannedFileHeader("", "main", outputPath, services),
 		{
 			Name:   "cli-http-start",
-			Source: httpCLIStartT,
+			Source: httpTemplates.Read(cliStartT),
+			Data: map[string]any{
+				"Services":        svcData,
+				"InterceptorsPkg": interceptorsPkg,
+				"FuncSuffix":      funcSuffix,
+			},
 		},
 		{
 			Name:   "cli-http-streaming",
-			Source: httpCLIStreamingT,
-			Data: map[string]interface{}{
+			Source: httpTemplates.Read(cliStreamingT),
+			Data: map[string]any{
 				"Services": svcData,
 			},
-			FuncMap: map[string]interface{}{
-				"needStream": needStream,
+			FuncMap: map[string]any{
+				"needDialer": NeedDialer,
 			},
 		},
 		{
 			Name:   "cli-http-end",
-			Source: httpCLIEndT,
-			Data: map[string]interface{}{
-				"Services": svcData,
-				"APIPkg":   apiPkg,
+			Source: httpTemplates.Read(cliEndT),
+			Data: map[string]any{
+				"Services":  svcData,
+				"APIPkg":    apiPkg,
+				"CLIPkg":    cliImport.Name,
+				"Parser":    parser.Declarations,
+				"Transport": services.label(),
 			},
-			FuncMap: map[string]interface{}{
-				"needStream":   needStream,
-				"hasWebSocket": hasWebSocket,
+			FuncMap: map[string]any{
+				"hasAnyInputStreams": cliHasAnyInputStreams,
+				"hasInputStreams":    cliHasInputStreams,
+				"hasRunnable":        cliHasRunnableCommands,
+				"hasRunnableService": cliHasRunnableService,
+				"needDialer":         NeedDialer,
+				"hasWebSocket":       HasWebSocket,
+				"kebab":              codegen.KebabCase,
+				"streamsInput":       cliStreamsInput,
+				"streamsOutput":      cliStreamsOutput,
 			},
 		},
 		{
 			Name:   "cli-http-usage",
-			Source: httpCLIUsageT,
+			Source: httpTemplates.Read(cliUsageT),
+			Data: map[string]any{
+				"VarPrefix": services.dir(),
+				"CLIPkg":    cliImport.Name,
+				"Parser":    parser.Declarations,
+			},
 		},
 	}
 	return &codegen.File{
-		Path:             path,
+		Path:             outputPath,
 		SectionTemplates: sections,
 		SkipExist:        true,
 	}
 }
 
-const (
-	httpCLIStartT = `func doHTTP(scheme, host string, timeout int, debug bool) (goa.Endpoint, interface{}, error) {
-	var (
-		doer goahttp.Doer
-	)
-	{
-		doer = &http.Client{Timeout: time.Duration(timeout) * time.Second}
-		if debug {
-			doer = goahttp.NewDebugDoer(doer)
+// cliStreamsInput reports whether an example command would need to send more
+// payload values after the endpoint call starts.
+func cliStreamsInput(method *service.MethodData) bool {
+	return method.StreamKind == expr.ClientStreamKind || method.StreamKind == expr.BidirectionalStreamKind
+}
+
+// cliStreamsOutput reports whether an example command receives a sequence of
+// results from the server.
+func cliStreamsOutput(method *service.MethodData) bool {
+	return method.StreamKind == expr.ServerStreamKind
+}
+
+// cliHasInputStreams reports whether a service has commands that the example
+// client must reject before parsing an endpoint.
+func cliHasInputStreams(data *ServiceData) bool {
+	for _, endpoint := range data.Endpoints {
+		if cliStreamsInput(endpoint.Method) {
+			return true
 		}
 	}
-`
-
-	// input: map[string]interface{}{"Services": []*ServiceData}
-	httpCLIStreamingT = `{{- if needStream .Services }}
-	var (
-    dialer *websocket.Dialer
-  )
-  {
-    dialer = websocket.DefaultDialer
-  }
-	{{ end }}
-`
-
-	// input: map[string]interface{}{"Services": []*ServiceData}
-	httpCLIEndT = `return cli.ParseEndpoint(
-		scheme,
-		host,
-		doer,
-		goahttp.RequestEncoder,
-		goahttp.ResponseDecoder,
-		debug,
-		{{- if needStream .Services }}
-		dialer,
-			{{- range $svc := .Services }}
-				{{- if hasWebSocket $svc }}
-				nil,
-				{{- end }}
-			{{- end }}
-		{{- end }}
-		{{- range .Services }}
-			{{- range .Endpoints }}
-			  {{- if .MultipartRequestDecoder }}
-		{{ $.APIPkg }}.{{ .MultipartRequestEncoder.FuncName }},
-				{{- end }}
-			{{- end }}
-		{{- end }}
-	)
-}
-`
-
-	httpCLIUsageT = `
-func httpUsageCommands() string {
-  return cli.UsageCommands()
+	return false
 }
 
-func httpUsageExamples() string {
-  return cli.UsageExamples()
+// cliHasAnyInputStreams reports whether any service has a command that the
+// example client must reject before parsing an endpoint.
+func cliHasAnyInputStreams(services []*ServiceData) bool {
+	for _, data := range services {
+		if cliHasInputStreams(data) {
+			return true
+		}
+	}
+	return false
 }
-`
-)
+
+// cliHasRunnableCommands reports whether the example client can invoke at
+// least one generated endpoint.
+func cliHasRunnableCommands(services []*ServiceData) bool {
+	for _, data := range services {
+		if cliHasRunnableService(data) {
+			return true
+		}
+	}
+	return false
+}
+
+// cliHasRunnableService reports whether the example client can invoke at
+// least one endpoint in the service.
+func cliHasRunnableService(data *ServiceData) bool {
+	for _, endpoint := range data.Endpoints {
+		if !cliStreamsInput(endpoint.Method) {
+			return true
+		}
+	}
+	return false
+}

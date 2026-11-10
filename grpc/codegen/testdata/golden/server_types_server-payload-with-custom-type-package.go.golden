@@ -1,0 +1,22 @@
+// NewMethodPayloadWithCustomTypePackagePayload builds *types.CustomType from
+// *service_payload_with_custom_type_packagepb.MethodPayloadWithCustomTypePackageRequest.
+func NewMethodPayloadWithCustomTypePackagePayload(message *service_payload_with_custom_type_packagepb.MethodPayloadWithCustomTypePackageRequest) *types.CustomType {
+	v := &types.CustomType{}
+	if message.Field != nil {
+		field := int(*message.Field)
+		v.Field = &field
+	}
+	return v
+}
+
+// NewProtoMethodPayloadWithCustomTypePackageResponse builds
+// *service_payload_with_custom_type_packagepb.MethodPayloadWithCustomTypePackageResponse
+// from *types.CustomType.
+func NewProtoMethodPayloadWithCustomTypePackageResponse(result *types.CustomType) *service_payload_with_custom_type_packagepb.MethodPayloadWithCustomTypePackageResponse {
+	message := &service_payload_with_custom_type_packagepb.MethodPayloadWithCustomTypePackageResponse{}
+	if result.Field != nil {
+		field := int32(*result.Field)
+		message.Field = &field
+	}
+	return message
+}

@@ -1,14 +1,16 @@
 package openapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"maps"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 // MarshalJSON produces the JSON resulting from encoding an object composed of
 // the fields in v (which must me a struct) and the keys in extensions.
-func MarshalJSON(v interface{}, extensions map[string]interface{}) ([]byte, error) {
+func MarshalJSON(v any, extensions map[string]any) ([]byte, error) {
 	marshaled, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -16,15 +18,14 @@ func MarshalJSON(v interface{}, extensions map[string]interface{}) ([]byte, erro
 	if len(extensions) == 0 {
 		return marshaled, nil
 	}
-	var unmarshaled interface{}
-	if err := json.Unmarshal(marshaled, &unmarshaled); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(marshaled))
+	decoder.UseNumber()
+	var unmarshaled map[string]any
+	if err := decoder.Decode(&unmarshaled); err != nil {
 		return nil, err
 	}
-	asserted := unmarshaled.(map[string]interface{})
-	for k, v := range extensions {
-		asserted[k] = v
-	}
-	merged, err := json.Marshal(asserted)
+	maps.Copy(unmarshaled, extensions)
+	merged, err := json.Marshal(unmarshaled)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +34,7 @@ func MarshalJSON(v interface{}, extensions map[string]interface{}) ([]byte, erro
 
 // MarshalYAML produces the JSON resulting from encoding an object composed of
 // the fields in v (which must me a struct) and the keys in extensions.
-func MarshalYAML(v interface{}, extensions map[string]interface{}) (interface{}, error) {
+func MarshalYAML(v any, extensions map[string]any) (any, error) {
 	if len(extensions) == 0 {
 		return v, nil
 	}
@@ -41,12 +42,10 @@ func MarshalYAML(v interface{}, extensions map[string]interface{}) (interface{},
 	if err != nil {
 		return nil, err
 	}
-	var unmarshaled map[string]interface{}
+	var unmarshaled map[string]any
 	if err := yaml.Unmarshal(marshaled, &unmarshaled); err != nil {
 		return nil, err
 	}
-	for k, v := range extensions {
-		unmarshaled[k] = v
-	}
+	maps.Copy(unmarshaled, extensions)
 	return unmarshaled, nil
 }

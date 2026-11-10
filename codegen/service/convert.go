@@ -1,3 +1,7 @@
+// This file generates ConvertTo and CreateFrom functions for service types
+// mapped to external Go structs. Service-side names come from the completed
+// package records, including nested types placed in packages by design
+// metadata.
 package service
 
 import (
@@ -26,6 +30,47 @@ type convertData struct {
 	TypeName string
 	//  Code is the function code.
 	Code string
+}
+
+// convertFiles formats the package-owned external conversion files aggregated
+// from every linked root plan. It does not inspect design mappings or allocate
+// generated names.
+func convertFiles(conversions []*externalConversionFileFacts) []*codegen.File {
+	files := make([]*codegen.File, len(conversions))
+	for index, retained := range conversions {
+		sections := []*codegen.SectionTemplate{
+			codegen.Header(
+				"External type conversion functions",
+				strings.ToLower(codegen.Goify(path.Base(retained.owner.ImportPath()), false)),
+				retained.imports.Imports(),
+			),
+		}
+		for _, operation := range retained.operations {
+			name, source := "convert-to", serviceTemplates.Read(convertT)
+			if operation.direction == externalCreateFrom {
+				name, source = "create-from", serviceTemplates.Read(createT)
+			}
+			sections = append(sections, &codegen.SectionTemplate{
+				Name:   name,
+				Source: source,
+				Data:   operation.data,
+			})
+		}
+		for _, operation := range retained.operations {
+			for _, helper := range operation.helpers {
+				sections = append(sections, &codegen.SectionTemplate{
+					Name:   "convert-create-helper",
+					Source: serviceTemplates.Read(transformHelperT),
+					Data:   helper,
+				})
+			}
+		}
+		files[index] = &codegen.File{
+			Path:             filepath.Join(retained.owner.OutputDirectory(), "convert.go"),
+			SectionTemplates: sections,
+		}
+	}
+	return files
 }
 
 func commonPath(sep byte, paths ...string) string {
@@ -108,216 +153,27 @@ func getPkgImport(pkg, cwd string) string {
 		return pkg
 	}
 
-	rootpkg := string(parentpath[len(gosrc)+1:])
+	rootpkg := parentpath[len(gosrc)+1:]
 
 	// check for vendored packages
 	vendorPrefix := path.Join(rootpkg, "vendor")
 	if strings.HasPrefix(pkg, vendorPrefix) {
-		return string(pkg[len(vendorPrefix)+1:])
+		return pkg[len(vendorPrefix)+1:]
 	}
 
 	return pkg
 }
 
-func getExternalTypeInfo(external interface{}) (string, string, error) {
+// getExternalReflectTypeInfo returns the source import path and authored
+// package qualifier for one named reflected type.
+func getExternalReflectTypeInfo(pkg reflect.Type) (string, string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", "", err
 	}
-	pkg := reflect.TypeOf(external)
 	pkgImport := getPkgImport(pkg.PkgPath(), cwd)
 	alias := strings.Split(pkg.String(), ".")[0]
 	return pkgImport, alias, nil
-}
-
-// ConvertFile returns the file containing the conversion and creation functions
-// if any.
-func ConvertFile(root *expr.RootExpr, service *expr.ServiceExpr) (*codegen.File, error) {
-	// Filter conversion and creation functions that are relevant for this
-	// service
-	svc := Services.Get(service.Name)
-	var conversions, creations []*expr.TypeMap
-	for _, c := range root.Conversions {
-		for _, m := range service.Methods {
-			if ut, ok := m.Payload.Type.(expr.UserType); ok {
-				if ut.Name() == c.User.Name() {
-					conversions = append(conversions, c)
-					break
-				}
-			}
-		}
-		for _, m := range service.Methods {
-			if ut, ok := m.Result.Type.(expr.UserType); ok {
-				if ut.Name() == c.User.Name() {
-					conversions = append(conversions, c)
-					break
-				}
-			}
-		}
-		for _, t := range svc.userTypes {
-			if c.User.Name() == t.Name {
-				conversions = append(conversions, c)
-				break
-			}
-		}
-	}
-	for _, c := range root.Creations {
-		for _, m := range service.Methods {
-			if ut, ok := m.Payload.Type.(expr.UserType); ok {
-				if ut.Name() == c.User.Name() {
-					creations = append(creations, c)
-					break
-				}
-			}
-		}
-		for _, m := range service.Methods {
-			if ut, ok := m.Result.Type.(expr.UserType); ok {
-				if ut.Name() == c.User.Name() {
-					creations = append(creations, c)
-					break
-				}
-			}
-		}
-		for _, t := range svc.userTypes {
-			if c.User.Name() == t.Name {
-				creations = append(creations, c)
-				break
-			}
-		}
-	}
-	if len(conversions) == 0 && len(creations) == 0 {
-		return nil, nil
-	}
-
-	// Retrieve external packages info
-	ppm := make(map[string]string)
-	for _, c := range conversions {
-		pkgImport, alias, err := getExternalTypeInfo(c.External)
-		if err != nil {
-			return nil, err
-		}
-		ppm[pkgImport] = alias
-	}
-	for _, c := range creations {
-		pkgImport, alias, err := getExternalTypeInfo(c.External)
-		if err != nil {
-			return nil, err
-		}
-		ppm[pkgImport] = alias
-	}
-	pkgs := make([]*codegen.ImportSpec, len(ppm))
-	i := 0
-	for pp, alias := range ppm {
-		pkgs[i] = &codegen.ImportSpec{Name: alias, Path: pp}
-		i++
-	}
-
-	// Build header section
-	pkgs = append(pkgs, &codegen.ImportSpec{Path: "context"})
-	pkgs = append(pkgs, codegen.GoaImport(""))
-	path := filepath.Join(codegen.Gendir, codegen.SnakeCase(service.Name), "convert.go")
-	sections := []*codegen.SectionTemplate{
-		codegen.Header(service.Name+" service type conversion functions", svc.PkgName, pkgs),
-	}
-
-	var (
-		names = map[string]struct{}{}
-
-		transFuncs []*codegen.TransformFunctionData
-	)
-
-	// Build conversion sections if any
-	for _, c := range conversions {
-		var dt expr.DataType
-		if err := buildDesignType(&dt, reflect.TypeOf(c.External), c.User); err != nil {
-			return nil, err
-		}
-		t := reflect.TypeOf(c.External)
-		tgtPkg := t.String()
-		tgtPkg = tgtPkg[:strings.Index(tgtPkg, ".")]
-		srcCtx := typeContext("", svc.Scope)
-		tgtCtx := codegen.NewAttributeContext(false, false, false, tgtPkg, codegen.NewNameScope())
-		srcAtt := &expr.AttributeExpr{Type: c.User}
-		code, tf, err := codegen.GoTransform(
-			&expr.AttributeExpr{Type: c.User}, &expr.AttributeExpr{Type: dt},
-			"t", "v", srcCtx, tgtCtx, "transform", true)
-		if err != nil {
-			return nil, err
-		}
-		transFuncs = codegen.AppendHelpers(transFuncs, tf)
-		base := "ConvertTo" + t.Name()
-		name := uniquify(base, names)
-		ref := t.String()
-		if expr.IsObject(c.User) {
-			ref = "*" + ref
-		}
-		data := convertData{
-			Name:            name,
-			ReceiverTypeRef: svc.Scope.GoTypeRef(srcAtt),
-			TypeName:        t.Name(),
-			TypeRef:         ref,
-			Code:            code,
-		}
-		sections = append(sections, &codegen.SectionTemplate{
-			Name:   "convert-to",
-			Source: convertT,
-			Data:   data,
-		})
-	}
-
-	// Build creation sections if any
-	for _, c := range creations {
-		var dt expr.DataType
-		if err := buildDesignType(&dt, reflect.TypeOf(c.External), c.User); err != nil {
-			return nil, err
-		}
-		t := reflect.TypeOf(c.External)
-		srcPkg := t.String()
-		srcPkg = srcPkg[:strings.Index(srcPkg, ".")]
-		srcCtx := codegen.NewAttributeContext(false, false, false, srcPkg, codegen.NewNameScope())
-		tgtCtx := typeContext("", svc.Scope)
-		tgtAtt := &expr.AttributeExpr{Type: c.User}
-		code, tf, err := codegen.GoTransform(
-			&expr.AttributeExpr{Type: dt}, tgtAtt,
-			"v", "temp", srcCtx, tgtCtx, "transform", true)
-		if err != nil {
-			return nil, err
-		}
-		transFuncs = codegen.AppendHelpers(transFuncs, tf)
-		base := "CreateFrom" + t.Name()
-		name := uniquify(base, names)
-		ref := t.String()
-		if expr.IsObject(c.User) {
-			ref = "*" + ref
-		}
-		data := convertData{
-			Name:            name,
-			ReceiverTypeRef: codegen.NewNameScope().GoTypeRef(tgtAtt),
-			TypeRef:         ref,
-			Code:            code,
-		}
-		sections = append(sections, &codegen.SectionTemplate{
-			Name:   "create-from",
-			Source: createT,
-			Data:   data,
-		})
-	}
-
-	// Build transformation helper functions section if any.
-	seen := make(map[string]struct{})
-	for _, tf := range transFuncs {
-		if _, ok := seen[tf.Name]; ok {
-			continue
-		}
-		seen[tf.Name] = struct{}{}
-		sections = append(sections, &codegen.SectionTemplate{
-			Name:   "convert-create-helper",
-			Source: transformHelperT,
-			Data:   tf,
-		})
-	}
-
-	return &codegen.File{Path: path, SectionTemplates: sections}, nil
 }
 
 // uniquify checks if base is a key of taken and if not returns it. Otherwise
@@ -337,14 +193,40 @@ func uniquify(base string, taken map[string]struct{}) string {
 	return name
 }
 
-type dtRec struct {
-	path string
-	seen map[string]expr.DataType
-}
+type (
+	// externalTypePair identifies a Go representation matched to one authored
+	// schema. The same external union may have a different authored branch order.
+	externalTypePair struct {
+		external reflect.Type
+		authored expr.DataType
+	}
 
-func (r dtRec) append(p string) dtRec {
+	dtRec struct {
+		path  string
+		seen  map[externalTypePair]expr.DataType
+		named map[expr.UserType]reflect.Type
+	}
+)
+
+func appendPath(r dtRec, p string) dtRec {
 	r.path += p
 	return r
+}
+
+// buildExternalDesignType returns the reflected design graph and the exact Go
+// type behind every named node that may require a package-qualified reference.
+func buildExternalDesignType(t reflect.Type, ref expr.DataType) (expr.DataType, map[expr.UserType]reflect.Type, error) {
+	named := make(map[expr.UserType]reflect.Type)
+	rec := dtRec{
+		path:  "<value>",
+		seen:  make(map[externalTypePair]expr.DataType),
+		named: named,
+	}
+	var dataType expr.DataType
+	if err := buildDesignType(&dataType, t, ref, rec); err != nil {
+		return nil, nil, err
+	}
+	return dataType, named, nil
 }
 
 // buildDesignType builds a user type that represents the given external type.
@@ -355,21 +237,43 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 	// check compatibility
 	if ref != nil {
 		if err := compatible(ref, t); err != nil {
-			return fmt.Errorf("%q: %s", t.Name(), err)
+			return fmt.Errorf("%q: %w", t.Name(), err)
 		}
 	}
 
 	// handle recursive data structures
 	var rec dtRec
+	pair := externalTypePair{external: t, authored: ref}
 	if recs != nil {
 		rec = recs[0]
-		if s, ok := rec.seen[t.Name()]; ok {
+		if s, ok := rec.seen[pair]; ok {
 			*dt = s
 			return nil
 		}
 	} else {
 		rec.path = "<value>"
-		rec.seen = make(map[string]expr.DataType)
+		rec.seen = make(map[externalTypePair]expr.DataType)
+		rec.named = make(map[expr.UserType]reflect.Type)
+	}
+
+	if ref != nil && expr.IsUnion(ref) && t.Kind() != reflect.Pointer {
+		return buildExternalUnion(dt, t, ref, rec)
+	}
+
+	// Preserve named scalars and collections wherever they occur, including
+	// fields, collection keys and elements. Record a collection before visiting
+	// its children so recursive references keep the same external declaration.
+	if t.Name() != "" && t.PkgPath() != "" &&
+		(isPrimitive(t) || t.Kind() == reflect.Slice || t.Kind() == reflect.Map) {
+		named := &expr.UserTypeExpr{
+			AttributeExpr: &expr.AttributeExpr{},
+			TypeName:      t.Name(),
+			UID:           t.PkgPath() + "#" + t.Name(),
+		}
+		*dt = named
+		rec.seen[pair] = named
+		rec.named[named] = t
+		dt = &named.Type
 	}
 
 	switch t.Kind() {
@@ -414,8 +318,8 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 			eref = expr.AsArray(ref).ElemType.Type
 		}
 		var elem expr.DataType
-		if err := buildDesignType(&elem, e, eref, rec.append("[0]")); err != nil {
-			return fmt.Errorf("%s", err)
+		if err := buildDesignType(&elem, e, eref, appendPath(rec, "[0]")); err != nil {
+			return fmt.Errorf("%w", err)
 		}
 		*dt = &expr.Array{ElemType: &expr.AttributeExpr{Type: elem}}
 
@@ -427,12 +331,12 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 			vref = m.ElemType.Type
 		}
 		var kt expr.DataType
-		if err := buildDesignType(&kt, t.Key(), kref, rec.append(".key")); err != nil {
-			return fmt.Errorf("%s", err)
+		if err := buildDesignType(&kt, t.Key(), kref, appendPath(rec, ".key")); err != nil {
+			return fmt.Errorf("%w", err)
 		}
 		var vt expr.DataType
-		if err := buildDesignType(&vt, t.Elem(), vref, rec.append(".value")); err != nil {
-			return fmt.Errorf("%s", err)
+		if err := buildDesignType(&vt, t.Elem(), vref, appendPath(rec, ".value")); err != nil {
+			return fmt.Errorf("%w", err)
 		}
 		*dt = &expr.Map{KeyType: &expr.AttributeExpr{Type: kt}, ElemType: &expr.AttributeExpr{Type: vt}}
 
@@ -442,17 +346,26 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 			oref = expr.AsObject(ref)
 		}
 
-		// Build list of fields that should not be ignored.
+		// Keep only fields represented by the matching design object. External
+		// structs may contain additional fields, but generated transforms neither
+		// read nor write them and therefore must not reserve their package imports.
 		var fields []reflect.StructField
 		for i := 0; i < t.NumField(); i++ {
 			f := t.FieldByIndex([]int{i})
 			atn, _ := attributeName(oref, f.Name)
 			if oref != nil {
-				if at := oref.Attribute(atn); at != nil {
-					if m := at.Meta["struct.field.external"]; len(m) > 0 {
-						if m[0] == "-" {
-							continue
-						}
+				at := oref.Attribute(atn)
+				if at == nil {
+					continue
+				}
+				if m := at.Meta["struct:field:external"]; len(m) > 0 {
+					if m[0] == "-" {
+						continue
+					}
+				}
+				if m := at.Meta["struct.field.external"]; len(m) > 0 { // Deprecated syntax. Only present for backward compatibility.
+					if m[0] == "-" {
+						continue
 					}
 				}
 			}
@@ -467,10 +380,11 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 			UID:           t.PkgPath() + "#" + t.Name(),
 		}
 		*dt = ut
-		rec.seen[t.Name()] = ut
+		rec.seen[pair] = ut
+		rec.named[ut] = t
 		var required []string
 		for i, f := range fields {
-			recf := rec.append("." + f.Name)
+			recf := appendPath(rec, "."+f.Name)
 			atn, fn := attributeName(oref, f.Name)
 			var aref expr.DataType
 			if oref != nil {
@@ -479,9 +393,10 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 				}
 			}
 			var fdt expr.DataType
-			if f.Type.Kind() == reflect.Ptr {
+			switch f.Type.Kind() {
+			case reflect.Pointer:
 				if err := buildDesignType(&fdt, f.Type.Elem(), aref, recf); err != nil {
-					return fmt.Errorf("%q.%s: %s", t.Name(), f.Name, err)
+					return fmt.Errorf("%q.%s: %w", t.Name(), f.Name, err)
 				}
 				if expr.IsArray(fdt) {
 					return fmt.Errorf("%s: field of type pointer to slice are not supported, use slice instead", rec.path)
@@ -489,14 +404,22 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 				if expr.IsMap(fdt) {
 					return fmt.Errorf("%s: field of type pointer to map are not supported, use map instead", rec.path)
 				}
-			} else if f.Type.Kind() == reflect.Struct {
-				return fmt.Errorf("%s: fields of type struct must use pointers", recf.path)
-			} else {
+			case reflect.Struct:
+				if aref == nil || !expr.IsUnion(aref) {
+					return fmt.Errorf("%s: fields of type struct must use pointers", recf.path)
+				}
+				if err := buildDesignType(&fdt, f.Type, aref, recf); err != nil {
+					return err
+				}
+				// Required marks a value field in the reflected Go description.
+				// Pointer union fields remain optional in that description.
+				required = append(required, atn)
+			default:
 				if isPrimitive(f.Type) {
 					required = append(required, atn)
 				}
-				if err := buildDesignType(&fdt, f.Type, aref, rec.append("."+f.Name)); err != nil {
-					return fmt.Errorf("%q.%s: %s", t.Name(), f.Name, err)
+				if err := buildDesignType(&fdt, f.Type, aref, appendPath(rec, "."+f.Name)); err != nil {
+					return fmt.Errorf("%q.%s: %w", t.Name(), f.Name, err)
 				}
 			}
 			name := atn
@@ -513,7 +436,13 @@ func buildDesignType(dt *expr.DataType, t reflect.Type, ref expr.DataType, recs 
 		}
 		return nil
 
-	case reflect.Ptr:
+	case reflect.Pointer:
+		// Field and branch traversal consume the one union pointer they can
+		// represent. A remaining pointer would be lost by the collection or
+		// field converter, so reject it before recording an incorrect layout.
+		if ref != nil && expr.IsUnion(ref) {
+			return fmt.Errorf("%s: pointer to union %s is not supported here; use a value in collections or a single pointer in fields and branches", rec.path, t)
+		}
 		rec.path = "*(" + rec.path + ")"
 		if err := buildDesignType(dt, t.Elem(), ref, rec); err != nil {
 			return err
@@ -533,8 +462,15 @@ func attributeName(obj *expr.Object, name string) (string, string) {
 	if obj == nil {
 		return name, ""
 	}
-	// first look for a "struct.field.external" meta
+	// first look for a "struct:field:external" meta
 	for _, nat := range *obj {
+		if m := nat.Attribute.Meta["struct:field:external"]; len(m) > 0 {
+			if m[0] == name {
+				return nat.Name, name
+			}
+		}
+	}
+	for _, nat := range *obj { // Deprecated syntax. Only present for backward compatibility.
 		if m := nat.Attribute.Meta["struct.field.external"]; len(m) > 0 {
 			if m[0] == name {
 				return nat.Name, name
@@ -613,7 +549,7 @@ type compRec struct {
 	seen map[string]struct{}
 }
 
-func (r compRec) append(p string) compRec {
+func appendCompPath(r compRec, p string) compRec {
 	r.path += p
 	return r
 }
@@ -622,7 +558,7 @@ func (r compRec) append(p string) compRec {
 // returns nil if they do, an error otherwise.
 func compatible(from expr.DataType, to reflect.Type, recs ...compRec) error {
 	// deference if needed
-	if to.Kind() == reflect.Ptr {
+	if to.Kind() == reflect.Pointer {
 		return compatible(from, to.Elem(), recs...)
 	}
 
@@ -643,6 +579,19 @@ func compatible(from expr.DataType, to reflect.Type, recs ...compRec) error {
 	}
 	rec.seen[from.Hash()+"-"+toName] = struct{}{}
 
+	if union := expr.AsUnion(from); union != nil {
+		branches, err := externalUnionBranches(to, union)
+		if err != nil {
+			return fmt.Errorf("%s: %w", rec.path, err)
+		}
+		for i, branch := range union.Values {
+			if err := compatible(branch.Attribute.Type, branches[i], appendCompPath(rec, "."+branch.Name)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	if expr.IsArray(from) {
 		if to.Kind() != reflect.Slice {
 			return fmt.Errorf("types don't match: %s must be a slice", rec.path)
@@ -650,7 +599,7 @@ func compatible(from expr.DataType, to reflect.Type, recs ...compRec) error {
 		return compatible(
 			expr.AsArray(from).ElemType.Type,
 			to.Elem(),
-			rec.append("[0]"),
+			appendCompPath(rec, "[0]"),
 		)
 	}
 
@@ -661,14 +610,14 @@ func compatible(from expr.DataType, to reflect.Type, recs ...compRec) error {
 		if err := compatible(
 			expr.AsMap(from).ElemType.Type,
 			to.Elem(),
-			rec.append(".value"),
+			appendCompPath(rec, ".value"),
 		); err != nil {
 			return err
 		}
 		return compatible(
 			expr.AsMap(from).KeyType.Type,
 			to.Key(),
-			rec.append(".key"),
+			appendCompPath(rec, ".key"),
 		)
 	}
 
@@ -684,18 +633,22 @@ func compatible(from expr.DataType, to reflect.Type, recs ...compRec) error {
 				ok    bool
 				field reflect.StructField
 			)
-			{
-				if ef, k := nat.Attribute.Meta["struct.field.external"]; k {
-					fname = ef[0]
-					if fname == "-" {
-						continue
-					}
-					field, ok = to.FieldByName(ef[0])
-				} else {
-					ef := codegen.Goify(ma.ElemName(nat.Name), true)
-					fname = ef
-					field, ok = to.FieldByName(ef)
+			if ef, k := nat.Attribute.Meta["struct:field:external"]; k {
+				fname = ef[0]
+				if fname == "-" {
+					continue
 				}
+				field, ok = to.FieldByName(ef[0])
+			} else if ef, k := nat.Attribute.Meta["struct.field.external"]; k { // Deprecated syntax. Only present for backward compatibility.
+				fname = ef[0]
+				if fname == "-" {
+					continue
+				}
+				field, ok = to.FieldByName(ef[0])
+			} else {
+				ef := codegen.Goify(ma.ElemName(nat.Name), true)
+				fname = ef
+				field, ok = to.FieldByName(ef)
 			}
 			if !ok {
 				return fmt.Errorf("types don't match: could not find field %q of external type %q matching attribute %q of type %q",
@@ -704,7 +657,7 @@ func compatible(from expr.DataType, to reflect.Type, recs ...compRec) error {
 			err := compatible(
 				nat.Attribute.Type,
 				field.Type,
-				rec.append("."+fname),
+				appendCompPath(rec, "."+fname),
 			)
 			if err != nil {
 				return err
@@ -718,34 +671,12 @@ func compatible(from expr.DataType, to reflect.Type, recs ...compRec) error {
 		if err := buildDesignType(&dt, to, nil); err != nil {
 			return err
 		}
-		if expr.Equal(dt, from) {
+		// Primitive conversion depends on the underlying kind. Keep named types in
+		// the graph so the converter still emits their exact Go names.
+		if expr.IsPrimitive(from) && codegen.IsCompatible(dt, from, toName, rec.path) == nil {
 			return nil
 		}
 	}
 
 	return fmt.Errorf("types don't match: type of %s is %s but type of corresponding attribute is %s", rec.path, toName, from.Name())
 }
-
-// input: convertData
-const convertT = `{{ printf "%s creates an instance of %s initialized from t." .Name .TypeName | comment }}
-func (t {{ .ReceiverTypeRef }}) {{ .Name }}() {{ .TypeRef }} {
-    {{ .Code }}
-    return v
-}
-`
-
-// input: convertData
-const createT = `{{ printf "%s initializes t from the fields of v" .Name | comment }}
-func (t {{ .ReceiverTypeRef }}) {{ .Name }}(v {{ .TypeRef }}) {
-	{{ .Code }}
-	*t = *temp
-}
-`
-
-// input: TransformFunctionData
-const transformHelperT = `{{ printf "%s builds a value of type %s from a value of type %s." .Name .ResultTypeRef .ParamTypeRef | comment }}
-func {{ .Name }}(v {{ .ParamTypeRef }}) {{ .ResultTypeRef }} {
-        {{ .Code }}
-        return res
-}
-`

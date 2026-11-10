@@ -2,11 +2,11 @@ package grpc
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 
 	goa "goa.design/goa/v3/pkg"
 )
@@ -22,7 +22,7 @@ type (
 		// It takes a protocol buffer message type and returns a
 		// protocol buffer message type and any error when executing the
 		// RPC.
-		Handle(ctx context.Context, reqpb interface{}) (respb interface{}, err error)
+		Handle(ctx context.Context, reqpb any) (respb any, err error)
 	}
 
 	// StreamHandler handles a streaming RPC. The stream may be client-side,
@@ -32,11 +32,11 @@ type (
 		//
 		// input contains the endpoint payload (if any) and generated
 		// endpoint stream.
-		Handle(ctx context.Context, input interface{}) (err error)
+		Handle(ctx context.Context, input any) (err error)
 		// Decode decodes the protocol buffer message and metadata to
 		// the service type. For client-side and bidirectional streams,
 		// the message is nil.
-		Decode(ctx context.Context, reqpb interface{}) (req interface{}, err error)
+		Decode(ctx context.Context, reqpb any) (req any, err error)
 	}
 
 	unaryHandler struct {
@@ -69,9 +69,9 @@ func NewStreamHandler(e goa.Endpoint, dec RequestDecoder) StreamHandler {
 }
 
 // Handle serves a gRPC request.
-func (h *unaryHandler) Handle(ctx context.Context, reqpb interface{}) (interface{}, error) {
+func (h *unaryHandler) Handle(ctx context.Context, reqpb any) (any, error) {
 	var (
-		req interface{}
+		req any
 		err error
 	)
 	{
@@ -79,13 +79,18 @@ func (h *unaryHandler) Handle(ctx context.Context, reqpb interface{}) (interface
 			// Decode gRPC request message and incoming metadata
 			md, _ := metadata.FromIncomingContext(ctx)
 			if req, err = h.decoder(ctx, reqpb, md); err != nil {
-				return nil, status.Error(codes.InvalidArgument, err.Error())
+				var e *goa.ServiceError
+				if errors.As(err, &e) {
+					return nil, err
+				}
+				gerr := goa.DecodePayloadError(err.Error())
+				return nil, NewStatusError(codes.InvalidArgument, gerr, NewErrorResponse(gerr))
 			}
 		}
 	}
 
 	var (
-		resp interface{}
+		resp any
 	)
 	{
 		// Invoke goa endpoint
@@ -95,7 +100,7 @@ func (h *unaryHandler) Handle(ctx context.Context, reqpb interface{}) (interface
 	}
 
 	var (
-		respb interface{}
+		respb any
 
 		hdr  = metadata.MD{}
 		trlr = metadata.MD{}
@@ -104,7 +109,12 @@ func (h *unaryHandler) Handle(ctx context.Context, reqpb interface{}) (interface
 		if h.encoder != nil {
 			// Encode gRPC response
 			if respb, err = h.encoder(ctx, resp, &hdr, &trlr); err != nil {
-				return nil, status.Error(codes.Unknown, err.Error())
+				var e *goa.ServiceError
+				if errors.As(err, &e) {
+					return nil, err
+				}
+				gerr := goa.Fault("%s", err.Error())
+				return nil, NewStatusError(codes.Unknown, gerr, NewErrorResponse(gerr))
 			}
 		}
 	}
@@ -112,14 +122,16 @@ func (h *unaryHandler) Handle(ctx context.Context, reqpb interface{}) (interface
 	// Encode gRPC headers
 	if len(hdr) > 0 {
 		if err := grpc.SendHeader(ctx, hdr); err != nil {
-			return nil, status.Error(codes.Unknown, err.Error())
+			gerr := goa.Fault("%s", err.Error())
+			return nil, NewStatusError(codes.Unknown, gerr, NewErrorResponse(gerr))
 		}
 	}
 
 	// Encode gRPC trailers
 	if len(trlr) > 0 {
 		if err := grpc.SetTrailer(ctx, trlr); err != nil {
-			return nil, status.Error(codes.Unknown, err.Error())
+			gerr := goa.Fault("%s", err.Error())
+			return nil, NewStatusError(codes.Unknown, gerr, NewErrorResponse(gerr))
 		}
 	}
 
@@ -127,16 +139,21 @@ func (h *unaryHandler) Handle(ctx context.Context, reqpb interface{}) (interface
 }
 
 // Decode decodes the request message and incoming metadata into goa type.
-func (h *streamHandler) Decode(ctx context.Context, reqpb interface{}) (interface{}, error) {
+func (h *streamHandler) Decode(ctx context.Context, reqpb any) (any, error) {
 	var (
-		req interface{}
+		req any
 		err error
 	)
 	{
 		if h.decoder != nil {
 			md, _ := metadata.FromIncomingContext(ctx)
 			if req, err = h.decoder(ctx, reqpb, md); err != nil {
-				return nil, status.Error(codes.InvalidArgument, err.Error())
+				var e *goa.ServiceError
+				if errors.As(err, &e) {
+					return nil, err
+				}
+				gerr := goa.DecodePayloadError(err.Error())
+				return nil, NewStatusError(codes.InvalidArgument, gerr, NewErrorResponse(gerr))
 			}
 		}
 	}
@@ -144,7 +161,7 @@ func (h *streamHandler) Decode(ctx context.Context, reqpb interface{}) (interfac
 }
 
 // Handle serves a gRPC request.
-func (h *streamHandler) Handle(ctx context.Context, stream interface{}) error {
+func (h *streamHandler) Handle(ctx context.Context, stream any) error {
 	_, err := h.endpoint(ctx, stream)
 	return err
 }

@@ -1,0 +1,73 @@
+{
+  "components": {
+    "schemas": {
+      "UserType": {
+        "example": {
+          "a": "event"
+        },
+        "properties": {
+          "a": {
+            "example": "event",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Goa API",
+    "version": "0.0.1"
+  },
+  "openapi": "3.2.0",
+  "paths": {
+    "/{x}": {
+      "get": {
+        "operationId": "StreamingResultService#StreamingResultMethod",
+        "parameters": [
+          {
+            "example": "request",
+            "in": "path",
+            "name": "x",
+            "required": true,
+            "schema": {
+              "example": "request",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "a": "event"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/UserType"
+                }
+              }
+            },
+            "description": "Switching Protocols response."
+          }
+        },
+        "summary": "StreamingResultMethod StreamingResultService",
+        "tags": [
+          "StreamingResultService"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Default server for test api",
+      "name": "test api",
+      "url": "http://localhost:80"
+    }
+  ],
+  "tags": [
+    {
+      "name": "StreamingResultService"
+    }
+  ]
+}

@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"goa.design/goa/v3/eval"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTaggedAttribute(t *testing.T) {
@@ -100,210 +101,6 @@ func TestTaggedAttribute(t *testing.T) {
 				t.Errorf("got %#v, expected %#v", actual, tc.expected)
 			}
 		})
-	}
-}
-
-func TestAttributeExprValidate(t *testing.T) {
-	var (
-		ctx           = "ctx"
-		normalizedCtx = ctx + " - "
-
-		validation = &ValidationExpr{
-			Required: []string{"foo"},
-		}
-
-		metadata = MetaExpr{
-			"view": []string{"foo"},
-		}
-
-		fieldNotExistType      = &Object{}
-		notAResultType         = Boolean
-		viewNotDefinedTypeName = "ViewNotDefinedType"
-
-		errAttributeTypeNil      = fmt.Errorf("attribute type is nil")
-		errRequiredFieldNotExist = fmt.Errorf(`%srequired field %q does not exist in type %s`, normalizedCtx, "foo", fieldNotExistType.Name())
-		errViewButNotAResultType = fmt.Errorf("%s uses view %q but %q is not a result type", normalizedCtx, metadata["view"][0], notAResultType.Name())
-		errTypeNotDefineView     = fmt.Errorf("%s: type %q does not define view %q", normalizedCtx, viewNotDefinedTypeName, "foo")
-	)
-	cases := map[string]struct {
-		typ        DataType
-		validation *ValidationExpr
-		metadata   MetaExpr
-		expected   *eval.ValidationErrors
-	}{
-		"no error": {
-			typ:      Boolean,
-			expected: &eval.ValidationErrors{},
-		},
-		"attribute type is nil": {
-			typ:      nil,
-			expected: &eval.ValidationErrors{Errors: []error{errAttributeTypeNil}},
-		},
-		"attribute type is nil in the object": {
-			typ: &Object{
-				&NamedAttributeExpr{
-					Name: "foo",
-					Attribute: &AttributeExpr{
-						Type: nil,
-					},
-				},
-			},
-			expected: &eval.ValidationErrors{Errors: []error{errAttributeTypeNil}},
-		},
-		"attribute type is nil in the array": {
-			typ: &Array{
-				ElemType: &AttributeExpr{
-					Type: nil,
-				},
-			},
-			expected: &eval.ValidationErrors{Errors: []error{errAttributeTypeNil}},
-		},
-		"required field does not exist": {
-			typ: &Object{
-				&NamedAttributeExpr{
-					Name: "bar",
-					Attribute: &AttributeExpr{
-						Type: Boolean,
-					},
-				},
-			},
-			validation: validation,
-			expected:   &eval.ValidationErrors{Errors: []error{errRequiredFieldNotExist}},
-		},
-		"required field does not exist in the object": {
-			typ: &Object{
-				&NamedAttributeExpr{
-					Name: "bar",
-					Attribute: &AttributeExpr{
-						Type: &Object{
-							&NamedAttributeExpr{
-								Name: "baz",
-								Attribute: &AttributeExpr{
-									Type: Boolean,
-								},
-							},
-						},
-					},
-				},
-			},
-			validation: validation,
-			expected:   &eval.ValidationErrors{Errors: []error{errRequiredFieldNotExist}},
-		},
-		"required field does not exist in the array": {
-			typ: &Object{
-				&NamedAttributeExpr{
-					Name: "bar",
-					Attribute: &AttributeExpr{
-						Type: &Array{
-							ElemType: &AttributeExpr{
-								Type: Boolean,
-							},
-						},
-					},
-				},
-			},
-			validation: validation,
-			expected:   &eval.ValidationErrors{Errors: []error{errRequiredFieldNotExist}},
-		},
-		"required field exists in extended attribute": {
-			typ: &UserTypeExpr{
-				TypeName: "Extended2Attr",
-				AttributeExpr: &AttributeExpr{
-					Type: &Object{
-						&NamedAttributeExpr{
-							Name: "bar",
-							Attribute: &AttributeExpr{
-								Type: &Array{
-									ElemType: &AttributeExpr{
-										Type: Boolean,
-									},
-								},
-							},
-						},
-					},
-					Bases: []DataType{
-						&UserTypeExpr{
-							TypeName: "Extended1Attr",
-							AttributeExpr: &AttributeExpr{
-								Type: &Object{
-									&NamedAttributeExpr{
-										Name: "foobar",
-										Attribute: &AttributeExpr{
-											Type: &Array{
-												ElemType: &AttributeExpr{
-													Type: Boolean,
-												},
-											},
-										},
-									},
-								},
-								Bases: []DataType{
-									&UserTypeExpr{
-										TypeName: "Attr",
-										AttributeExpr: &AttributeExpr{
-											Type: &Object{
-												&NamedAttributeExpr{
-													Name: "foo",
-													Attribute: &AttributeExpr{
-														Type: &Array{
-															ElemType: &AttributeExpr{
-																Type: Boolean,
-															},
-														},
-													},
-												},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			validation: validation,
-			expected:   &eval.ValidationErrors{Errors: []error{}},
-		},
-		"defines a view but is not a result type": {
-			typ:      Boolean,
-			metadata: metadata,
-			expected: &eval.ValidationErrors{Errors: []error{errViewButNotAResultType}},
-		},
-		"type does not define view": {
-			typ: &ResultTypeExpr{
-				UserTypeExpr: &UserTypeExpr{
-					TypeName: viewNotDefinedTypeName,
-					AttributeExpr: &AttributeExpr{
-						Type: Boolean,
-					},
-				},
-				Views: []*ViewExpr{
-					{Name: "bar"},
-				},
-			},
-			metadata: metadata,
-			expected: &eval.ValidationErrors{Errors: []error{errTypeNotDefineView}},
-		},
-	}
-
-	for k, tc := range cases {
-		attribute := AttributeExpr{
-			Type:       tc.typ,
-			Validation: tc.validation,
-			Meta:       tc.metadata,
-		}
-		if actual := attribute.Validate(ctx, nil); tc.expected != actual {
-			if len(tc.expected.Errors) != len(actual.Errors) {
-				t.Errorf("%s: expected the number of error values to match %d got %d ", k, len(tc.expected.Errors), len(actual.Errors))
-				t.Errorf("%#v", actual.Errors[0])
-			} else {
-				for i, err := range actual.Errors {
-					if err.Error() != tc.expected.Errors[i].Error() {
-						t.Errorf("%s: got %#v, expected %#v at index %d", k, err, tc.expected.Errors[i], i)
-					}
-				}
-			}
-		}
 	}
 }
 
@@ -534,6 +331,41 @@ func TestAttributeExprIsPrimitivePointer(t *testing.T) {
 			useDefault: false, // should have panicked!
 			expected:   false, // should have panicked!
 		},
+		// Test that non-primitive types (like maps, user types) return false early
+		// This verifies the fix that adds an early return check for !IsPrimitive(att.Type)
+		"non-primitive-early-return": {
+			attribute: AttributeExpr{
+				Type: &Object{
+					&NamedAttributeExpr{
+						Name: "userType",
+						Attribute: &AttributeExpr{
+							Type: &UserTypeExpr{
+								AttributeExpr: &AttributeExpr{
+									Type: &Object{
+										&NamedAttributeExpr{
+											Name:      "name",
+											Attribute: &AttributeExpr{Type: String},
+										},
+									},
+								},
+							},
+						},
+					},
+					&NamedAttributeExpr{
+						Name: "mapType",
+						Attribute: &AttributeExpr{
+							Type: &Map{
+								KeyType:  &AttributeExpr{Type: String},
+								ElemType: &AttributeExpr{Type: String},
+							},
+						},
+					},
+				},
+			},
+			attName:    "userType",
+			useDefault: false,
+			expected:   false, // Non-primitive types should return false
+		},
 	}
 
 	for k, tc := range cases {
@@ -719,7 +551,7 @@ func TestAttributeExprHasDefaultValue(t *testing.T) {
 
 func TestValidationExprHasRequiredOnly(t *testing.T) {
 	var (
-		values           = []interface{}{"foo"}
+		values           = []any{"foo"}
 		pattern          = "^foo$"
 		exclusiveMinimum = 1.1
 		minimum          = 1.1
@@ -729,7 +561,7 @@ func TestValidationExprHasRequiredOnly(t *testing.T) {
 		maxLength        = 3
 	)
 	cases := map[string]struct {
-		values           []interface{}
+		values           []any
 		format           ValidationFormat
 		pattern          string
 		exclusiveMinimum *float64
@@ -823,5 +655,254 @@ func TestAttributeExprEvalName(t *testing.T) {
 			t.Errorf("%s: got %#v, expected %#v", key, actual, testcase.expected)
 		}
 	}
+}
 
+// TestAttributeExprFinalizeMultiLevelInheritanceWithBackEdges verifies that
+// Finalize merges transitive base types (RootBase -> Ancestor -> Base ->
+// Derived) into a child attribute on Node even when Ancestor has a value field
+// referencing Node directly or through an array, map, or union.
+func TestAttributeExprFinalizeMultiLevelInheritanceWithBackEdges(t *testing.T) {
+	shapes := []string{"object", "array", "map", "union"}
+	orders := []bool{false, true} // false: self first, true: nested first
+	levels := []bool{false, true} // false: 3 levels (Ancestor -> Base -> Derived), true: 4 levels (RootBase -> Ancestor -> Base -> Derived)
+
+	for _, shape := range shapes {
+		for _, nestedFirst := range orders {
+			for _, hasRootBase := range levels {
+				name := fmt.Sprintf("shape=%s/nestedFirst=%v/hasRootBase=%v", shape, nestedFirst, hasRootBase)
+				t.Run(name, func(t *testing.T) {
+					var rootBase *UserTypeExpr
+					if hasRootBase {
+						rootBase = &UserTypeExpr{
+							TypeName: "RootBase",
+							AttributeExpr: &AttributeExpr{
+								Type: &Object{
+									{Name: "root_field", Attribute: &AttributeExpr{Type: String}},
+								},
+							},
+						}
+					}
+
+					node := &UserTypeExpr{
+						TypeName:      "Node",
+						AttributeExpr: &AttributeExpr{Type: &Object{}},
+					}
+
+					var backEdgeType DataType
+					switch shape {
+					case "object":
+						backEdgeType = node
+					case "array":
+						backEdgeType = &Array{ElemType: &AttributeExpr{Type: node}}
+					case "map":
+						backEdgeType = &Map{KeyType: &AttributeExpr{Type: String}, ElemType: &AttributeExpr{Type: node}}
+					case "union":
+						backEdgeType = &Union{
+							TypeName: "BackChoice",
+							Values: []*NamedAttributeExpr{
+								{Name: "node", Attribute: &AttributeExpr{Type: node}},
+							},
+						}
+					}
+
+					minLen := 2
+					ancestorAtt := &AttributeExpr{
+						Type: &Object{
+							{Name: "query", Attribute: &AttributeExpr{
+								Type:       String,
+								Validation: &ValidationExpr{MinLength: &minLen},
+							}},
+							{Name: "back", Attribute: &AttributeExpr{Type: backEdgeType}},
+						},
+						Validation: &ValidationExpr{Required: []string{"query"}},
+					}
+					if hasRootBase {
+						ancestorAtt.Bases = []DataType{rootBase}
+					}
+
+					ancestor := &UserTypeExpr{
+						TypeName:      "Ancestor",
+						AttributeExpr: ancestorAtt,
+					}
+
+					base := &UserTypeExpr{
+						TypeName: "Base",
+						AttributeExpr: &AttributeExpr{
+							Type:  &Object{},
+							Bases: []DataType{ancestor},
+						},
+					}
+
+					derived := &UserTypeExpr{
+						TypeName: "Derived",
+						AttributeExpr: &AttributeExpr{
+							Type:  &Object{},
+							Bases: []DataType{base},
+						},
+					}
+
+					nestedAtt := &AttributeExpr{
+						Type:  &Object{},
+						Bases: []DataType{derived},
+					}
+					selfField := &NamedAttributeExpr{Name: "self", Attribute: &AttributeExpr{Type: node}}
+					nestedField := &NamedAttributeExpr{Name: "nested", Attribute: nestedAtt}
+
+					nodeObj := AsObject(node.Type)
+					if nestedFirst {
+						*nodeObj = []*NamedAttributeExpr{nestedField, selfField}
+					} else {
+						*nodeObj = []*NamedAttributeExpr{selfField, nestedField}
+					}
+
+					// Finalize in declaration order: (RootBase), Ancestor, Base, Derived, Node
+					if hasRootBase {
+						rootBase.Finalize()
+					}
+					ancestor.Finalize()
+					base.Finalize()
+					derived.Finalize()
+					node.Finalize()
+
+					// Verify nested in Node retained ancestor properties and validations
+					nestedObj := AsObject(nestedAtt.Type)
+					require.NotNil(t, nestedObj)
+					queryAtt := nestedObj.Attribute("query")
+					require.NotNil(t, queryAtt, "nested must retain query attribute from Ancestor")
+					assert.Equal(t, String, queryAtt.Type)
+					require.NotNil(t, queryAtt.Validation)
+					require.NotNil(t, queryAtt.Validation.MinLength)
+					assert.Equal(t, 2, *queryAtt.Validation.MinLength)
+					assert.True(t, nestedAtt.IsRequired("query"), "nested must retain required validation for query")
+
+					if hasRootBase {
+						rootField := nestedObj.Attribute("root_field")
+						require.NotNil(t, rootField, "nested must retain root_field from RootBase")
+						assert.Equal(t, String, rootField.Type)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestAttributeExprFinalizeReferenceAndExtendPreservesBaseDefault verifies that
+// combining Reference and Extend at top-level or nested object attributes
+// applies Reference before Extend without mutating shared base defaults, and
+// keeps Required validations on Extend without propagating Base Required lists
+// into unfinalized Reference targets.
+func TestAttributeExprFinalizeReferenceAndExtendPreservesBaseDefault(t *testing.T) {
+	requiredAncestor := &UserTypeExpr{
+		TypeName: "RequiredAncestor",
+		AttributeExpr: &AttributeExpr{
+			Type: &Object{
+				{Name: "status", Attribute: &AttributeExpr{
+					Type:         String,
+					DefaultValue: "active",
+				}},
+			},
+			Validation: &ValidationExpr{Required: []string{"status"}},
+		},
+	}
+
+	sharedBase := &UserTypeExpr{
+		TypeName: "SharedBase",
+		AttributeExpr: &AttributeExpr{
+			Type:  &Object{},
+			Bases: []DataType{requiredAncestor},
+		},
+	}
+
+	referencing := &UserTypeExpr{
+		TypeName: "ReferencingType",
+		AttributeExpr: &AttributeExpr{
+			Type: &Object{
+				{Name: "status", Attribute: &AttributeExpr{
+					Type:         String,
+					DefaultValue: "custom",
+				}},
+			},
+			References: []DataType{sharedBase},
+		},
+	}
+
+	extending := &UserTypeExpr{
+		TypeName: "ExtendingType",
+		AttributeExpr: &AttributeExpr{
+			Type: &Object{
+				{Name: "name", Attribute: &AttributeExpr{
+					Type: String,
+				}},
+			},
+			Bases: []DataType{sharedBase},
+		},
+	}
+
+	// Repeated Finalize calls across referencing, extending, and sharedBase
+	for i := 0; i < 3; i++ {
+		referencing.Finalize()
+		extending.Finalize()
+		sharedBase.Finalize()
+	}
+
+	baseStatus := AsObject(sharedBase.Type).Attribute("status")
+	require.NotNil(t, baseStatus)
+	assert.Equal(t, "active", baseStatus.DefaultValue, "shared base default value must not be contaminated")
+
+	refStatus := AsObject(referencing.Type).Attribute("status")
+	require.NotNil(t, refStatus)
+	assert.Equal(t, "custom", refStatus.DefaultValue, "referencing attribute must keep its authored default value")
+	assert.False(t, referencing.IsRequired("status"), "referencing attribute must not inherit Required from unfinalized Extend base")
+
+	extStatus := AsObject(extending.Type).Attribute("status")
+	require.NotNil(t, extStatus)
+	assert.Equal(t, "active", extStatus.DefaultValue, "extending attribute must inherit default value from base")
+	assert.True(t, extending.IsRequired("status"), "extending attribute must inherit Required from base")
+
+	nestedBase := &UserTypeExpr{
+		TypeName: "NestedBase",
+		AttributeExpr: &AttributeExpr{
+			Type: &Object{
+				{Name: "query", Attribute: &AttributeExpr{Type: String}},
+			},
+		},
+	}
+	nestedParent := &UserTypeExpr{
+		TypeName: "NestedParent",
+		AttributeExpr: &AttributeExpr{
+			Type: &Object{
+				{Name: "settings", Attribute: &AttributeExpr{
+					Type: &Object{
+						{Name: "options", Attribute: &AttributeExpr{
+							Type: &Object{
+								{Name: "query", Attribute: &AttributeExpr{
+									Type:         String,
+									DefaultValue: "reference",
+								}},
+							},
+						}},
+					},
+				}},
+			},
+		},
+	}
+	options := &AttributeExpr{
+		Type: &Object{
+			{Name: "query", Attribute: &AttributeExpr{Type: String}},
+		},
+		Bases: []DataType{nestedBase},
+	}
+	child := &AttributeExpr{
+		Type: &Object{
+			{Name: "settings", Attribute: &AttributeExpr{
+				Type: &Object{
+					{Name: "options", Attribute: options},
+				},
+			}},
+		},
+		References: []DataType{nestedParent},
+	}
+	child.Finalize()
+	assert.Nil(t, nestedBase.Find("query").DefaultValue, "nested Reference must not contaminate shared Base default")
+	assert.Nil(t, options.Find("query").DefaultValue, "nested Extend must override outer Reference default")
 }

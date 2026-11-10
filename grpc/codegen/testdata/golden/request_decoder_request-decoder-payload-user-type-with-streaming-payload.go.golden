@@ -1,0 +1,34 @@
+// DecodeMethodBidirectionalStreamingRPCWithPayloadRequest decodes requests
+// sent to "ServiceBidirectionalStreamingRPCWithPayload" service
+// "MethodBidirectionalStreamingRPCWithPayload" endpoint.
+func DecodeMethodBidirectionalStreamingRPCWithPayloadRequest(ctx context.Context, v any, md metadata.MD) (any, error) {
+	var (
+		message *service_bidirectional_streaming_rpc_with_payloadpb.MethodBidirectionalStreamingRPCWithPayloadRequest
+		ok      bool
+	)
+	{
+		if v == nil {
+			return nil, goa.MissingFieldError("initial_payload", "stream")
+		}
+		var envelope *service_bidirectional_streaming_rpc_with_payloadpb.MethodBidirectionalStreamingRPCWithPayloadStreamingRequest
+		if envelope, ok = v.(*service_bidirectional_streaming_rpc_with_payloadpb.MethodBidirectionalStreamingRPCWithPayloadStreamingRequest); !ok {
+			return nil, goagrpc.ErrInvalidType("ServiceBidirectionalStreamingRPCWithPayload", "MethodBidirectionalStreamingRPCWithPayload", "*service_bidirectional_streaming_rpc_with_payloadpb.MethodBidirectionalStreamingRPCWithPayloadStreamingRequest", v)
+		}
+		switch body := envelope.Body.(type) {
+		case *service_bidirectional_streaming_rpc_with_payloadpb.MethodBidirectionalStreamingRPCWithPayloadStreamingRequest_InitialPayload:
+			if body.InitialPayload == nil {
+				return nil, goa.MissingFieldError("initial_payload", "stream")
+			}
+			message = body.InitialPayload
+		case *service_bidirectional_streaming_rpc_with_payloadpb.MethodBidirectionalStreamingRPCWithPayloadStreamingRequest_StreamItem:
+			return nil, goa.InvalidFieldTypeError("body", "stream_item", "initial_payload")
+		default:
+			return nil, goa.MissingFieldError("initial_payload", "stream")
+		}
+	}
+	var payload *servicebidirectionalstreamingrpcwithpayload.Payload
+	{
+		payload = NewMethodBidirectionalStreamingRPCWithPayloadPayload(message)
+	}
+	return payload, nil
+}

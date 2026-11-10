@@ -1,0 +1,806 @@
+scenarios:
+  # Basic echo tests
+  - name: "echo_string_http"
+    method: "echo_string"
+    transport: "http"
+    request:
+      params: "hello world"
+      id: 1
+    expect:
+      id: 1
+      result: "hello world"
+
+  - name: "echo_array_http"
+    method: "echo_array"
+    transport: "http"
+    request:
+      params:
+        items: ["one", "two", "three"]
+      id: "array-1"
+    expect:
+      id: "array-1"
+      result:
+        items: ["one", "two", "three"]
+
+  - name: "echo_object_http"
+    method: "echo_object"
+    transport: "http"
+    request:
+      params:
+        field1: "test"
+        field2: 42
+        field3: true
+      id: 2
+    expect:
+      id: 2
+      result:
+        field1: "test"
+        field2: 42
+        field3: true
+
+  - name: "echo_map_http"
+    method: "echo_map"
+    transport: "http"
+    request:
+      params:
+        data:
+          key1: "value1"
+          key2: "value2"
+      id: 3
+    expect:
+      id: 3
+      result:
+        data:
+          key1: "value1"
+          key2: "value2"
+
+  # Transform tests
+  - name: "transform_string_http"
+    method: "transform_string"
+    transport: "http"
+    request:
+      params: "hello"
+      id: 4
+    expect:
+      id: 4
+      result: "HELLO"
+
+  - name: "transform_array_http"
+    method: "transform_array"
+    transport: "http"
+    request:
+      params:
+        items: ["a", "b", "c"]
+      id: 5
+    expect:
+      id: 5
+      result:
+        items:
+          - "c"
+          - "b"
+          - "a"  # Reversed
+
+  - name: "transform_object_http"
+    method: "transform_object"
+    transport: "http"
+    request:
+      params:
+        field1: "lower"
+        field2: 21
+        field3: false
+      id: 6
+    expect:
+      id: 6
+      result:
+        field1: "LOWER"  # Uppercase
+        field2: 42       # Doubled
+        field3: true     # Negated
+
+  - name: "transform_map_http"
+    method: "transform_map"
+    transport: "http"
+    request:
+      params:
+        data:
+          key: "value"
+          another: "test"
+      id: 7
+    expect:
+      id: 7
+      result:
+        data:
+          transformed_key: "value"      # Keys prefixed with "transformed_"
+          transformed_another: "test"
+
+  # Generate tests
+  - name: "generate_string_http"
+    method: "generate_string"
+    transport: "http"
+    request:
+      id: 8
+    expect:
+      id: 8
+      result: "generated-string"
+
+  - name: "generate_array_http"
+    method: "generate_array"
+    transport: "http"
+    request:
+      id: 9
+    expect:
+      id: 9
+      result:
+        items: ["item1", "item2", "item3"]
+
+  - name: "generate_object_http"
+    method: "generate_object"
+    transport: "http"
+    request:
+      id: 10
+    expect:
+      id: 10
+      result:
+        field1: "generated-value1"
+        field2: 42
+        field3: true
+
+  - name: "generate_map_http"
+    method: "generate_map"
+    transport: "http"
+    request:
+      id: 11
+    expect:
+      id: 11
+      result:
+        data:
+          generated: true
+          count: 3
+          status: "ok"
+
+  # Notification tests (no response)
+  - name: "echo_string_notify"
+    method: "echo_string_notify"
+    transport: "http"
+    request:
+      params: "notification"
+      # No ID for notifications
+    expect:
+      no_response: true
+
+  # Error tests
+  - name: "echo_string_error"
+    method: "echo_string_error"
+    transport: "http"
+    request:
+      params: "will fail"
+      id: "err-1"
+    expect:
+      id: "err-1"
+      error:
+        code: -32602
+        message: "Invalid params"
+
+
+  # SSE streams with event notifications and a terminal null result
+  - name: "stream_object_sse"
+    method: "stream_object_sse"
+    transport: "sse"
+    request:
+      params: 
+        field1: "test"
+        field2: 3  # This controls the number of notifications
+        field3: true
+      id: "sse-2"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_object_sse"
+          params:
+            field1: "test-1"
+            field2: 1
+            field3: false
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_object_sse"
+          params:
+            field1: "test-2"
+            field2: 2
+            field3: false
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_object_sse"
+          params:
+            field1: "test-3"
+            field2: 3
+            field3: true  # Last item is true
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-2"
+          result: null
+
+  # SSE additional streaming tests
+  - name: "stream_array_sse"
+    method: "stream_array_sse"
+    transport: "sse"
+    request:
+      params:
+        items: ["first", "second"]  # Each item will be streamed
+      id: "sse-array-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_array_sse"
+          params:
+            items: ["Processing: first"]
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_array_sse"
+          params:
+            items: ["Processing: second"]
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-array-1"
+          result: null
+
+  - name: "stream_map_sse"
+    method: "stream_map_sse"
+    transport: "sse"
+    request:
+      params:
+        data:
+          key1: "value1"
+          key2: "value2"
+      id: "sse-map-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_map_sse"
+          params:
+            data:
+              key: "key1"
+              value: "value1"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_map_sse"
+          params:
+            data:
+              key: "key2"
+              value: "value2"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-map-1"
+          result: null
+
+  - name: "stream_string_sse"
+    method: "stream_string_sse"
+    transport: "sse"
+    request:
+      params: "hi"  # Length 2 = 2 notifications
+      id: "sse-string-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 1 of 2"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 2 of 2"
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-string-1"
+          result: null
+
+  # SSE error scenario - stream then error
+  - name: "stream_string_error_sse"
+    method: "stream_string_error_sse"
+    transport: "sse"
+    request:
+      params: "ab"  # 2 chars = 2 notifications before error
+      id: "sse-err-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_error_sse"
+          params:
+            value: "Stream 1 of 2"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_error_sse"
+          params:
+            value: "Stream 2 of 2"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-err-1"
+          error:
+            code: -32603
+            message: "Streaming error occurred"
+
+  # A missing ID makes the message a notification. Request-only methods reject
+  # it without sending an event.
+  - name: "stream_string_missing_id_sse"
+    method: "stream_string_sse"
+    transport: "sse"
+    request:
+      params: "abc"
+    sequence: []
+
+  # SSE edge cases and additional tests
+  # Empty array test - streams single "empty" notification
+  - name: "stream_array_empty_sse"
+    method: "stream_array_sse"
+    transport: "sse"
+    request:
+      params:
+        items: []  # Empty array
+      id: "sse-empty-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_array_sse"
+          params:
+            items: ["empty"]
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-empty-1"
+          result: null
+
+  # Single string stream - one character = one notification
+  - name: "stream_string_single_sse"
+    method: "stream_string_sse"
+    transport: "sse"
+    request:
+      params: "x"  # Length 1 = 1 notification
+      id: "sse-single-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 1 of 1"
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-single-1"
+          result: null
+
+  # Multiple items streamed rapidly
+  - name: "stream_string_multiple_sse"
+    method: "stream_string_sse"
+    transport: "sse"
+    request:
+      params: "12345"  # Length 5 = 5 notifications
+      id: "sse-rapid-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 1 of 5"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 2 of 5"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 3 of 5"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 4 of 5"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 5 of 5"
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-rapid-1"
+          result: null
+
+  # Echo test for SSE
+  - name: "echo_string_sse"
+    method: "echo_string_sse"
+    transport: "sse"
+    request:
+      params: "echo this"
+      id: "sse-echo-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "echo_string_sse"
+          params:
+            value: "echo this"
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-echo-1"
+          result: null
+
+  # Transform test for SSE
+  - name: "transform_string_sse"
+    method: "transform_string_sse"
+    transport: "sse"
+    request:
+      params: "hello world"
+      id: "sse-transform-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "transform_string_sse"
+          params:
+            value: "HELLO WORLD"
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-transform-1"
+          result: null
+
+  # Generate test for SSE
+  - name: "generate_string_sse"
+    method: "generate_string_sse"
+    transport: "sse"
+    request:
+      params: "ignored"
+      id: "sse-generate-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "generate_string_sse"
+          params:
+            value: "generated-1"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "generate_string_sse"
+          params:
+            value: "generated-2"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "generate_string_sse"
+          params:
+            value: "generated-3"
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-generate-1"
+          result: null
+
+  # Batch request tests
+  - name: "batch_mixed_requests"
+    transport: "http"
+    batch:
+      - method: "echo_string"
+        params: "hello"
+        id: "batch-1"
+      - method: "generate_array"
+        id: "batch-2"
+      - method: "echo_string_notify"
+        params: "notification in batch"
+        # Declared notifications omit the ID.
+    expect_batch:
+      - id: "batch-1"
+        result: "hello"
+      - id: "batch-2"
+        result:
+          items: ["item1", "item2", "item3"]
+      # Notification (no ID) should not return a response
+
+  # Invalid request tests
+  - name: "invalid_json"
+    transport: "http"
+    raw_request: '{"jsonrpc": "2.0", "method": "echo_string", "params": "test", "id": 1'  # Missing closing brace
+    expect:
+      error:
+        code: -32700
+        message: "Parse error"
+
+  # TODO: This test expects Goa to validate JSON-RPC protocol version
+  - name: "missing_jsonrpc_version"
+    transport: "http"
+    request:
+      jsonrpc: "-"  # Special value "-" means omit the field entirely
+      method: "echo_string"
+      params: "test"
+      id: "no-version"
+    expect:
+      id: "no-version"
+      error:
+        code: -32600
+        message: "Invalid request"
+
+  - name: "method_not_found"
+    transport: "http"
+    request:
+      method: "non_existent_method"
+      params: "test"
+      id: "not-found"
+    expect:
+      id: "not-found"
+      error:
+        code: -32601
+        message: "Method not found"
+
+  # Edge case tests
+  - name: "null_id"
+    transport: "http"
+    raw_request: '{"jsonrpc":"2.0","method":"echo_string","params":["test with null id"],"id":null}'
+    expect:
+      id: null
+      error:
+        code: -32600
+        message: "Invalid request"
+
+  - name: "numeric_string_id"
+    transport: "http"
+    request:
+      method: "echo_string"
+      params: "test"
+      id: "12345"
+    expect:
+      id: "12345"
+      result: "test"
+
+  - name: "empty_params_object"
+    transport: "http"
+    request:
+      method: "generate_string"
+      params: {}
+      id: "empty-params"
+    expect:
+      id: "empty-params"
+      result: "generated-string"
+
+
+  # Mixed Transport Tests - Service supporting both HTTP and SSE
+  
+  - name: "mixed_echo_string_http"
+    method: "echo_string"
+    transport: "http"
+    request:
+      params: "hello from mixed http"
+      id: "mixed-http-1"
+    expect:
+      id: "mixed-http-1"
+      result: "hello from mixed http"
+  
+  - name: "mixed_stream_string_sse"
+    method: "stream_string_sse"
+    transport: "sse"
+    request:
+      params: "test"  # 4 characters = 4 notifications
+      id: "mixed-sse-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 1 of 4"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 2 of 4"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 3 of 4"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 4 of 4"
+
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "mixed-sse-1"
+          result: null
+
+  # Mixed HTTP (CLI) and JSON-RPC (direct) for the same method
+  - name: "mixed_http_cli_echo"
+    method: "echo_string"
+    transport: "http"
+    request:
+      params: "hello from cli"
+      id: "mixed-cli-1"
+      # No jsonrpc field -> executor uses CLI path
+    expect:
+      id: "mixed-cli-1"
+      result: "hello from cli"
+
+  - name: "mixed_http_jsonrpc_direct_echo"
+    method: "echo_string"
+    transport: "http"
+    request:
+      jsonrpc: "2.0"  # Force direct HTTP JSON-RPC (skip CLI)
+      id: "mixed-direct-1"
+      method: "echo_string"
+      params: "hello from direct"
+    expect:
+      id: "mixed-direct-1"
+      result: "hello from direct"
+
+  # Mixed JSON-RPC + gRPC service (example generation parity)
+  - name: "grpc_jsonrpc_mixed_process_http"
+    method: "grpc_echo_string"
+    transport: "http"
+    request:
+      jsonrpc: "2.0"
+      params: "hi"
+      id: "mix-1"
+    expect:
+      id: "mix-1"
+      result: "hi"
+
+  # Note: The gRPC call itself is validated via harness gRPC client parity checks
+  # (to be added in harness/runner extensions if we choose to assert both paths here).
+
+  # Additional HTTP protocol edge cases
+  - name: "http_invalid_version_request"
+    transport: "http"
+    request:
+      jsonrpc: "-"  # Omit version field
+      method: "echo_string"
+      params: "notify"
+      # No ID. The malformed object is still an invalid request, not a notification.
+    expect:
+      error:
+        code: -32600
+        message: "Invalid request"
+
+  - name: "http_missing_method_request"
+    transport: "http"
+    raw_request: '{"jsonrpc":"2.0","params":["notify"]}'
+    expect:
+      error:
+        code: -32600
+        message: "Missing method field"
+
+  - name: "http_missing_method_with_id_raw"
+    transport: "http"
+    raw_request: '{"jsonrpc":"2.0","id":"missing-method-1"}'
+    expect:
+      id: "missing-method-1"
+      error:
+        code: -32600
+        message: "Invalid request"
+
+  # Additional SSE protocol edge cases
+  - name: "sse_invalid_version_with_id"
+    method: "echo_string_sse"
+    transport: "sse"
+    request:
+      jsonrpc: "-"  # Omit version
+      params: "ignored"
+      id: "sse-invalid-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-invalid-1"
+          error:
+            code: -32600
+            message: "Invalid request"
+
+  - name: "sse_missing_method_with_id"
+    transport: "sse"
+    request:
+      jsonrpc: "2.0"
+      # Missing method
+      params: "ignored"
+      id: "sse-missing-method-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "sse-missing-method-1"
+          error:
+            code: -32600
+            message: "Invalid request"
+
+  - name: "sse_missing_method_notification"
+    transport: "sse"
+    request:
+      jsonrpc: "2.0"
+      # Missing method and no id (notification) -> no events
+      params: "ignored"
+    sequence: []
+
+  - name: "http_params_id_with_request_id_mapping"
+    method: "echo_string_idmap"
+    transport: "http"
+    request:
+      jsonrpc: "2.0"
+      params:
+        value: "hello"
+      id: "env-1"
+    expect:
+      id: "env-1"
+      result: "env-1"
+
+  - name: "http_params_id_with_request_id_mapping_numeric_env_id"
+    method: "echo_string_idmap"
+    transport: "http"
+    request:
+      jsonrpc: "2.0"
+      params:
+        value: "hello-num"
+      id: 101
+    expect:
+      id: 101
+      result: "101"
+
+  - name: "sse_params_id_with_request_id_mapping"
+    method: "stream_string_sse"
+    transport: "sse"
+    request:
+      jsonrpc: "2.0"
+      params: "ab"
+      id: "env-sse-1"
+    sequence:
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 1 of 2"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          method: "stream_string_sse"
+          params:
+            value: "Stream 2 of 2"
+      - type: "receive"
+        expect:
+          jsonrpc: "2.0"
+          id: "env-sse-1"
+          result: null

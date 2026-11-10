@@ -1,37 +1,35 @@
 module goa.design/goa/v3
 
-go 1.17
+go 1.27.3
 
 require (
 	github.com/dimfeld/httppath v0.0.0-20170720192232-ee938bf73598
-	github.com/dimfeld/httptreemux/v5 v5.4.0
-	github.com/getkin/kin-openapi v0.79.0
-	github.com/google/gxui v0.0.0-20151028112939-f85e0a97b3a4 // indirect
-	github.com/google/uuid v1.3.0
-	github.com/gorilla/websocket v1.4.2
+	github.com/getkin/kin-openapi v0.149.0
+	github.com/go-chi/chi/v5 v5.5.0
+	github.com/gohugoio/hashstructure v1.1.0
+	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/manveru/faker v0.0.0-20171103152722-9fbc68a78c4d
-	github.com/manveru/gobdd v0.0.0-20131210092515-f1a17fdd710b // indirect
 	github.com/pkg/errors v0.9.1
-	github.com/sergi/go-diff v1.2.0
-	github.com/smartystreets/goconvey v1.6.4 // indirect
-	github.com/zach-klippenstein/goregen v0.0.0-20160303162051-795b5e3961ea
-	golang.org/x/mod v0.5.0 // indirect
-	golang.org/x/net v0.0.0-20210805182204-aaa1db679c0d // indirect
-	golang.org/x/sys v0.0.0-20210816183151-1e6c022a8912 // indirect
-	golang.org/x/tools v0.1.7
-	google.golang.org/genproto v0.0.0-20210903162649-d08c68adba83 // indirect
-	google.golang.org/grpc v1.41.0
-	google.golang.org/protobuf v1.27.1
-	gopkg.in/yaml.v2 v2.4.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	github.com/stretchr/testify v1.12.1
+	golang.org/x/mod v0.42.0
+	golang.org/x/text v0.43.0
+	golang.org/x/tools v0.52.0
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b
+	google.golang.org/grpc v1.84.0
+	google.golang.org/protobuf v1.36.12
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/ghodss/yaml v1.0.0 // indirect
-	github.com/go-openapi/jsonpointer v0.19.5 // indirect
-	github.com/go-openapi/swag v0.19.13 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/josharian/intern v1.0.0 // indirect
-	github.com/mailru/easyjson v0.7.6 // indirect
-	golang.org/x/text v0.3.6 // indirect
-	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
+	github.com/go-openapi/jsonpointer v1.0.2 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
+	github.com/manveru/gobdd v0.0.0-20131210092515-f1a17fdd710b // indirect
+	github.com/oasdiff/yaml v0.1.1 // indirect
+	github.com/oasdiff/yaml3 v0.0.14 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )

@@ -14,10 +14,9 @@ import (
 //
 // Example:
 //
-//     var Basic = BasicAuthSecurity("basicauth", func() {
-//         Description("Use your own password!")
-//     })
-//
+//	var Basic = BasicAuthSecurity("basicauth", func() {
+//	    Description("Use your own password!")
+//	})
 func BasicAuthSecurity(name string, fn ...func()) *expr.SchemeExpr {
 	if _, ok := eval.Current().(eval.TopExpr); !ok {
 		eval.IncompatibleDSL()
@@ -54,10 +53,9 @@ func BasicAuthSecurity(name string, fn ...func()) *expr.SchemeExpr {
 //
 // Example:
 //
-//    var APIKey = APIKeySecurity("key", func() {
-//          Description("Shared secret")
-//    })
-//
+//	var APIKey = APIKeySecurity("key", func() {
+//	      Description("Shared secret")
+//	})
 func APIKeySecurity(name string, fn ...func()) *expr.SchemeExpr {
 	if _, ok := eval.Current().(eval.TopExpr); !ok {
 		eval.IncompatibleDSL()
@@ -96,13 +94,12 @@ func APIKeySecurity(name string, fn ...func()) *expr.SchemeExpr {
 //
 // Example:
 //
-//    var OAuth2 = OAuth2Security("googauth", func() {
-//        ImplicitFlow("/authorization")
+//	var OAuth2 = OAuth2Security("googauth", func() {
+//	    ImplicitFlow("/authorization")
 //
-//        Scope("api:write", "Write acess")
-//        Scope("api:read", "Read access")
-//    })
-//
+//	    Scope("api:write", "Write acess")
+//	    Scope("api:read", "Read access")
+//	})
 func OAuth2Security(name string, fn ...func()) *expr.SchemeExpr {
 	if _, ok := eval.Current().(eval.TopExpr); !ok {
 		eval.IncompatibleDSL()
@@ -129,11 +126,86 @@ func OAuth2Security(name string, fn ...func()) *expr.SchemeExpr {
 	return e
 }
 
+// BearerSecurity defines an HTTP Bearer security scheme where a token is passed
+// in the request Authorization header using the "Bearer" authentication scheme.
+// It models the standard OpenAPI v3 HTTP bearer scheme:
+//
+//	type: http
+//	scheme: bearer
+//
+// Use BearerSecurity when the token format is generic, opaque, or otherwise
+// not part of the Goa service contract. This includes APIs that accept opaque
+// session tokens, JWT access tokens, or both under the same Bearer header.
+//
+// BearerSecurity is distinct from JWTSecurity. Both schemes use the same
+// default HTTP wire format, "Authorization: Bearer <token>", but they generate
+// different DSL/runtime names. BearerSecurity generates BearerAuth,
+// security.BearerScheme and uses BearerToken payload attributes. JWTSecurity is
+// the JWT-specific variant kept for designs that intentionally want JWT names.
+//
+// This scheme supports defining scopes that an endpoint may require to
+// authorize the request. The scheme also supports specifying a bearer format
+// hint for OpenAPI v3 with BearerFormat. The bearer format is documentation
+// only; Goa still exposes the raw token string to the generated auth function.
+//
+// BearerSecurity is a top level DSL.
+//
+// BearerSecurity takes a name as first argument and an optional DSL as second
+// argument.
+//
+// Example:
+//
+//	var Bearer = BearerSecurity("bearer", func() {
+//	    Description("Opaque session token or trusted OIDC access token.")
+//	    Scope("system:write", "Write to the system")
+//	    Scope("system:read", "Read anything in there")
+//	})
+func BearerSecurity(name string, fn ...func()) *expr.SchemeExpr {
+	if _, ok := eval.Current().(eval.TopExpr); !ok {
+		eval.IncompatibleDSL()
+		return nil
+	}
+
+	if securitySchemeRedefined(name) {
+		return nil
+	}
+
+	e := &expr.SchemeExpr{
+		SchemeName: name,
+		Kind:       expr.BearerKind,
+		In:         "header",
+		Name:       "Authorization",
+	}
+
+	if len(fn) != 0 {
+		if !eval.Execute(fn[0], e) {
+			return nil
+		}
+	}
+
+	expr.Root.Schemes = append(expr.Root.Schemes, e)
+
+	return e
+}
+
 // JWTSecurity defines an HTTP security scheme where a JWT is passed in the
-// request Authorization header as a bearer token to perform auth. This scheme
-// supports defining scopes that endpoint may require to authorize the request.
-// The scheme also supports specifying a token URL used to retrieve token
-// values.
+// request Authorization header as a bearer token to perform auth. Use
+// JWTSecurity when the token is specifically a JWT and the generated DSL and
+// runtime names should say JWT.
+//
+// JWTSecurity is not a different HTTP authentication protocol from
+// BearerSecurity. Both schemes default to "Authorization: Bearer <token>" and
+// both expose the raw token string to the generated auth function. The
+// distinction is semantic and affects generated names: JWTSecurity generates
+// JWTAuth, security.JWTScheme and uses Token payload attributes, while
+// BearerSecurity generates BearerAuth, security.BearerScheme and uses
+// BearerToken payload attributes.
+//
+// This scheme supports defining scopes that an endpoint may require to
+// authorize the request. OpenAPI v3 output uses "JWT" as the default bearer
+// format hint for JWTSecurity. The bearer format is documentation only; Goa
+// does not parse or validate JWT claims. Use BearerFormat to override the
+// OpenAPI v3 hint.
 //
 // Since scopes are not compatible with the Swagger specification, the swagger
 // generator inserts comments in the description of the different elements on
@@ -146,11 +218,10 @@ func OAuth2Security(name string, fn ...func()) *expr.SchemeExpr {
 //
 // Example:
 //
-//    var JWT = JWTSecurity("jwt", func() {
-//        Scope("system:write", "Write to the system")
-//        Scope("system:read", "Read anything in there")
-//    })
-//
+//	var JWT = JWTSecurity("jwt", func() {
+//	    Scope("system:write", "Write to the system")
+//	    Scope("system:read", "Read anything in there")
+//	})
 func JWTSecurity(name string, fn ...func()) *expr.SchemeExpr {
 	if _, ok := eval.Current().(eval.TopExpr); !ok {
 		eval.IncompatibleDSL()
@@ -179,18 +250,38 @@ func JWTSecurity(name string, fn ...func()) *expr.SchemeExpr {
 	return e
 }
 
-// Security defines authentication requirements to access a service or a service
-// method.
+// BearerFormat sets the format hint for a bearer token security scheme. The
+// value is emitted as the OpenAPI v3 bearerFormat field. JWTSecurity emits
+// "JWT" by default when the bearer format is empty. The field is an OpenAPI
+// documentation hint only and does not change generated token extraction or
+// validation behavior.
+//
+// BearerFormat must appear in BearerSecurity or JWTSecurity.
+func BearerFormat(format string) {
+	current, ok := eval.Current().(*expr.SchemeExpr)
+	if !ok {
+		eval.IncompatibleDSL()
+		return
+	}
+	if current.Kind != expr.BearerKind && current.Kind != expr.JWTKind {
+		eval.ReportError("cannot specify bearer format for non-bearer security scheme.")
+		return
+	}
+	current.BearerFormat = format
+}
+
+// Security defines authentication requirements to access an entire API, service
+// or individual service method.
 //
 // The requirement refers to one or more OAuth2Security, BasicAuthSecurity,
-// APIKeySecurity or JWTSecurity security scheme. If the schemes include a
-// OAuth2Security or JWTSecurity scheme then required scopes may be listed by
-// name in the Security DSL. All the listed schemes must be validated by the
-// client for the request to be authorized. Security may appear multiple times
-// in the same scope in which case the client may validate any one of the
-// requirements for the request to be authorized.
+// APIKeySecurity, BearerSecurity or JWTSecurity security scheme. If the schemes
+// include a BearerSecurity, OAuth2Security or JWTSecurity scheme then required
+// scopes may be listed by name in the Security DSL. All the listed schemes must
+// be validated by the client for the request to be authorized. Security may
+// appear multiple times in the same scope in which case the client may validate
+// any one of the requirements for the request to be authorized.
 //
-// Security must appear in a Service or Method expression.
+// Security must appear in an API, Service or Method expression.
 //
 // Security accepts an arbitrary number of security schemes as argument
 // specified by name or by reference and an optional DSL function as last
@@ -198,70 +289,68 @@ func JWTSecurity(name string, fn ...func()) *expr.SchemeExpr {
 //
 // Examples:
 //
-//    var _ = Service("calculator", func() {
-//        // Override default API security requirements. Accept either basic
-//        // auth or OAuth2 access token with "api:read" scope.
-//        Security(BasicAuth)
-//        Security("oauth2", func() {
-//            Scope("api:read")
-//        })
+//	var _ = Service("calculator", func() {
+//	    // Override default API security requirements. Accept either basic
+//	    // auth or OAuth2 access token with "api:read" scope.
+//	    Security(BasicAuth)
+//	    Security("oauth2", func() {
+//	        Scope("api:read")
+//	    })
 //
-//        Method("add", func() {
-//            Description("Add two operands")
+//	    Method("add", func() {
+//	        Description("Add two operands")
 //
-//            // Override default service security requirements. Require
-//            // both basic auth and OAuth2 access token with "api:write"
-//            // scope.
-//            Security(BasicAuth, "oauth2", func() {
-//                Scope("api:write")
-//            })
+//	        // Override default service security requirements. Require
+//	        // both basic auth and OAuth2 access token with "api:write"
+//	        // scope.
+//	        Security(BasicAuth, "oauth2", func() {
+//	            Scope("api:write")
+//	        })
 //
-//            Payload(Operands)
-//            Error(ErrBadRequest, ErrorResult)
-//        })
+//	        Payload(Operands)
+//	        Error(ErrBadRequest, ErrorResult)
+//	    })
 //
-//        Method("health-check", func() {
-//            Description("Check health")
+//	    Method("health-check", func() {
+//	        Description("Check health")
 //
-//            // Remove need for authorization for this endpoint.
-//            NoSecurity()
+//	        // Remove need for authorization for this endpoint.
+//	        NoSecurity()
 //
-//            Payload(Operands)
-//            Error(ErrBadRequest, ErrorResult)
-//        })
-//    })
-//
-func Security(args ...interface{}) {
+//	        Payload(Operands)
+//	        Error(ErrBadRequest, ErrorResult)
+//	    })
+//	})
+func Security(args ...any) {
 	var dsl func()
-	{
-		if d, ok := args[len(args)-1].(func()); ok {
-			args = args[:len(args)-1]
-			dsl = d
-		}
+	if d, ok := args[len(args)-1].(func()); ok {
+		args = args[:len(args)-1]
+		dsl = d
 	}
 
-	var schemes []*expr.SchemeExpr
-	{
-		schemes = make([]*expr.SchemeExpr, len(args))
-		for i, arg := range args {
-			switch val := arg.(type) {
-			case string:
-				for _, s := range expr.Root.Schemes {
-					if s.SchemeName == val {
-						schemes[i] = expr.DupScheme(s)
-						break
-					}
+	schemes := make([]*expr.SchemeExpr, len(args))
+	for i, arg := range args {
+		switch val := arg.(type) {
+		case string:
+			for _, s := range expr.Root.Schemes {
+				if s.SchemeName == val {
+					schemes[i] = expr.DupScheme(s)
+					break
 				}
-				if schemes[i] == nil {
-					eval.ReportError("security scheme %q not found", val)
-					return
-				}
-			case *expr.SchemeExpr:
-				schemes[i] = expr.DupScheme(val)
-			default:
-				eval.InvalidArgError("security scheme or security scheme name", val)
+			}
+			if schemes[i] == nil {
+				eval.ReportError("security scheme %q not found", val)
 				return
 			}
+		case *expr.SchemeExpr:
+			if val == nil {
+				eval.InvalidArgError("security scheme", val)
+				return
+			}
+			schemes[i] = expr.DupScheme(val)
+		default:
+			eval.InvalidArgError("security scheme or security scheme name", val)
+			return
 		}
 	}
 
@@ -280,6 +369,8 @@ func Security(args ...interface{}) {
 		actual.Requirements = append(actual.Requirements, security)
 	case *expr.APIExpr:
 		actual.Requirements = append(actual.Requirements, security)
+	case expr.SecurityHolder:
+		actual.AddSecurityRequirement(security)
 	default:
 		eval.IncompatibleDSL()
 		return
@@ -310,24 +401,24 @@ func NoSecurity() {
 //
 // The generated code produced by goa uses the value of the corresponding
 // payload field to compute the basic authentication Authorization header value.
+// The attribute must use String or a named String type and cannot have a default.
 //
 // Username must appear in Payload or Type.
 //
 // Example:
 //
-//    Method("login", func() {
-//        Security(Basic)
-//        Payload(func() {
-//            Username("user", String)
-//            Password("pass", String)
-//        })
-//        HTTP(func() {
-//            // The "Authorization" header is defined implicitly.
-//            POST("/login")
-//        })
-//    })
-//
-func Username(name string, args ...interface{}) {
+//	Method("login", func() {
+//	    Security(Basic)
+//	    Payload(func() {
+//	        Username("user", String)
+//	        Password("pass", String)
+//	    })
+//	    HTTP(func() {
+//	        // The "Authorization" header is defined implicitly.
+//	        POST("/login")
+//	    })
+//	})
+func Username(name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:username") })
 	Attribute(name, args...)
 }
@@ -337,8 +428,7 @@ func Username(name string, args ...interface{}) {
 //
 // UsernameField takes the same arguments as Username with the addition of the
 // tag value as the first argument.
-//
-func UsernameField(tag interface{}, name string, args ...interface{}) {
+func UsernameField(tag any, name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:username") })
 	Field(tag, name, args...)
 }
@@ -349,24 +439,24 @@ func UsernameField(tag interface{}, name string, args ...interface{}) {
 //
 // The generated code produced by goa uses the value of the corresponding
 // payload field to compute the basic authentication Authorization header value.
+// The attribute must use String or a named String type and cannot have a default.
 //
 // Password must appear in Payload or Type.
 //
 // Example:
 //
-//    Method("login", func() {
-//        Security(Basic)
-//        Payload(func() {
-//            Username("user", String)
-//            Password("pass", String)
-//        })
-//        HTTP(func() {
-//            // The "Authorization" header is defined implicitly.
-//            POST("/login")
-//        })
-//    })
-//
-func Password(name string, args ...interface{}) {
+//	Method("login", func() {
+//	    Security(Basic)
+//	    Payload(func() {
+//	        Username("user", String)
+//	        Password("pass", String)
+//	    })
+//	    HTTP(func() {
+//	        // The "Authorization" header is defined implicitly.
+//	        POST("/login")
+//	    })
+//	})
+func Password(name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:password") })
 	Attribute(name, args...)
 }
@@ -376,8 +466,7 @@ func Password(name string, args ...interface{}) {
 //
 // PasswordField takes the same arguments as Password with the addition of the
 // tag value as the first argument.
-//
-func PasswordField(tag interface{}, name string, args ...interface{}) {
+func PasswordField(tag any, name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:password") })
 	Field(tag, name, args...)
 }
@@ -389,38 +478,38 @@ func PasswordField(tag interface{}, name string, args ...interface{}) {
 //
 // The generated code produced by goa uses the value of the corresponding
 // payload field to set the API key value.
+// The attribute must use String or a named String type and cannot have a default.
 //
 // APIKey must appear in Payload or Type.
 //
 // Example:
 //
-//    Method("secured_read", func() {
-//        Security(APIKeyAuth)
-//        Payload(func() {
-//            APIKey("api_key", "key", String, "API key used to perform authorization")
-//            Required("key")
-//        })
-//        Result(String)
-//        HTTP(func() {
-//            GET("/")
-//            Param("key:k") // Provide the key as a query string param "k"
-//        })
-//    })
+//	Method("secured_read", func() {
+//	    Security(APIKeyAuth)
+//	    Payload(func() {
+//	        APIKey("api_key", "key", String, "API key used to perform authorization")
+//	        Required("key")
+//	    })
+//	    Result(String)
+//	    HTTP(func() {
+//	        GET("/")
+//	        Param("key:k") // Provide the key as a query string param "k"
+//	    })
+//	})
 //
-//    Method("secured_write", func() {
-//        Security(APIKeyAuth)
-//        Payload(func() {
-//            APIKey("api_key", "key", String, "API key used to perform authorization")
-//            Attribute("data", String, "Data to be written")
-//            Required("key", "data")
-//        })
-//        HTTP(func() {
-//            POST("/")
-//            Header("key:Authorization") // Provide the key in Authorization header (default)
-//        })
-//    })
-//
-func APIKey(scheme, name string, args ...interface{}) {
+//	Method("secured_write", func() {
+//	    Security(APIKeyAuth)
+//	    Payload(func() {
+//	        APIKey("api_key", "key", String, "API key used to perform authorization")
+//	        Attribute("data", String, "Data to be written")
+//	        Required("key", "data")
+//	    })
+//	    HTTP(func() {
+//	        POST("/")
+//	        Header("key:Authorization") // Provide the key in Authorization header (default)
+//	    })
+//	})
+func APIKey(scheme, name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:apikey:"+scheme, scheme) })
 	Attribute(name, args...)
 }
@@ -430,8 +519,7 @@ func APIKey(scheme, name string, args ...interface{}) {
 //
 // APIKeyField takes the same arguments as APIKey with the addition of the
 // tag value as the first argument.
-//
-func APIKeyField(tag interface{}, scheme, name string, args ...interface{}) {
+func APIKeyField(tag any, scheme, name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:apikey:"+scheme, scheme) })
 	Field(tag, name, args...)
 }
@@ -442,25 +530,25 @@ func APIKeyField(tag interface{}, scheme, name string, args ...interface{}) {
 //
 // The generated code produced by goa uses the value of the corresponding
 // payload field to initialize the Authorization header.
+// The attribute must use String or a named String type and cannot have a default.
 //
 // AccessToken must appear in Payload or Type.
 //
 // Example:
 //
-//    Method("secured", func() {
-//        Security(OAuth2)
-//        Payload(func() {
-//            AccessToken("token", String, "OAuth2 access token used to perform authorization")
-//            Required("token")
-//        })
-//        Result(String)
-//        HTTP(func() {
-//            // The "Authorization" header is defined implicitly.
-//            GET("/")
-//        })
-//    })
-//
-func AccessToken(name string, args ...interface{}) {
+//	Method("secured", func() {
+//	    Security(OAuth2)
+//	    Payload(func() {
+//	        AccessToken("token", String, "OAuth2 access token used to perform authorization")
+//	        Required("token")
+//	    })
+//	    Result(String)
+//	    HTTP(func() {
+//	        // The "Authorization" header is defined implicitly.
+//	        GET("/")
+//	    })
+//	})
+func AccessToken(name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:accesstoken") })
 	Attribute(name, args...)
 }
@@ -470,35 +558,74 @@ func AccessToken(name string, args ...interface{}) {
 //
 // AccessTokenField takes the same arguments as AccessToken with the addition of the
 // tag value as the first argument.
-//
-func AccessTokenField(tag interface{}, name string, args ...interface{}) {
+func AccessTokenField(tag any, name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:accesstoken") })
 	Field(tag, name, args...)
 }
 
-// Token defines the attribute used to provide the JWT to an endpoint secured
-// via JWT. The parameters and usage of Token are the same as the goa DSL
-// Attribute function.
+// BearerToken defines the attribute used to provide the raw token to an
+// endpoint secured via BearerSecurity. The parameters and usage of BearerToken
+// are the same as the goa DSL Attribute function.
 //
 // The generated code produced by goa uses the value of the corresponding
 // payload field to initialize the Authorization header.
+// The attribute must use String or a named String type and cannot have a default.
 //
 // Example:
 //
-//    Method("secured", func() {
-//        Security(JWT)
-//        Payload(func() {
-//            Token("token", String, "JWT token used to perform authorization")
-//            Required("token")
-//        })
-//        Result(String)
-//        HTTP(func() {
-//            // The "Authorization" header is defined implicitly.
-//            GET("/")
-//        })
-//    })
+//	Method("secured", func() {
+//	    Security(Bearer)
+//	    Payload(func() {
+//	        BearerToken("token", String, "Bearer token used to perform authorization")
+//	        Required("token")
+//	    })
+//	    Result(String)
+//	    HTTP(func() {
+//	        // The "Authorization" header is defined implicitly.
+//	        GET("/")
+//	    })
+//	})
+func BearerToken(name string, args ...any) {
+	args = useDSL(args, func() { Meta("security:bearer") })
+	Attribute(name, args...)
+}
+
+// BearerTokenField is syntactic sugar to define a bearer token attribute with
+// the "rpc:tag" meta set with the value of the first argument.
 //
-func Token(name string, args ...interface{}) {
+// BearerTokenField takes the same arguments as BearerToken with the addition of
+// the tag value as the first argument.
+func BearerTokenField(tag any, name string, args ...any) {
+	args = useDSL(args, func() { Meta("security:bearer") })
+	Field(tag, name, args...)
+}
+
+// Token defines the attribute used to provide the raw JWT bearer token to an
+// endpoint secured via JWTSecurity. The parameters and usage of Token are the
+// same as the goa DSL Attribute function.
+//
+// Use BearerToken instead when the endpoint is secured via BearerSecurity and
+// the generated names should not be JWT-specific.
+//
+// The generated code produced by goa uses the value of the corresponding
+// payload field to initialize the Authorization header.
+// The attribute must use String or a named String type and cannot have a default.
+//
+// Example:
+//
+//	Method("secured", func() {
+//	    Security(JWT)
+//	    Payload(func() {
+//	        Token("token", String, "JWT token used to perform authorization")
+//	        Required("token")
+//	    })
+//	    Result(String)
+//	    HTTP(func() {
+//	        // The "Authorization" header is defined implicitly.
+//	        GET("/")
+//	    })
+//	})
+func Token(name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:token") })
 	Attribute(name, args...)
 }
@@ -508,45 +635,46 @@ func Token(name string, args ...interface{}) {
 //
 // TokenField takes the same arguments as Token with the addition of the
 // tag value as the first argument.
-//
-func TokenField(tag interface{}, name string, args ...interface{}) {
+func TokenField(tag any, name string, args ...any) {
 	args = useDSL(args, func() { Meta("security:token") })
 	Field(tag, name, args...)
 }
 
-// Scope has two uses: in JWTSecurity or OAuth2Security it defines a scope
-// supported by the scheme. In Security it lists required scopes.
+// Scope has two uses: in BearerSecurity, JWTSecurity or OAuth2Security it
+// defines a scope supported by the scheme. In Security it lists required scopes.
+// Scopes on BearerSecurity and JWTSecurity are Goa authorization metadata passed
+// to the generated auth function; they are not OpenAPI OAuth2 scopes.
 //
-// Scope must appear in Security, BasicSecurity, APIKeySecurity, JWTSecurity or OAuth2Security.
+// Scope must appear in Security, BasicSecurity, APIKeySecurity,
+// BearerSecurity, JWTSecurity or OAuth2Security.
 //
 // Scope accepts one or two arguments: the first argument is the scope name and
-// when used in JWTSecurity or OAuth2Security the second argument is a
-// description.
+// when used in BearerSecurity, JWTSecurity or OAuth2Security the second
+// argument is a description.
 //
 // Example:
 //
-//    var JWT = JWTSecurity("JWT", func() {
-//        Scope("api:read", "Read access") // Defines a scope
-//        Scope("api:write", "Write access")
-//    })
+//	var JWT = JWTSecurity("JWT", func() {
+//	    Scope("api:read", "Read access") // Defines a scope
+//	    Scope("api:write", "Write access")
+//	})
 //
-//    Method("secured", func() {
-//        Security(JWT, func() {
-//            Scope("api:read") // Required scope for auth
-//        })
-//    })
-//
+//	Method("secured", func() {
+//	    Security(JWT, func() {
+//	        Scope("api:read") // Required scope for auth
+//	    })
+//	})
 func Scope(name string, desc ...string) {
 	switch current := eval.Current().(type) {
 	case *expr.SecurityExpr:
 		if len(desc) >= 1 {
-			eval.ReportError("too many arguments")
+			eval.TooManyArgError()
 			return
 		}
 		current.Scopes = append(current.Scopes, name)
 	case *expr.SchemeExpr:
 		if len(desc) > 1 {
-			eval.ReportError("too many arguments")
+			eval.TooManyArgError()
 			return
 		}
 		d := "no description"
@@ -666,9 +794,9 @@ func securitySchemeRedefined(name string) bool {
 
 // useDSL modifies the Attribute function to use the given function as DSL,
 // merging it with any pre-existing DSL.
-func useDSL(args []interface{}, d func()) []interface{} {
+func useDSL(args []any, d func()) []any {
 	if len(args) == 0 {
-		return []interface{}{d}
+		return []any{d}
 	}
 	ds, ok := args[len(args)-1].(func())
 	if ok {

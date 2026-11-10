@@ -1,8 +1,11 @@
+// This file defines Goa's core design data types and the structural operations
+// used by evaluation, validation, and code generation.
 package expr
 
 import (
 	"fmt"
 	"reflect"
+	"sort"
 
 	"goa.design/goa/v3/eval"
 )
@@ -19,9 +22,9 @@ type (
 		Name() string
 		// IsCompatible checks whether val has a Go type that is compatible with the data
 		// type.
-		IsCompatible(interface{}) bool
+		IsCompatible(any) bool
 		// Example generates a pseudo-random value using the given random generator.
-		Example(*Random) interface{}
+		Example(*ExampleGenerator) any
 		// Hash returns a unique hash value for the instance of the type.
 		Hash() string
 	}
@@ -31,7 +34,8 @@ type (
 
 	// Array is the type used to describe field arrays or repeated fields.
 	Array struct {
-		ElemType *AttributeExpr
+		ElemType         *AttributeExpr
+		NonNullableElems bool
 	}
 
 	// Map is the type used to describe maps of fields.
@@ -53,6 +57,20 @@ type (
 	// Note: not a map because order matters.
 	Object []*NamedAttributeExpr
 
+	// Union is the type used to describe unions.
+	Union struct {
+		TypeName string
+		Values   []*NamedAttributeExpr
+		// TypeKey is the discriminator field name for JSON marshaling (defaults to "type")
+		TypeKey string
+		// ValueKey is the value field name for JSON marshaling (defaults to "value")
+		ValueKey string
+		// Flatten writes an object branch beside the discriminator instead of under ValueKey.
+		Flatten bool
+		// Untagged writes the selected branch value directly, without envelope keys.
+		Untagged bool
+	}
+
 	// UserType is the interface implemented by all user type
 	// implementations. Plugins may leverage this interface to introduce
 	// their own types.
@@ -65,6 +83,9 @@ type (
 		CompositeExpr
 		// ID returns the identifier for the user type.
 		ID() string
+		// Origin returns the first user type declaration from which this value
+		// was copied. An authored value returns itself.
+		Origin() UserType
 		// Rename changes the type name to the given value.
 		Rename(string)
 		// SetAttribute updates the underlying attribute.
@@ -77,10 +98,10 @@ type (
 	}
 
 	// ArrayVal is the type used to set the default value for arrays.
-	ArrayVal []interface{}
+	ArrayVal []any
 
 	// MapVal is the type used to set the default value for maps.
-	MapVal map[interface{}]interface{}
+	MapVal map[any]any
 )
 
 const (
@@ -102,20 +123,21 @@ const (
 	Float32Kind
 	// Float64Kind represents a 64-bit floating number.
 	Float64Kind
-	// StringKind represents a JSON string.
+	// StringKind represents a string.
 	StringKind
 	// BytesKind represent a series of bytes (binary data).
 	BytesKind
-	// ArrayKind represents a JSON array.
+	// ArrayKind represents an array of types.
 	ArrayKind
-	// ObjectKind represents a JSON object.
+	// ObjectKind represents an object.
 	ObjectKind
-	// MapKind represents a JSON object where the keys are not known in
-	// advance.
+	// MapKind represents a dictionary.
 	MapKind
-	// UserTypeKind represents a user type.
+	// UnionKind represents a union type.
+	UnionKind
+	// UserTypeKind represents a user defined type.
 	UserTypeKind
-	// ResultTypeKind represents a result type.
+	// ResultTypeKind represents a user defined result type.
 	ResultTypeKind
 	// AnyKind represents an unknown type.
 	AnyKind
@@ -155,7 +177,7 @@ const (
 	// Bytes is the type for binary data.
 	Bytes = Primitive(BytesKind)
 
-	// Any is the type for an arbitrary JSON value (interface{} in Go).
+	// Any is the type for an arbitrary JSON value (any in Go).
 	Any = Primitive(AnyKind)
 )
 
@@ -167,6 +189,7 @@ var Empty = &UserTypeExpr{
 	AttributeExpr: &AttributeExpr{
 		Description: "Empty represents empty values",
 		Type:        &Object{},
+		finalized:   true,
 	},
 }
 
@@ -214,6 +237,20 @@ func AsMap(dt DataType) *Map {
 	}
 }
 
+// AsUnion returns the type underlying union if any, nil otherwise.
+func AsUnion(dt DataType) *Union {
+	switch t := dt.(type) {
+	case *UserTypeExpr:
+		return AsUnion(t.Type)
+	case *ResultTypeExpr:
+		return AsUnion(t.Type)
+	case *Union:
+		return t
+	default:
+		return nil
+	}
+}
+
 // IsObject returns true if the data type is an object.
 func IsObject(dt DataType) bool { return AsObject(dt) != nil }
 
@@ -222,6 +259,9 @@ func IsArray(dt DataType) bool { return AsArray(dt) != nil }
 
 // IsMap returns true if the data type is a map.
 func IsMap(dt DataType) bool { return AsMap(dt) != nil }
+
+// IsUnion returns true if the data type is a map.
+func IsUnion(dt DataType) bool { return AsUnion(dt) != nil }
 
 // IsPrimitive returns true if the data type is a primitive type.
 func IsPrimitive(dt DataType) bool {
@@ -237,88 +277,26 @@ func IsPrimitive(dt DataType) bool {
 	}
 }
 
+// IsAlias returns true if the data type is a user type backed by a primitive
+// type (so call aliased type).
+func IsAlias(dt DataType) bool {
+	_, isut := dt.(UserType)
+	return isut && IsPrimitive(dt)
+}
+
 // Equal compares the types recursively and returns true if they are equal. Two
 // types are equal if:
 //
-//    - both types have the same kind
-//    - array types have elements whose types are equal
-//    - map types have keys and elements whose types are equal
-//    - objects have the same attribute names and the attribute types are equal
+//   - both types have the same kind
+//   - array types have elements whose types are equal
+//   - map types have keys and elements whose types are equal
+//   - objects have the same attribute names and the attribute types are equal
 //
-// Note: calling Equal is not equivalent to evaluation dt.Hash() == dt2.Hash()
+// Note: calling Equal is not equivalent to evaluating dt.Hash() == dt2.Hash()
 // as the former may return true for two user types with different names and
 // thus with different hash values.
 func Equal(dt, dt2 DataType) bool {
-	bs := *equal(dt, dt2)
-	for _, b := range bs {
-		if !*b {
-			return false
-		}
-	}
-	return true
-}
-
-// Support recursive types by doing lazy evaluation.
-func equal(dt, dt2 DataType, seen ...map[string]*[]*bool) *[]*bool {
-	f := false
-	fs := []*bool{&f}
-	if dt.Kind() != dt2.Kind() {
-		return &fs
-	}
-	var s map[string]*[]*bool
-	if len(seen) > 0 {
-		s = seen[0]
-	} else {
-		s = make(map[string]*[]*bool)
-	}
-	switch actual := dt.(type) {
-	case *Array:
-		return equal(actual.ElemType.Type, AsArray(dt2).ElemType.Type, s)
-	case *Map:
-		s1 := equal(actual.ElemType.Type, AsMap(dt2).ElemType.Type, s)
-		s2 := equal(actual.KeyType.Type, AsMap(dt2).KeyType.Type, s)
-		s3 := append(*s1, *s2...)
-		return &s3
-	case *Object:
-		if len(*actual) != len(*AsObject(dt2)) {
-			return &fs
-		}
-		var bs []*bool
-		for _, nat := range *actual {
-			obj := AsObject(dt2)
-			at := obj.Attribute(nat.Name)
-			if at == nil {
-				return &fs
-			}
-			bs = append(bs, *equal(nat.Attribute.Type, at.Type, s)...)
-		}
-		return &bs
-	case UserType:
-		key := actual.Name() + "=" + dt2.Name()
-		if v, ok := s[key]; ok {
-			return v
-		}
-		var res []*bool
-		pres := &res
-		s[key] = pres
-		if IsObject(actual) {
-			*pres = *equal(AsObject(dt), AsObject(dt2), s)
-		} else if IsMap(actual) {
-			// Map aliased as UserType
-			*pres = *equal(AsMap(dt), AsMap(dt2), s)
-		} else if IsArray(actual) {
-			// Array aliased as UserType or CollectionOf
-			*pres = *equal(AsArray(dt), AsArray(dt2), s)
-		} else {
-			// Primitive type aliased as UserType
-			*pres = *equal(dt, dt2, s)
-		}
-		return pres
-	}
-
-	t := true
-	ts := []*bool{&t}
-	return &ts
+	return Hash(dt, false, true, true) == Hash(dt2, false, true, true)
 }
 
 // DataType implementation
@@ -359,7 +337,7 @@ func (p Primitive) Name() string {
 }
 
 // IsCompatible returns true if val is compatible with p.
-func (p Primitive) IsCompatible(val interface{}) bool {
+func (p Primitive) IsCompatible(val any) bool {
 	if p == Any {
 		return true
 	}
@@ -384,7 +362,7 @@ func (p Primitive) IsCompatible(val interface{}) bool {
 
 // Example generates a pseudo-random primitive value using the given random
 // generator.
-func (p Primitive) Example(r *Random) interface{} {
+func (p Primitive) Example(r *ExampleGenerator) any {
 	switch p {
 	case Boolean:
 		return r.Bool()
@@ -419,20 +397,20 @@ func (p Primitive) Hash() string {
 }
 
 // Kind implements DataKind.
-func (a *Array) Kind() Kind { return ArrayKind }
+func (*Array) Kind() Kind { return ArrayKind }
 
 // Name returns the type name.
-func (a *Array) Name() string {
+func (*Array) Name() string {
 	return "array"
 }
 
 // Hash returns a unique hash value for a.
 func (a *Array) Hash() string {
-	return "_array_+" + a.ElemType.Type.Hash()
+	return Hash(a, true, false, true)
 }
 
 // IsCompatible returns true if val is compatible with p.
-func (a *Array) IsCompatible(val interface{}) bool {
+func (a *Array) IsCompatible(val any) bool {
 	k := reflect.TypeOf(val).Kind()
 	if k != reflect.Array && k != reflect.Slice {
 		return false
@@ -449,23 +427,25 @@ func (a *Array) IsCompatible(val interface{}) bool {
 
 // Example generates a pseudo-random array value using the given random
 // generator.
-func (a *Array) Example(r *Random) interface{} {
-	count := r.Int()%3 + 2
-	res := make([]interface{}, count)
-	for i := 0; i < count; i++ {
-		res[i] = a.ElemType.Example(r)
+func (a *Array) Example(r *ExampleGenerator) any {
+	count := NewLength(a.ElemType, r)
+	res := make([]any, count)
+	for i := range count {
+		// Derive the element value stream from the index so elements get
+		// distinct yet design-stable values.
+		res[i] = a.ElemType.Example(r.ArrayElement(i))
 		if res[i] == nil {
 			// Handle the case of recursive data structures
-			res[i] = make(map[string]interface{})
+			res[i] = make(map[string]any)
 		}
 	}
 	return a.MakeSlice(res)
 }
 
 // MakeSlice examines the key type from the Array and create a slice with
-// builtin type if possible. The idea is to avoid generating []interface{} and
+// builtin type if possible. The idea is to avoid generating []any and
 // produce more precise types.
-func (a *Array) MakeSlice(s []interface{}) interface{} {
+func (a *Array) MakeSlice(s []any) any {
 	slice := reflect.MakeSlice(toReflectType(a), 0, len(s))
 	for _, item := range s {
 		slice = reflect.Append(slice, reflect.ValueOf(item))
@@ -474,8 +454,8 @@ func (a *Array) MakeSlice(s []interface{}) interface{} {
 }
 
 // ToSlice converts an ArrayVal into a slice.
-func (a ArrayVal) ToSlice() []interface{} {
-	arr := make([]interface{}, len(a))
+func (a ArrayVal) ToSlice() []any {
+	arr := make([]any, len(a))
 	for i, elem := range a {
 		switch actual := elem.(type) {
 		case ArrayVal:
@@ -540,18 +520,14 @@ func (o *Object) Rename(n, m string) {
 }
 
 // Kind implements DataKind.
-func (o *Object) Kind() Kind { return ObjectKind }
+func (*Object) Kind() Kind { return ObjectKind }
 
 // Name returns the type name.
-func (o *Object) Name() string { return "object" }
+func (*Object) Name() string { return "object" }
 
 // Hash returns a unique hash value for o.
 func (o *Object) Hash() string {
-	h := "_object_"
-	for _, nat := range *o {
-		h += "+" + nat.Name + "/" + nat.Attribute.Type.Hash()
-	}
-	return h
+	return Hash(o, true, false, true)
 }
 
 // Merge creates a new object consisting of the named attributes of o appended
@@ -566,16 +542,18 @@ func (o *Object) Merge(other *Object) *Object {
 }
 
 // IsCompatible returns true if o describes the (Go) type of val.
-func (o *Object) IsCompatible(val interface{}) bool {
+func (*Object) IsCompatible(val any) bool {
 	k := reflect.TypeOf(val).Kind()
 	return k == reflect.Map || k == reflect.Struct
 }
 
 // Example returns a random value of the object.
-func (o *Object) Example(r *Random) interface{} {
-	res := make(map[string]interface{})
+func (o *Object) Example(r *ExampleGenerator) any {
+	res := make(map[string]any)
 	for _, nat := range *o {
-		if v := nat.Attribute.Example(r); v != nil {
+		// Derive the field value stream from the field name so a field
+		// example only changes when the field itself changes.
+		if v := nat.Attribute.Example(r.Member(nat.Name)); v != nil {
 			res[nat.Name] = v
 		}
 	}
@@ -583,18 +561,18 @@ func (o *Object) Example(r *Random) interface{} {
 }
 
 // Kind implements DataKind.
-func (m *Map) Kind() Kind { return MapKind }
+func (*Map) Kind() Kind { return MapKind }
 
 // Name returns the type name.
-func (m *Map) Name() string { return "map" }
+func (*Map) Name() string { return "map" }
 
 // Hash returns a unique hash value for m.
 func (m *Map) Hash() string {
-	return "_map_+" + m.KeyType.Type.Hash() + ":" + m.ElemType.Type.Hash()
+	return Hash(m, true, false, true)
 }
 
 // IsCompatible returns true if o describes the (Go) type of val.
-func (m *Map) IsCompatible(val interface{}) bool {
+func (m *Map) IsCompatible(val any) bool {
 	k := reflect.TypeOf(val).Kind()
 	if k != reflect.Map {
 		return false
@@ -610,17 +588,19 @@ func (m *Map) IsCompatible(val interface{}) bool {
 	return true
 }
 
-// Example returns a random hash value.
-func (m *Map) Example(r *Random) interface{} {
+// Example returns a random example value.
+func (m *Map) Example(r *ExampleGenerator) any {
 	if IsObject(m.KeyType.Type) || IsArray(m.KeyType.Type) || IsMap(m.KeyType.Type) {
 		// not much we can do for non hashable Go types
 		return nil
 	}
 	count := r.Int()%3 + 1
-	pair := map[interface{}]interface{}{}
-	for i := 0; i < count; i++ {
-		k := m.KeyType.Example(r)
-		v := m.ElemType.Example(r)
+	pair := map[any]any{}
+	for i := range count {
+		// Derive per-entry value streams from the entry index so entries
+		// get distinct yet design-stable keys and values.
+		k := m.KeyType.Example(r.MapKey(i))
+		v := m.ElemType.Example(r.MapValue(i))
 		if k != nil && v != nil {
 			pair[k] = v
 		}
@@ -629,19 +609,26 @@ func (m *Map) Example(r *Random) interface{} {
 }
 
 // MakeMap examines the key type from a Map and create a map with builtin type
-// if possible. The idea is to avoid generating map[interface{}]interface{},
+// if possible. The idea is to avoid generating map[any]any,
 // which cannot be handled by json.Marshal.
-func (m *Map) MakeMap(raw map[interface{}]interface{}) interface{} {
+func (m *Map) MakeMap(raw map[any]any) any {
 	ma := reflect.MakeMap(toReflectType(m))
-	for key, value := range raw {
-		ma.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(value))
+	keys := make([]any, 0, len(raw))
+	for key := range raw {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return reflect.ValueOf(keys[i]).String() < reflect.ValueOf(keys[j]).String()
+	})
+	for _, key := range keys {
+		ma.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(raw[key]))
 	}
 	return ma.Interface()
 }
 
 // ToMap converts a MapVal to a map.
-func (m MapVal) ToMap() map[interface{}]interface{} {
-	mp := make(map[interface{}]interface{}, len(m))
+func (m MapVal) ToMap() map[any]any {
+	mp := make(map[any]any, len(m))
 	for k, v := range m {
 		switch actual := v.(type) {
 		case ArrayVal:
@@ -655,15 +642,111 @@ func (m MapVal) ToMap() map[interface{}]interface{} {
 	return mp
 }
 
+// Kind implements DataKind.
+func (*Union) Kind() Kind { return UnionKind }
+
+// Name returns the type name.
+func (u *Union) Name() string { return u.TypeName }
+
+// Hash returns a unique hash value for m.
+func (u *Union) Hash() string {
+	return Hash(u, true, false, true)
+}
+
+// IsCompatible returns true if u describes the (Go) type of val.
+func (u *Union) IsCompatible(val any) bool {
+	if u.Untagged {
+		return u.UntaggedBranch(val) != nil
+	}
+	envelope, ok := val.(map[string]any)
+	if !ok || (!u.Flatten && len(envelope) != 2) {
+		return false
+	}
+	tag, ok := envelope[u.GetTypeKey()].(string)
+	if !ok {
+		return false
+	}
+	value, ok := envelope[u.GetValueKey()]
+	if u.Flatten {
+		fields := make(map[string]any, len(envelope)-1)
+		for name, field := range envelope {
+			if name != u.GetTypeKey() {
+				fields[name] = field
+			}
+		}
+		value, ok = fields, true
+	}
+	if !ok {
+		return false
+	}
+	for _, nat := range u.Values {
+		if nat.Name == tag {
+			return nat.Attribute.Type.IsCompatible(value)
+		}
+	}
+	return false
+}
+
+// Example returns the selected branch using the union's declared JSON mapping.
+func (u *Union) Example(r *ExampleGenerator) any {
+	if len(u.Values) == 0 {
+		return nil
+	}
+	// Derive the member value stream from the member name so the example
+	// only changes when the chosen member changes.
+	nat := u.Values[r.Int()%len(u.Values)]
+	value := nat.Attribute.Example(r.UnionMember(nat.Name))
+	if u.Untagged {
+		return value
+	}
+	if u.Flatten {
+		branchValue, ok := concreteDefaultValue(reflect.ValueOf(value))
+		if !ok {
+			panic("flattened OneOf example must be a non-null object")
+		}
+		fields, invalidKeys := defaultObjectFields(branchValue, AsObject(nat.Attribute.Type))
+		if len(invalidKeys) > 0 {
+			panic("flattened OneOf example must have string object keys")
+		}
+		result := make(map[string]any, len(fields)+1)
+		result[u.GetTypeKey()] = nat.Name
+		for name, field := range fields {
+			result[name] = field.Interface()
+		}
+		return result
+	}
+	return map[string]any{
+		u.GetTypeKey():  nat.Name,
+		u.GetValueKey(): value,
+	}
+}
+
+// GetTypeKey returns the discriminator field name for JSON marshaling.
+// Defaults to "type" if not explicitly set via Meta("oneof:type:field").
+func (u *Union) GetTypeKey() string {
+	if u.TypeKey != "" {
+		return u.TypeKey
+	}
+	return "type"
+}
+
+// GetValueKey returns the value field name for JSON marshaling.
+// Defaults to "value" if not explicitly set via Meta("oneof:value:field").
+func (u *Union) GetValueKey() string {
+	if u.ValueKey != "" {
+		return u.ValueKey
+	}
+	return "value"
+}
+
 // QualifiedTypeName returns the qualified type name for the given data type.
 // The qualified type name includes the name of the type of the elements of
 // array or map types. This is useful in reporting types in error messages,
 // examples of qualified type names:
 //
-//     "array<string>"
-//     "map<string, string>"
-//     "map<string, array<int32>>"
-//
+//	"array<string>"
+//	"map<string, string>"
+//	"map<string, array<int32>>"
 func QualifiedTypeName(t DataType) string {
 	switch t.Kind() {
 	case ArrayKind:
@@ -709,7 +792,7 @@ func toReflectType(dtype DataType) reflect.Type {
 	case BytesKind:
 		return reflect.TypeOf([]byte{})
 	case ObjectKind:
-		return reflect.TypeOf(map[string]interface{}{})
+		return reflect.TypeOf(map[string]any{})
 	case UserTypeKind:
 		return toReflectType(dtype.(*UserTypeExpr).Attribute().Type)
 	case ResultTypeKind:
@@ -723,10 +806,10 @@ func toReflectType(dtype DataType) reflect.Type {
 		if m.KeyType.Type.Kind() != ObjectKind {
 			ktype = toReflectType(m.KeyType.Type)
 		} else {
-			ktype = reflect.TypeOf([]interface{}{}).Elem()
+			ktype = reflect.TypeOf([]any{}).Elem()
 		}
 		return reflect.MapOf(ktype, toReflectType(m.ElemType.Type))
 	default:
-		return reflect.TypeOf([]interface{}{}).Elem()
+		return reflect.TypeOf([]any{}).Elem()
 	}
 }

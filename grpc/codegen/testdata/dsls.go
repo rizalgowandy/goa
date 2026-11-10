@@ -1,3 +1,5 @@
+// This file defines gRPC DSL fixtures used to exercise message, metadata,
+// streaming, validation, and generated package ownership behavior.
 package testdata
 
 import (
@@ -54,16 +56,15 @@ var UnaryRPCNoResultDSL = func() {
 
 var UnaryRPCWithErrorsDSL = func() {
 	var ErrorType = Type("ErrorType", func() {
-		Attribute("a", String)
+		Field(1, "a", String)
 	})
 	var AnotherError = ResultType("application/vnd.goa.another_error", func() {
 		TypeName("AnotherError")
 		Attributes(func() {
-			Attribute("name", String, func() {
-				Meta("struct:error:name")
+			ErrorName(1, "name", String, func() {
 				Enum("this", "that")
 			})
-			Attribute("description", String)
+			Field(2, "description", String)
 			Required("name")
 		})
 	})
@@ -86,14 +87,26 @@ var UnaryRPCWithErrorsDSL = func() {
 }
 
 var ElemValidationDSL = func() {
-	var ResultType = Type("ResultType", func() {
+	var PayloadType = Type("PayloadType", func() {
 		Field(1, "foo", MapOf(String, ArrayOf(String)), func() {
 			Elem(func() { MinLength(1) })
 		})
 	})
 	Service("ServiceElemValidation", func() {
 		Method("MethodElemValidation", func() {
-			Payload(ResultType)
+			Payload(PayloadType)
+			GRPC(func() {})
+		})
+	})
+}
+
+var AliasValidationDSL = func() {
+	var UUID = Type("UUID", String, func() {
+		Format(FormatUUID)
+	})
+	Service("ServiceElemValidation", func() {
+		Method("MethodElemValidation", func() {
+			Payload(UUID)
 			GRPC(func() {})
 		})
 	})
@@ -168,16 +181,29 @@ var ServerStreamingMapDSL = func() {
 	})
 }
 
+var ServerStreamingSharedResultRPCDSL = func() {
+	var UT = Type("UserType", func() {
+		Field(1, "IntField", Int)
+	})
+	Service("ServiceServerStreamingRPC", func() {
+		Method("MethodServerStreamingRPC", func() {
+			StreamingResult(UT)
+			GRPC(func() {})
+		})
+		Method("OtherMethodServerStreamingRPC", func() {
+			StreamingResult(UT)
+			GRPC(func() {})
+		})
+	})
+}
+
 var ServerStreamingResultWithViewsDSL = func() {
 	var RT = ResultType("application/vnd.result", func() {
 		TypeName("ResultType")
 		Attributes(func() {
 			Field(1, "IntField", Int)
 			Field(2, "DoubleField", Float64)
-		})
-		View("default", func() {
-			Attribute("IntField")
-			Attribute("DoubleField")
+			Required("IntField", "DoubleField")
 		})
 		View("tiny", func() {
 			Attribute("IntField")
@@ -195,8 +221,8 @@ var ServerStreamingResultCollectionWithExplicitViewDSL = func() {
 	var RT = ResultType("application/vnd.result", func() {
 		TypeName("ResultType")
 		Attributes(func() {
-			Attribute("IntField", Int)
-			Attribute("DoubleField", Float64)
+			Field(1, "IntField", Int)
+			Field(2, "DoubleField", Float64)
 		})
 		View("default", func() {
 			Attribute("IntField")
@@ -209,6 +235,32 @@ var ServerStreamingResultCollectionWithExplicitViewDSL = func() {
 	Service("ServiceServerStreamingResultTypeCollectionWithExplicitView", func() {
 		Method("MethodServerStreamingResultTypeCollectionWithExplicitView", func() {
 			StreamingResult(CollectionOf(RT), func() {
+				View("tiny")
+			})
+			GRPC(func() {})
+		})
+	})
+}
+
+var ClientStreamingResultCollectionWithExplicitViewDSL = func() {
+	var RT = ResultType("application/vnd.client-streaming-result", func() {
+		TypeName("ResultType")
+		Attributes(func() {
+			Field(1, "IntField", Int)
+			Field(2, "DoubleField", Float64)
+		})
+		View("default", func() {
+			Attribute("IntField")
+			Attribute("DoubleField")
+		})
+		View("tiny", func() {
+			Attribute("IntField")
+		})
+	})
+	Service("ServiceClientStreamingResultTypeCollectionWithExplicitView", func() {
+		Method("MethodClientStreamingResultTypeCollectionWithExplicitView", func() {
+			StreamingPayload(String)
+			Result(CollectionOf(RT), func() {
 				View("tiny")
 			})
 			GRPC(func() {})
@@ -231,6 +283,62 @@ var ClientStreamingRPCWithPayloadDSL = func() {
 		Method("MethodClientStreamingRPCWithPayload", func() {
 			Payload(Int)
 			StreamingPayload(Int)
+			Result(String)
+			GRPC(func() {})
+		})
+	})
+}
+
+var ClientStreamingRPCWithMetadataOnlyPayloadDSL = func() {
+	Service("ServiceClientStreamingRPCWithMetadataOnlyPayload", func() {
+		Method("MethodClientStreamingRPCWithMetadataOnlyPayload", func() {
+			Payload(func() {
+				Field(1, "token", String)
+				Required("token")
+			})
+			StreamingPayload(String)
+			Result(String)
+			GRPC(func() {
+				Metadata(func() {
+					Attribute("token")
+				})
+			})
+		})
+	})
+}
+
+var ClientStreamingRPCWithPayloadLegacyCompatDSL = func() {
+	Service("ServiceClientStreamingRPCWithPayloadLegacyCompat", func() {
+		Method("MethodClientStreamingRPCWithPayloadLegacyCompat", func() {
+			Meta("grpc:stream:compat", "v1")
+			Payload(Int)
+			StreamingPayload(Int)
+			Result(String)
+			GRPC(func() {})
+		})
+	})
+}
+
+var ClientStreamingRPCWithUnionPayloadDSL = func() {
+	var VersionRef = Type("VersionRef", func() {
+		OneOf("ref_type", func() {
+			Field(1, "version_id", String)
+			Field(2, "ref_name", String)
+		})
+		Required("ref_type")
+	})
+	var UploadChunk = Type("UploadChunk", func() {
+		Field(1, "chunk", Bytes)
+		Required("chunk")
+	})
+	Service("ServiceClientStreamingRPCWithUnionPayload", func() {
+		Method("MethodClientStreamingRPCWithUnionPayload", func() {
+			Payload(func() {
+				Field(1, "repository_id", String)
+				Field(2, "version_ref", VersionRef)
+				Required("repository_id", "version_ref")
+			})
+			StreamingPayload(UploadChunk)
 			Result(String)
 			GRPC(func() {})
 		})
@@ -277,6 +385,42 @@ var BidirectionalStreamingRPCWithPayloadDSL = func() {
 	})
 }
 
+var BidirectionalStreamingRPCWithPayloadLegacyCompatDSL = func() {
+	var PT = Type("Payload", func() {
+		Field(1, "a", Int)
+		Field(2, "b", String)
+	})
+	Service("ServiceBidirectionalStreamingRPCWithPayloadLegacyCompat", func() {
+		Method("MethodBidirectionalStreamingRPCWithPayloadLegacyCompat", func() {
+			Meta("grpc:stream:compat", "v1")
+			Payload(PT)
+			StreamingPayload(Int)
+			StreamingResult(UInt)
+			GRPC(func() {})
+		})
+	})
+}
+
+var BidirectionalStreamingRPCWithMetadataLegacyCompatDSL = func() {
+	var PT = Type("Payload", func() {
+		Field(1, "a", Int)
+		Field(2, "b", String)
+	})
+	Service("ServiceBidirectionalStreamingRPCWithMetadataLegacyCompat", func() {
+		Method("MethodBidirectionalStreamingRPCWithMetadataLegacyCompat", func() {
+			Meta("grpc:stream:compat", "v1")
+			Payload(PT)
+			StreamingPayload(Int)
+			StreamingResult(UInt)
+			GRPC(func() {
+				Metadata(func() {
+					Attribute("b")
+				})
+			})
+		})
+	})
+}
+
 var BidirectionalStreamingRPCWithErrorsDSL = func() {
 	Service("ServiceBidirectionalStreamingRPCWithErrors", func() {
 		Method("MethodBidirectionalStreamingRPCWithErrors", func() {
@@ -289,6 +433,40 @@ var BidirectionalStreamingRPCWithErrorsDSL = func() {
 				Response("timeout", CodeCanceled)
 				Response("internal", CodeUnknown)
 				Response(CodeInvalidArgument, "bad_request")
+			})
+		})
+	})
+}
+
+var ServerStreamingWithCustomErrorsDSL = func() {
+	// Custom error types for testing error handling in streaming
+	var CustomError = Type("CustomError", func() {
+		ErrorName(1, "name", String, "error name")
+		Field(2, "message", String, "error message")
+		Field(3, "code", Int, "error code")
+		Required("name", "message", "code")
+	})
+
+	var ValidationError = Type("ValidationError", func() {
+		ErrorName(1, "name", String, "error name")
+		Field(2, "field", String, "field that failed validation")
+		Field(3, "reason", String, "validation failure reason")
+		Required("name", "field", "reason")
+	})
+
+	Service("StreamingErrorService", func() {
+		Method("ServerStream", func() {
+			Payload(String)
+			StreamingResult(String)
+			Error("custom_error", CustomError, "Custom application error")
+			Error("validation_error", ValidationError, "Validation error")
+			Error("internal_error", func() {
+				Description("Internal server error")
+			})
+			GRPC(func() {
+				Response("custom_error", CodeInvalidArgument)
+				Response("validation_error", CodeFailedPrecondition)
+				Response("internal_error", CodeInternal)
 			})
 		})
 	})
@@ -371,6 +549,44 @@ var MessageUserTypeWithAliasMessageDSL = func() {
 	})
 }
 
+// RequiredPrimitivePresenceDSL defines required request and response fields
+// whose zero values must remain distinguishable from omitted protobuf fields.
+var RequiredPrimitivePresenceDSL = func() {
+	var StringAlias = Type("StringAlias", String)
+	var BytesAlias = Type("BytesAlias", Bytes)
+	var AnyAlias = Type("AnyAlias", Any)
+	var Message = Type("PresenceMessage", func() {
+		Field(1, "BooleanField", Boolean)
+		Field(2, "IntegerField", Int)
+		Field(3, "StringField", String)
+		Field(4, "BytesField", Bytes)
+		Field(5, "StringAliasField", StringAlias)
+		Field(6, "BytesAliasField", BytesAlias)
+		Field(7, "AnyAliasField", AnyAlias)
+		Required(
+			"BooleanField",
+			"IntegerField",
+			"StringField",
+			"BytesField",
+			"StringAliasField",
+			"BytesAliasField",
+			"AnyAliasField",
+		)
+	})
+	Service("RequiredPrimitivePresence", func() {
+		Method("Exchange", func() {
+			Payload(Message)
+			Result(Message)
+			GRPC(func() {})
+		})
+		Method("Echo", func() {
+			Payload(StringAlias)
+			Result(StringAlias)
+			GRPC(func() {})
+		})
+	})
+}
+
 var MessageUserTypeWithNestedUserTypesDSL = func() {
 	var UTLevel2 = Type("UTLevel2", func() {
 		Field(2, "Int64Field", Int64)
@@ -406,10 +622,7 @@ var MessageResultTypeWithViewsDSL = func() {
 		Attributes(func() {
 			Field(1, "IntField", Int)
 			Field(2, "StringField", String)
-		})
-		View("default", func() {
-			Attribute("IntField")
-			Attribute("StringField")
+			Required("IntField", "StringField")
 		})
 		View("tiny", func() {
 			Attribute("IntField")
@@ -429,6 +642,7 @@ var MessageResultTypeWithExplicitViewDSL = func() {
 		Attributes(func() {
 			Field(1, "IntField", Int)
 			Field(2, "StringField", String)
+			Required("IntField", "StringField")
 		})
 		View("default", func() {
 			Attribute("IntField")
@@ -523,6 +737,36 @@ var ResultWithCollectionDSL = func() {
 	})
 }
 
+var ResultWithAliasValidation = func() {
+	var UUID = Type("UUID", String, func() {
+		Format(FormatUUID)
+	})
+
+	Service("ServiceResultWithAliasValidation", func() {
+		Method("MethodResultWithAliasValidation", func() {
+			Result(UUID)
+			GRPC(func() {})
+		})
+	})
+}
+
+// ResultFieldNameCollisionDSL defines a required alias field whose Go name can
+// match the source parameter of the generated response conversion function.
+var ResultFieldNameCollisionDSL = func() {
+	var JSON = Type("JSON", String)
+	var ToolResult = Type("ToolResult", func() {
+		Field(1, "result", JSON)
+		Required("result")
+	})
+
+	Service("ResultFieldNameCollision", func() {
+		Method("show", func() {
+			Result(ToolResult)
+			GRPC(func() {})
+		})
+	})
+}
+
 var PayloadWithMixedAttributesDSL = func() {
 	var APayload = Type("APayload", func() {
 		Field(1, "optional", Int)
@@ -570,6 +814,34 @@ var PayloadWithNestedTypesDSL = func() {
 			GRPC(func() {
 				Response(CodeOK)
 			})
+		})
+	})
+}
+
+var PayloadWithMultipleUseTypesDSL = func() {
+	var DupePayload = Type("DupePayload", String)
+	Service("ServicePayloadWithNestedTypes", func() {
+		Method("MethodPayloadDuplicateA", func() {
+			Payload(DupePayload)
+			GRPC(func() {})
+		})
+		Method("MethodPayloadDuplicateB", func() {
+			Payload(DupePayload)
+			GRPC(func() {})
+		})
+	})
+}
+
+var PayloadWithCustomTypePackageDSL = func() {
+	var CustomType = Type("CustomType", func() {
+		Field(1, "Field", Int)
+		Meta("struct:pkg:path", "types")
+	})
+	Service("ServicePayloadWithCustomTypePackage", func() {
+		Method("MethodPayloadWithCustomTypePackage", func() {
+			Payload(CustomType)
+			Result(CustomType)
+			GRPC(func() {})
 		})
 	})
 }
@@ -715,6 +987,7 @@ var MessageWithValidateDSL = func() {
 }
 
 var MessageWithSecurityAttrsDSL = func() {
+	var Token = Type("Token", String)
 	var JWTAuth = JWTSecurity("jwt", func() {
 		Scope("api:read", "Read-only access")
 	})
@@ -725,7 +998,7 @@ var MessageWithSecurityAttrsDSL = func() {
 	})
 	var RequestUT = Type("RequestUT", func() {
 		Field(1, "BooleanField", Boolean)
-		TokenField(2, "token", String)
+		TokenField(2, "token", Token)
 		AccessTokenField(3, "oauth_token", String)
 		APIKey("api_key", "key", String)
 		Username("username", String)
@@ -740,6 +1013,32 @@ var MessageWithSecurityAttrsDSL = func() {
 					Attribute("oauth_token")
 				})
 			})
+		})
+	})
+}
+
+var NamedSecurityMetadataDSL = func() {
+	var Credential = Type("Credential", String)
+	var JWTAuth = JWTSecurity("jwt")
+	var APIKeyAuth = APIKeySecurity("api_key")
+	var BasicAuth = BasicAuthSecurity("basic")
+	var BearerAuth = BearerSecurity("bearer")
+	var OAuth2Auth = OAuth2Security("oauth2")
+	var Request = Type("NamedSecurityRequest", func() {
+		Field(1, "BooleanField", Boolean)
+		TokenField(2, "jwt_token", Credential)
+		AccessTokenField(3, "oauth_token", Credential)
+		APIKey("api_key", "key", Credential)
+		Username("username", Credential)
+		Password("password", Credential)
+		BearerTokenField(7, "bearer_token", Credential)
+		Required("jwt_token", "key", "username")
+	})
+	Service("NamedSecurityMetadata", func() {
+		Method("Authenticate", func() {
+			Security(JWTAuth, OAuth2Auth, APIKeyAuth, BasicAuth, BearerAuth)
+			Payload(Request)
+			GRPC(func() {})
 		})
 	})
 }
@@ -803,6 +1102,25 @@ var ServiceWithPackageDSL = func() {
 	})
 }
 
+var IdempotentRPCsDSL = func() {
+	Service("IdempotentRPCs", func() {
+		Method("read", func() {
+			Idempotent()
+			Error("busy", func() {
+				Temporary()
+			})
+			GRPC(func() {
+				Response("busy", CodeUnavailable)
+			})
+		})
+		Method("stream", func() {
+			Idempotent()
+			StreamingResult(String)
+			GRPC(func() {})
+		})
+	})
+}
+
 var PayloadWithValidationsDSL = func() {
 	Service("PayloadWithValidation", func() {
 		Method("method_a", func() {
@@ -822,6 +1140,197 @@ var PayloadWithValidationsDSL = func() {
 					Attribute("MetadataString")
 				})
 			})
+		})
+	})
+}
+
+var PayloadWithMessageDSL = func() {
+	Service("PayloadWithMessage", func() {
+		Method("show", func() {
+			Payload(func() {
+				Field(1, "tenantID", String, func() {
+					Example("tenant")
+				})
+				Field(2, "recordID", String, func() {
+					Example("record")
+				})
+				Required("tenantID", "recordID")
+			})
+			GRPC(func() {})
+		})
+	})
+}
+
+var StructMetaTypeDSL = func() {
+	Service("UsingMetaTypes", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Field(1, "a", Int64, func() {
+					Meta("struct:field:type", "flag.ErrorHandling", "flag")
+					Default(1)
+				})
+				Field(2, "b", Int64, func() {
+					Meta("struct:field:type", "flag.ErrorHandling", "flag")
+					Default(2)
+				})
+				Field(3, "c", ArrayOf(Int64), func() {
+					Elem(func() {
+						Meta("struct:field:type", "time.Duration", "time")
+					})
+				})
+				Field(4, "d", Int64, func() {
+					Meta("struct:field:type", "flag.ErrorHandling", "flag")
+				})
+			})
+			Result(func() {
+				Field(1, "a", Int64, func() {
+					Meta("struct:field:type", "flag.ErrorHandling", "flag")
+					Default(1)
+				})
+				Field(2, "b", Int64, func() {
+					Meta("struct:field:type", "flag.ErrorHandling", "flag")
+					Default(2)
+				})
+				Field(3, "c", ArrayOf(Int64), func() {
+					Elem(func() {
+						Meta("struct:field:type", "time.Duration", "time")
+					})
+				})
+				Field(4, "d", Int64, func() {
+					Meta("struct:field:type", "flag.ErrorHandling", "flag")
+				})
+			})
+			GRPC(func() {})
+		})
+	})
+}
+
+var StructFieldNameMetaTypeDSL = func() {
+	Service("UsingMetaTypes", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Field(1, "a", Int64, func() {
+					Meta("struct:field:name", "Foo")
+					Default(1)
+				})
+				Field(2, "b", ArrayOf(Int64), func() {
+					Meta("struct:field:name", "Bar")
+				})
+				Required("b")
+			})
+			Result(func() {
+				Field(1, "a", Int64, func() {
+					Meta("struct:field:name", "Foo")
+					Default(1)
+				})
+				Field(2, "b", ArrayOf(Int64), func() {
+					Meta("struct:field:name", "Bar")
+				})
+				Required("b")
+			})
+			GRPC(func() {})
+		})
+	})
+}
+
+var DefaultFieldsDSL = func() {
+	Service("DefaultFields", func() {
+		Method("Method", func() {
+			Payload(func() {
+				Field(1, "req", Int64)
+				Field(2, "opt", Int64)
+				Field(3, "def0", Int64, func() { Default(0) })
+				Field(4, "def1", Int64, func() { Default(1) })
+				Field(5, "def2", Int64, func() { Default(2) })
+				Field(6, "reqs", String)
+				Field(7, "opts", String)
+				Field(8, "defs", String, func() { Default("!") })
+				Field(9, "defe", String, func() { Default("") })
+				Field(10, "rat", Float64)
+				Field(11, "flt", Float64)
+				Field(12, "flt0", Float64, func() { Default(0.0) })
+				Field(13, "flt1", Float64, func() { Default(1.0) })
+				Required("req", "reqs", "rat")
+			})
+			GRPC(func() {})
+		})
+	})
+}
+
+var CustomMessageNameDSL = func() {
+	var CustomType = Type("CustomType", func() {
+		Meta("struct:name:proto", "CustomType")
+		Field(1, "a", Int)
+		Field(2, "b", String)
+	})
+	Service("CustomMessageName", func() {
+		Method("Unary", func() {
+			Payload(CustomType)
+			Result(CustomType)
+			GRPC(func() {})
+		})
+		Method("Stream", func() {
+			StreamingPayload(CustomType)
+			StreamingResult(CustomType)
+			GRPC(func() {})
+		})
+	})
+}
+
+var DistinctCustomMessageNamesDSL = func() {
+	var First = Type("First", func() {
+		Meta("struct:name:proto", "Shared")
+		Field(1, "value", String)
+	})
+	var Second = Type("Second", func() {
+		Meta("struct:name:proto", "Shared")
+		Field(1, "value", String)
+	})
+	Service("DistinctCustomMessageNames", func() {
+		Method("UseFirst", func() {
+			Payload(First)
+			Result(First)
+			GRPC(func() {})
+		})
+		Method("UseSecond", func() {
+			Payload(Second)
+			Result(Second)
+			GRPC(func() {})
+		})
+	})
+}
+
+var InterceptorsDSL = func() {
+	var LogInterceptor = Interceptor("Log", func() {
+		Description("Logs request and response details")
+	})
+	var MetricsInterceptor = Interceptor("Metrics", func() {
+		Description("Collects metrics for the operation")
+	})
+
+	API("TestAPI", func() {
+		Title("Test API")
+		Server("Test", func() {
+			Description("Test server")
+		})
+	})
+
+	Service("ServiceWithInterceptors", func() {
+		ClientInterceptor(LogInterceptor)
+		Method("MethodA", func() {
+			ClientInterceptor(MetricsInterceptor)
+			Payload(String, func() {
+				Example("hello")
+			})
+			Result(String)
+			GRPC(func() {})
+		})
+		Method("MethodB", func() {
+			Payload(Int, func() {
+				Example(42)
+			})
+			Result(Int)
+			GRPC(func() {})
 		})
 	})
 }

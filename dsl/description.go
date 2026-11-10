@@ -8,16 +8,16 @@ import (
 // Description sets the expression description.
 //
 // Description may appear in API, Docs, Type or Attribute.
-// Description may also appear in Response and Files.
+// Description may also appear in Response and Files, or any expression
+// implementing DescriptionHolder.
 //
-// Description accepts one arguments: the description string.
+// Description accepts one argument: the description string.
 //
 // Example:
 //
-//    API("adder", func() {
-//        Description("Adder API")
-//    })
-//
+//	API("adder", func() {
+//	    Description("Adder API")
+//	})
 func Description(d string) {
 	switch e := eval.Current().(type) {
 	case *expr.APIExpr:
@@ -28,6 +28,8 @@ func Description(d string) {
 		e.Description = d
 	case *expr.ServiceExpr:
 		e.Description = d
+	case *expr.UserTypeExpr:
+		e.Attribute().Description = d
 	case *expr.ResultTypeExpr:
 		e.Description = d
 	case *expr.AttributeExpr:
@@ -42,10 +44,18 @@ func Description(d string) {
 		e.Description = d
 	case *expr.HTTPResponseExpr:
 		e.Description = d
+	case *expr.HTTPErrorExpr:
+		e.Response.Description = d
 	case *expr.HTTPFileServerExpr:
 		e.Description = d
 	case *expr.GRPCResponseExpr:
 		e.Description = d
+	case *expr.GRPCErrorExpr:
+		e.Response.Description = d
+	case *expr.InterceptorExpr:
+		e.Description = d
+	case expr.DescriptionHolder:
+		e.SetDescription(d)
 	default:
 		eval.IncompatibleDSL()
 	}

@@ -2,11 +2,14 @@ package expr
 
 import (
 	"regexp"
+
+	"goa.design/goa/v3/eval"
 )
 
 type (
 	// HTTPExpr contains the API level HTTP specific expressions.
 	HTTPExpr struct {
+		eval.DSLFunc
 		// Path is the common request path prefix to all the service
 		// HTTP endpoints.
 		Path string
@@ -29,12 +32,15 @@ type (
 		Services []*HTTPServiceExpr
 		// Errors lists the error HTTP responses.
 		Errors []*HTTPErrorExpr
+		// SSE contains the Server-Sent Events configuration for all
+		// streaming endpoints in the API.
+		SSE *HTTPSSEExpr
 	}
 )
 
 // HTTPWildcardRegex is the regular expression used to capture path
 // parameters.
-var HTTPWildcardRegex = regexp.MustCompile(`/{\*?([a-zA-Z0-9_]+)}`)
+var HTTPWildcardRegex = regexp.MustCompile(`{\*?([a-zA-Z0-9_]+)}`)
 
 // ExtractHTTPWildcards returns the names of the wildcards that appear in
 // a HTTP path.
@@ -59,19 +65,20 @@ func (h *HTTPExpr) Service(name string) *HTTPServiceExpr {
 
 // ServiceFor creates a new or returns the existing service definition for the
 // given service.
-func (h *HTTPExpr) ServiceFor(s *ServiceExpr) *HTTPServiceExpr {
+func (h *HTTPExpr) ServiceFor(s *ServiceExpr, root *HTTPExpr) *HTTPServiceExpr {
 	if res := h.Service(s.Name); res != nil {
 		return res
 	}
 	res := &HTTPServiceExpr{
 		ServiceExpr: s,
+		Root:        root,
 	}
 	h.Services = append(h.Services, res)
 	return res
 }
 
 // EvalName returns the name printed in case of evaluation error.
-func (h *HTTPExpr) EvalName() string {
+func (*HTTPExpr) EvalName() string {
 	return "API HTTP"
 }
 

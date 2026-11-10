@@ -15,6 +15,19 @@ var DescOnly = func(svc, met, desc string) func() {
 	}
 }
 
+var DeprecatedOnly = func(svc, met string) func() {
+	return func() {
+		var _ = Service(svc, func() {
+			Method(met, func() {
+				HTTP(func() {
+					GET("/")
+					Deprecated()
+				})
+			})
+		})
+	}
+}
+
 var RequestStringBody = func(svc, met string) func() {
 	return func() {
 		var _ = Service(svc, func() {
@@ -39,6 +52,22 @@ var RequestObjectBody = func(svc, met string) func() {
 				})
 				HTTP(func() {
 					POST("/")
+				})
+			})
+		})
+	}
+}
+
+var RequestMapParams = func(svc, met string) func() {
+	return func() {
+		var _ = Service(svc, func() {
+			Method(met, func() {
+				Payload(func() {
+					Attribute("param", MapOf(String, String))
+				})
+				HTTP(func() {
+					POST("/")
+					MapParams("param")
 				})
 			})
 		})
@@ -153,6 +182,93 @@ var ResponseRecursiveArrayUserType = func(svc, met string) func() {
 				Result(arrResultType)
 				HTTP(func() {
 					GET("/")
+				})
+			})
+		})
+	}
+}
+
+var ResponseSkipResponseBodyEncodeDecode = func(svc, met string) func() {
+	return func() {
+		var _ = Service(svc, func() {
+			Method(met, func() {
+				Result(Empty)
+				HTTP(func() {
+					GET("/")
+					SkipResponseBodyEncodeDecode()
+				})
+			})
+		})
+	}
+}
+
+var OperationIDStatic = func(svc, met string) func() {
+	return func() {
+		var _ = Service(svc, func() {
+			Method(met, func() {
+				Meta("openapi:operationId", "staticOperationId")
+
+				HTTP(func() {
+					GET("/")
+				})
+			})
+		})
+	}
+}
+
+var OperationIDMethod = func(svc, met, tmpl string) func() {
+	return func() {
+		var _ = Service(svc, func() {
+			Method(met, func() {
+				Meta("openapi:operationId", tmpl)
+
+				HTTP(func() {
+					GET("/")
+				})
+			})
+		})
+	}
+}
+
+var OperationIDService = func(svc, met, tmpl string) func() {
+	return func() {
+		var _ = Service(svc, func() {
+			Meta("openapi:operationId", tmpl)
+
+			Method(met, func() {
+				HTTP(func() {
+					GET("/")
+				})
+			})
+		})
+	}
+}
+
+var OperationIDAPI = func(svc, met, tmpl string) func() {
+	return func() {
+		var _ = API("test api", func() {
+			Meta("openapi:operationId", tmpl)
+		})
+
+		var _ = Service(svc, func() {
+			Method(met, func() {
+				HTTP(func() {
+					GET("/")
+				})
+			})
+		})
+	}
+}
+
+var OperationIDMultipleRoutes = func(svc, met, tmpl string) func() {
+	return func() {
+		var _ = Service(svc, func() {
+			Method(met, func() {
+				Meta("openapi:operationId", tmpl)
+
+				HTTP(func() {
+					GET("/")
+					POST("/another")
 				})
 			})
 		})

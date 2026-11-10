@@ -1,0 +1,12 @@
+func transform() {
+	target := &proto.ResultTypeCollection{}
+	if source.Collection != nil {
+		target.Collection = make([]*proto.ResultType, len(source.Collection.Field))
+		for i, val := range source.Collection.Field {
+			if val == nil {
+				continue
+			}
+			target.Collection[i] = protobufProtoResultTypeToProtoResultType(val)
+		}
+	}
+}

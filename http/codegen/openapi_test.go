@@ -1,10 +1,15 @@
+// This file verifies HTTP OpenAPI generation uses prepared service data and
+// run-owned example streams without mutating the evaluated design.
 package codegen
 
 import (
 	"path/filepath"
 	"testing"
 
-	openapi "goa.design/goa/v3/http/codegen/openapi"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"goa.design/goa/v3/expr"
 	"goa.design/goa/v3/http/codegen/testdata"
 )
 
@@ -17,44 +22,67 @@ func TestOpenAPI(t *testing.T) {
 		"valid": {DSL: testdata.SimpleDSL, NilSpec: false},
 	}
 	for k, c := range cases {
-		// Reset global variables
-		openapi.Definitions = make(map[string]*openapi.Schema)
-		root := RunHTTPDSL(t, c.DSL)
-		spec, err := OpenAPIFiles(root)
-		if err != nil {
-			t.Fatalf("OpenAPI failed with %s", err)
-		}
-		if spec == nil && !c.NilSpec {
-			t.Errorf("%s: unexpected specs: got nil, expected non-nil", k)
-		}
-		if spec != nil && c.NilSpec {
-			t.Errorf("%s: unexpected specs: got non-nil, expected nil", k)
-		}
+		root := expr.RunDSL(t, c.DSL)
+		plan, err := NewOpenAPIPlan(root, expr.NewExampleGenerator(root.API.RandomizerFactory))
+		require.NoError(t, err)
+		assert.Equal(t, c.NilSpec, len(plan.Files()) == 0, k)
 	}
 }
 
 func TestOutputPath(t *testing.T) {
-	// Reset global variables
-	openapi.Definitions = make(map[string]*openapi.Schema)
-	root := RunHTTPDSL(t, testdata.SimpleDSL)
-	o, err := OpenAPIFiles(root)
-	if err != nil {
-		t.Fatalf("OpenAPI failed with %s", err)
-	}
-	c := 4 // number of files we expect
-	if len(o) != c {
-		t.Fatalf("unexpected number of OpenAPI files %d instead of %d", len(o), c)
-	}
-	if o[0].Path != filepath.Join("gen", "http", "openapi.json") {
-		t.Errorf("invalid output path %#v", o[0].Path)
-	}
-	if o[1].Path != filepath.Join("gen", "http", "openapi.yaml") {
-		t.Errorf("invalid output path %#v", o[1].Path)
-	}
-	if o[2].Path != filepath.Join("gen", "http", "openapi3.json") {
-		t.Errorf("invalid output path %#v", o[2].Path)
-	}
-	if o[3].Path != filepath.Join("gen", "http", "openapi3.yaml") {
-		t.Errorf("invalid output path %#v", o[3].Path)
+	cases := []struct {
+		Name  string
+		DSL   func()
+		Paths []string
+		Err   string
+	}{{
+		Name: "default",
+		DSL:  testdata.SimpleDSL,
+		Paths: []string{
+			filepath.Join("gen", "http", "openapi.json"),
+			filepath.Join("gen", "http", "openapi.yaml"),
+			filepath.Join("gen", "http", "openapi3.json"),
+			filepath.Join("gen", "http", "openapi3.yaml"),
+			filepath.Join("gen", "http", "openapi3.2.json"),
+			filepath.Join("gen", "http", "openapi3.2.yaml"),
+		},
+	}, {
+		Name: "versions subset",
+		DSL:  testdata.OpenAPIVersionsSubsetDSL,
+		Paths: []string{
+			filepath.Join("gen", "http", "openapi3.2.json"),
+			filepath.Join("gen", "http", "openapi3.2.yaml"),
+		},
+	}, {
+		Name: "path override",
+		DSL:  testdata.OpenAPIPathOverrideDSL,
+		Paths: []string{
+			filepath.Join("gen", "http", "openapi.json"),
+			filepath.Join("gen", "http", "openapi.yaml"),
+			filepath.Join("gen", "http", "openapi3.json"),
+			filepath.Join("gen", "http", "openapi3.yaml"),
+			filepath.Join("gen", "docs", "openapi.json"),
+			filepath.Join("gen", "docs", "openapi.yaml"),
+		},
+	}, {
+		Name: "invalid version",
+		DSL:  testdata.OpenAPIInvalidVersionDSL,
+		Err:  `invalid value "4.0" for meta "openapi:versions": valid values are "2.0", "3.0" and "3.2"`,
+	}}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			root := expr.RunDSL(t, c.DSL)
+			plan, err := NewOpenAPIPlan(root, expr.NewExampleGenerator(root.API.RandomizerFactory))
+			if c.Err != "" {
+				require.EqualError(t, err, c.Err)
+				return
+			}
+			require.NoError(t, err)
+			o := plan.Files()
+			require.Len(t, o, len(c.Paths))
+			for i, p := range c.Paths {
+				assert.Equal(t, p, o[i].Path)
+			}
+		})
 	}
 }
